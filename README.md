@@ -42,7 +42,7 @@ To build the project use `make build` from your terminal. The output of the buil
 
 ### How to run tests
 
-The project provides both unit tests (using `make test-unit`) and integration tests (using `make test-unit`);
+The project provides both unit tests (using `make test-unit`) and integration tests (using `make test-integration`);
 
 Notes:
 - `make test-unit` runs fast unit tests in `./internal/...`.

@@ -2,6 +2,8 @@
 
 TiDB GraphQL allows you to provide a rapid GraphQL API for your TiDB database.
 
+*This project is experimental!*
+
 TiDB GraphQL is a SQL-first GraphQL server for TiDB. It introspects a live TiDB schema and exposes a GraphQL API over that schema.
 
 The goal of the project is to explore a SQL-first approach to GraphQL with practical guardrails, so teams can get useful access quickly without handcrafting every GraphQL resolver.

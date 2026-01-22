@@ -1,0 +1,2 @@
+ALTER TABLE products
+  ADD COLUMN sku VARCHAR(64) NULL;

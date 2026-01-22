@@ -1,0 +1,13 @@
+database:
+  host: testhost
+  port: 3306
+  user: testuser
+  password: testpass
+  database: testdb
+  max_open_conns: 10
+  max_idle_conns: 2
+  conn_max_lifetime: 3m
+
+server:
+  port: 9090
+  graphql_max_depth: 10

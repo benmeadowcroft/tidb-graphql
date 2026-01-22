@@ -1,0 +1,60 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Environment variables
+.env
+.env.test
+*.env.*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local caches
+.cache/
+
+# Auth keys
+.auth/
+
+# TLS certificates
+.tls/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.ppk
+
+# Configuration files (may contain secrets)
+tidb-graphql.yaml
+tidb-graphql.yml
+tidb-graphql.local.yaml
+tidb-graphql.local.yml
+tidb-graphql.cloud.yaml
+tidb-graphql.cloud.yml

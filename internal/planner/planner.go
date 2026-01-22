@@ -1,0 +1,516 @@
+// Package planner converts GraphQL queries into parameterized SQL statements.
+// It handles table lookups, relationship resolution, filtering, ordering, and pagination
+// while enforcing query cost limits to prevent expensive operations.
+package planner
+
+import (
+	"fmt"
+	"strings"
+
+	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/sqlutil"
+
+	sq "github.com/Masterminds/squirrel"
+)
+
+// SQLQuery represents a planned SQL statement with bound args.
+type SQLQuery struct {
+	SQL  string
+	Args []interface{}
+}
+
+// PlanTableList builds the SQL for a top-level table list query.
+func PlanTableList(table introspection.Table, columns []introspection.Column, limit, offset int, orderBy *OrderBy, whereClause *WhereClause) (SQLQuery, error) {
+	if err := validateLimitOffset(limit, offset); err != nil {
+		return SQLQuery{}, err
+	}
+	builder := sq.Select(columnNames(table, columns)...).
+		From(sqlutil.QuoteIdentifier(table.Name))
+
+	// Add WHERE clause if provided
+	if whereClause != nil && whereClause.Condition != nil {
+		builder = builder.Where(whereClause.Condition)
+	}
+
+	if orderBy != nil {
+		builder = builder.OrderBy(orderByClauses(orderBy)...)
+	}
+
+	query, args, err := builder.
+		Limit(uint64(limit)).
+		Offset(uint64(offset)).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanTableByPK builds the SQL for a single-column primary key lookup.
+func PlanTableByPK(table introspection.Table, columns []introspection.Column, pk *introspection.Column, pkValue interface{}) (SQLQuery, error) {
+	query, args, err := sq.Select(columnNames(table, columns)...).
+		From(sqlutil.QuoteIdentifier(table.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(pk.Name): pkValue}).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanTableByPKColumns builds the SQL for a composite primary key lookup.
+func PlanTableByPKColumns(table introspection.Table, columns []introspection.Column, pkCols []introspection.Column, values map[string]interface{}) (SQLQuery, error) {
+	whereClause := sq.Eq{}
+	for _, pk := range pkCols {
+		value, ok := values[pk.Name]
+		if !ok {
+			return SQLQuery{}, fmt.Errorf("missing value for primary key column %s", pk.Name)
+		}
+		whereClause[sqlutil.QuoteIdentifier(pk.Name)] = value
+	}
+
+	query, args, err := sq.Select(columnNames(table, columns)...).
+		From(sqlutil.QuoteIdentifier(table.Name)).
+		Where(whereClause).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanUniqueKeyLookup builds the SQL for a unique index lookup.
+func PlanUniqueKeyLookup(table introspection.Table, columns []introspection.Column, idx introspection.Index, values map[string]interface{}) (SQLQuery, error) {
+	// Build WHERE clause for all columns in the unique index
+	whereClause := sq.Eq{}
+	for _, colName := range idx.Columns {
+		value, ok := values[colName]
+		if !ok {
+			return SQLQuery{}, fmt.Errorf("missing value for unique key column %s", colName)
+		}
+		whereClause[sqlutil.QuoteIdentifier(colName)] = value
+	}
+
+	query, args, err := sq.Select(columnNames(table, columns)...).
+		From(sqlutil.QuoteIdentifier(table.Name)).
+		Where(whereClause).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanManyToOne builds the SQL for a many-to-one lookup (FK -> parent table).
+func PlanManyToOne(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, fkValue interface{}) (SQLQuery, error) {
+	query, args, err := sq.Select(columnNames(relatedTable, columns)...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue}).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanManyToOneBatch builds the SQL for a batched many-to-one lookup (FK -> parent table).
+func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, values []interface{}) (SQLQuery, error) {
+	if len(values) == 0 {
+		return SQLQuery{}, nil
+	}
+
+	query, args, err := sq.Select(columnNames(relatedTable, columns)...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): values}).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanOneToMany builds the SQL for a one-to-many lookup (parent PK -> child table).
+func PlanOneToMany(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, pkValue interface{}, limit, offset int, orderBy *OrderBy) (SQLQuery, error) {
+	if err := validateLimitOffset(limit, offset); err != nil {
+		return SQLQuery{}, err
+	}
+	builder := sq.Select(columnNames(relatedTable, columns)...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): pkValue})
+
+	if orderBy != nil {
+		builder = builder.OrderBy(orderByClauses(orderBy)...)
+	}
+
+	query, args, err := builder.
+		Limit(uint64(limit)).
+		Offset(uint64(offset)).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanManyToMany builds the SQL for a many-to-many relationship through a pure junction table.
+// It joins the target table through the junction to find all related entities.
+func PlanManyToMany(
+	junctionTable string,
+	targetTable introspection.Table,
+	junctionLocalFK string,
+	junctionRemoteFK string,
+	targetPK string,
+	localPKValue interface{},
+	limit, offset int,
+) (SQLQuery, error) {
+	if err := validateLimitOffset(limit, offset); err != nil {
+		return SQLQuery{}, err
+	}
+
+	cols := columnNames(targetTable, targetTable.Columns)
+	columnList := strings.Join(cols, ", ")
+
+	// Build query: SELECT target.* FROM target
+	// JOIN junction ON junction.remote_fk = target.pk
+	// WHERE junction.local_fk = ?
+	// LIMIT ? OFFSET ?
+	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
+	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
+	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
+	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
+	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
+
+	query := fmt.Sprintf(
+		"SELECT %s FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s = ? LIMIT ? OFFSET ?",
+		columnList,
+		quotedTarget,
+		quotedJunction,
+		quotedJunction, quotedRemoteFK,
+		quotedTarget, quotedTargetPK,
+		quotedJunction, quotedLocalFK,
+	)
+
+	return SQLQuery{SQL: query, Args: []interface{}{localPKValue, limit, offset}}, nil
+}
+
+// PlanEdgeList builds the SQL for retrieving junction table rows (edge list).
+// This is used for attribute junctions where we want to return the junction row
+// with its extra columns, not just the related entity.
+func PlanEdgeList(
+	junctionTable introspection.Table,
+	junctionLocalFK string,
+	localPKValue interface{},
+	limit, offset int,
+) (SQLQuery, error) {
+	if err := validateLimitOffset(limit, offset); err != nil {
+		return SQLQuery{}, err
+	}
+
+	query, args, err := sq.Select(columnNames(junctionTable, junctionTable.Columns)...).
+		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): localPKValue}).
+		Limit(uint64(limit)).
+		Offset(uint64(offset)).
+		PlaceholderFormat(sq.Question).
+		ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanOneToManyBatch builds a batched SQL query with per-parent limits.
+func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, values []interface{}, limit, offset int, orderBy *OrderBy) (SQLQuery, error) {
+	if len(values) == 0 {
+		return SQLQuery{}, nil
+	}
+	if err := validateLimitOffset(limit, offset); err != nil {
+		return SQLQuery{}, err
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(relatedTable)
+	if len(pkCols) == 0 {
+		return SQLQuery{}, fmt.Errorf("no primary key for table %s", relatedTable.Name)
+	}
+
+	cols := columnNames(relatedTable, columns)
+	columnList := strings.Join(cols, ", ")
+	placeholders := sq.Placeholders(len(values))
+
+	// Build ORDER BY clause from all primary key columns (for composite PKs)
+	var pkOrderClauses []string
+	for _, pk := range pkCols {
+		pkOrderClauses = append(pkOrderClauses, sqlutil.QuoteIdentifier(pk.Name))
+	}
+	orderClause := strings.Join(pkOrderClauses, ", ")
+	if orderBy != nil && len(orderBy.Columns) > 0 {
+		orderClause = strings.Join(orderByClauses(orderBy), ", ")
+	}
+
+	quotedRemoteColumn := sqlutil.QuoteIdentifier(remoteColumn)
+	quotedTable := sqlutil.QuoteIdentifier(relatedTable.Name)
+	// Unfortunately as these are column lists, we can't use Squirrel to build
+	// the query so need to create it directly.
+	query := fmt.Sprintf(
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ?",
+		columnList,
+		columnList,
+		quotedRemoteColumn,
+		orderClause,
+		quotedTable,
+		quotedRemoteColumn,
+		placeholders,
+	)
+
+	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+func columnNames(table introspection.Table, columns []introspection.Column) []string {
+	cols := columns
+	if len(cols) == 0 {
+		cols = table.Columns
+	}
+	names := make([]string, len(cols))
+	for i, col := range cols {
+		names[i] = sqlutil.QuoteIdentifier(col.Name)
+	}
+	return names
+}
+
+func orderByClauses(orderBy *OrderBy) []string {
+	if orderBy == nil {
+		return nil
+	}
+	clauses := make([]string, len(orderBy.Columns))
+	for i, col := range orderBy.Columns {
+		clauses[i] = fmt.Sprintf("%s %s", sqlutil.QuoteIdentifier(col), orderBy.Direction)
+	}
+	return clauses
+}
+
+// WhereClause represents a parsed WHERE condition
+type WhereClause struct {
+	Condition   sq.Sqlizer
+	UsedColumns []string
+}
+
+// BuildWhereClause parses a GraphQL WHERE input into a SQL WHERE clause
+// Returns the condition and a list of columns used (for indexed validation)
+func BuildWhereClause(table introspection.Table, whereInput map[string]interface{}) (*WhereClause, error) {
+	if len(whereInput) == 0 {
+		return nil, nil
+	}
+
+	condition, usedCols, err := buildWhereCondition(table, whereInput)
+	if err != nil {
+		return nil, err
+	}
+
+	return &WhereClause{
+		Condition:   condition,
+		UsedColumns: usedCols,
+	}, nil
+}
+
+// buildWhereCondition recursively builds WHERE conditions with AND/OR support
+func buildWhereCondition(table introspection.Table, whereInput map[string]interface{}) (sq.Sqlizer, []string, error) {
+	usedColumns := []string{}
+	conditions := []sq.Sqlizer{}
+
+	for key, value := range whereInput {
+		switch key {
+		case "AND":
+			// Handle AND array
+			andArray, ok := value.([]interface{})
+			if !ok {
+				return nil, nil, fmt.Errorf("AND must be an array")
+			}
+			andConditions := []sq.Sqlizer{}
+			for _, item := range andArray {
+				itemMap, ok := item.(map[string]interface{})
+				if !ok {
+					return nil, nil, fmt.Errorf("AND array items must be objects")
+				}
+				cond, cols, err := buildWhereCondition(table, itemMap)
+				if err != nil {
+					return nil, nil, err
+				}
+				if cond != nil {
+					andConditions = append(andConditions, cond)
+					usedColumns = append(usedColumns, cols...)
+				}
+			}
+			if len(andConditions) > 0 {
+				conditions = append(conditions, sq.And(andConditions))
+			}
+
+		case "OR":
+			// Handle OR array
+			orArray, ok := value.([]interface{})
+			if !ok {
+				return nil, nil, fmt.Errorf("OR must be an array")
+			}
+			orConditions := []sq.Sqlizer{}
+			for _, item := range orArray {
+				itemMap, ok := item.(map[string]interface{})
+				if !ok {
+					return nil, nil, fmt.Errorf("OR array items must be objects")
+				}
+				cond, cols, err := buildWhereCondition(table, itemMap)
+				if err != nil {
+					return nil, nil, err
+				}
+				if cond != nil {
+					orConditions = append(orConditions, cond)
+					usedColumns = append(usedColumns, cols...)
+				}
+			}
+			if len(orConditions) > 0 {
+				conditions = append(conditions, sq.Or(orConditions))
+			}
+
+		default:
+			// Handle regular column filters
+			col := findColumnByGraphQLName(table, key)
+			if col == nil {
+				return nil, nil, fmt.Errorf("unknown column: %s", key)
+			}
+			usedColumns = append(usedColumns, col.Name)
+
+			filterMap, ok := value.(map[string]interface{})
+			if !ok {
+				return nil, nil, fmt.Errorf("filter for %s must be an object", key)
+			}
+
+			colConditions, err := buildColumnFilter(col.Name, filterMap)
+			if err != nil {
+				return nil, nil, err
+			}
+			conditions = append(conditions, colConditions...)
+		}
+	}
+
+	if len(conditions) == 0 {
+		return nil, usedColumns, nil
+	}
+	if len(conditions) == 1 {
+		return conditions[0], usedColumns, nil
+	}
+	return sq.And(conditions), usedColumns, nil
+}
+
+// buildColumnFilter builds filter conditions for a specific column
+func buildColumnFilter(colName string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+	conditions := []sq.Sqlizer{}
+	quotedColumn := sqlutil.QuoteIdentifier(colName)
+
+	for op, value := range filterMap {
+		switch op {
+		case "eq":
+			conditions = append(conditions, sq.Eq{quotedColumn: value})
+		case "ne":
+			conditions = append(conditions, sq.NotEq{quotedColumn: value})
+		case "lt":
+			conditions = append(conditions, sq.Lt{quotedColumn: value})
+		case "lte":
+			conditions = append(conditions, sq.LtOrEq{quotedColumn: value})
+		case "gt":
+			conditions = append(conditions, sq.Gt{quotedColumn: value})
+		case "gte":
+			conditions = append(conditions, sq.GtOrEq{quotedColumn: value})
+		case "in":
+			// Convert []interface{} to proper format
+			if arr, ok := value.([]interface{}); ok {
+				conditions = append(conditions, sq.Eq{quotedColumn: arr})
+			} else {
+				return nil, fmt.Errorf("in operator requires an array")
+			}
+		case "notIn":
+			if arr, ok := value.([]interface{}); ok {
+				conditions = append(conditions, sq.NotEq{quotedColumn: arr})
+			} else {
+				return nil, fmt.Errorf("notIn operator requires an array")
+			}
+		case "like":
+			conditions = append(conditions, sq.Like{quotedColumn: value})
+		case "notLike":
+			conditions = append(conditions, sq.NotLike{quotedColumn: value})
+		case "isNull":
+			if boolVal, ok := value.(bool); ok {
+				if boolVal {
+					conditions = append(conditions, sq.Eq{quotedColumn: nil})
+				} else {
+					conditions = append(conditions, sq.NotEq{quotedColumn: nil})
+				}
+			} else {
+				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+		default:
+			return nil, fmt.Errorf("unknown filter operator: %s", op)
+		}
+	}
+
+	return conditions, nil
+}
+
+// findColumnByGraphQLName finds a column in the table by its GraphQL field name
+func findColumnByGraphQLName(table introspection.Table, graphQLName string) *introspection.Column {
+	for i := range table.Columns {
+		if introspection.GraphQLFieldName(table.Columns[i]) == graphQLName {
+			return &table.Columns[i]
+		}
+	}
+	return nil
+}
+
+// ValidateIndexedColumns checks if at least one indexed column is used in the WHERE clause
+func ValidateIndexedColumns(table introspection.Table, usedColumns []string) error {
+	if len(usedColumns) == 0 {
+		return nil // No WHERE clause, no validation needed
+	}
+
+	// Collect all indexed columns
+	indexedColumns := make(map[string]bool)
+	for _, idx := range table.Indexes {
+		for _, col := range idx.Columns {
+			indexedColumns[col] = true
+		}
+	}
+
+	// Check if any used column is indexed
+	for _, col := range usedColumns {
+		if indexedColumns[col] {
+			return nil // At least one indexed column found
+		}
+	}
+
+	return fmt.Errorf(
+		"where clause must include at least one indexed column for performance",
+	)
+}
+
+func validateLimitOffset(limit, offset int) error {
+	if limit < 0 {
+		return fmt.Errorf("limit must be non-negative")
+	}
+	if offset < 0 {
+		return fmt.Errorf("offset must be non-negative")
+	}
+	return nil
+}

@@ -1,0 +1,217 @@
+package middleware
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"tidb-graphql/internal/logging"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestLoggingMiddleware(t *testing.T) {
+	tests := []struct {
+		name            string
+		method          string
+		path            string
+		statusCode      int
+		expectedLevel   string
+		requestID       string
+		expectRequestID bool
+	}{
+		{
+			name:            "successful request logs info",
+			method:          "GET",
+			path:            "/test",
+			statusCode:      200,
+			expectedLevel:   "INFO",
+			expectRequestID: true,
+		},
+		{
+			name:            "client error logs warn",
+			method:          "POST",
+			path:            "/error",
+			statusCode:      400,
+			expectedLevel:   "WARN",
+			expectRequestID: true,
+		},
+		{
+			name:            "server error logs error",
+			method:          "PUT",
+			path:            "/fail",
+			statusCode:      500,
+			expectedLevel:   "ERROR",
+			expectRequestID: true,
+		},
+		{
+			name:            "preserves existing request ID",
+			method:          "GET",
+			path:            "/test",
+			statusCode:      200,
+			expectedLevel:   "INFO",
+			requestID:       "test-request-123",
+			expectRequestID: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a buffer to capture log output
+			var logBuf bytes.Buffer
+			logger := &logging.Logger{
+				Logger: slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
+					Level: slog.LevelDebug,
+				})),
+			}
+
+			// Create test handler that returns the specified status code
+			testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Verify request ID is in context
+				reqID := logging.GetRequestID(r.Context())
+				assert.NotEmpty(t, reqID, "request ID should be in context")
+
+				// Verify logger is in context
+				ctxLogger := logging.FromContext(r.Context())
+				assert.NotNil(t, ctxLogger, "logger should be in context")
+
+				w.WriteHeader(tt.statusCode)
+			})
+
+			// Wrap handler with logging middleware
+			handler := LoggingMiddleware(logger)(testHandler)
+
+			// Create test request
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			if tt.requestID != "" {
+				req.Header.Set(RequestIDHeader, tt.requestID)
+			}
+
+			// Create response recorder
+			rr := httptest.NewRecorder()
+
+			// Execute request
+			handler.ServeHTTP(rr, req)
+
+			// Verify status code
+			assert.Equal(t, tt.statusCode, rr.Code)
+
+			// Verify response has request ID header
+			if tt.expectRequestID {
+				responseRequestID := rr.Header().Get(RequestIDHeader)
+				assert.NotEmpty(t, responseRequestID, "response should have request ID header")
+
+				if tt.requestID != "" {
+					assert.Equal(t, tt.requestID, responseRequestID, "should preserve incoming request ID")
+				}
+			}
+
+			// Parse log output
+			logOutput := logBuf.String()
+			require.NotEmpty(t, logOutput, "should have log output")
+
+			// Split into individual log lines
+			logLines := strings.Split(strings.TrimSpace(logOutput), "\n")
+			require.GreaterOrEqual(t, len(logLines), 2, "should have at least 2 log lines (start + complete)")
+
+			// Verify "request started" log
+			var startLog map[string]interface{}
+			err := json.Unmarshal([]byte(logLines[0]), &startLog)
+			require.NoError(t, err, "should parse start log as JSON")
+
+			assert.Equal(t, "INFO", startLog["level"])
+			assert.Equal(t, "request started", startLog["msg"])
+			assert.Equal(t, tt.method, startLog["method"])
+			assert.Equal(t, tt.path, startLog["path"])
+			assert.NotEmpty(t, startLog["request_id"], "start log should have request ID")
+
+			// Verify "request completed" log
+			var completeLog map[string]interface{}
+			err = json.Unmarshal([]byte(logLines[len(logLines)-1]), &completeLog)
+			require.NoError(t, err, "should parse complete log as JSON")
+
+			assert.Equal(t, tt.expectedLevel, completeLog["level"])
+			assert.Equal(t, "request completed", completeLog["msg"])
+			assert.Equal(t, tt.method, completeLog["method"])
+			assert.Equal(t, tt.path, completeLog["path"])
+			assert.Equal(t, float64(tt.statusCode), completeLog["status"])
+			assert.NotNil(t, completeLog["duration"])
+			assert.NotNil(t, completeLog["duration_ms"])
+			assert.NotEmpty(t, completeLog["request_id"], "complete log should have request ID")
+
+			// Verify request IDs match between start and complete logs
+			assert.Equal(t, startLog["request_id"], completeLog["request_id"], "request IDs should match")
+		})
+	}
+}
+
+func TestLoggingMiddleware_GeneratesRequestID(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := &logging.Logger{
+		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
+	}
+
+	handler := LoggingMiddleware(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	// Verify response has request ID (generated by middleware)
+	requestID := rr.Header().Get(RequestIDHeader)
+	assert.NotEmpty(t, requestID, "should generate request ID when not provided")
+	assert.Len(t, requestID, 36, "should be valid UUID format")
+}
+
+func TestResponseWriter_CapturesStatusCode(t *testing.T) {
+	tests := []struct {
+		name       string
+		writeFunc  func(http.ResponseWriter)
+		expectCode int
+	}{
+		{
+			name: "explicit WriteHeader",
+			writeFunc: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusCreated)
+			},
+			expectCode: http.StatusCreated,
+		},
+		{
+			name: "implicit status via Write",
+			writeFunc: func(w http.ResponseWriter) {
+				w.Write([]byte("test"))
+			},
+			expectCode: http.StatusOK,
+		},
+		{
+			name: "multiple WriteHeader calls",
+			writeFunc: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusCreated)
+				w.WriteHeader(http.StatusBadRequest) // Should be ignored
+			},
+			expectCode: http.StatusCreated,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			rw := &responseWriter{
+				ResponseWriter: rr,
+				statusCode:     http.StatusOK,
+			}
+
+			tt.writeFunc(rw)
+
+			assert.Equal(t, tt.expectCode, rw.statusCode)
+		})
+	}
+}

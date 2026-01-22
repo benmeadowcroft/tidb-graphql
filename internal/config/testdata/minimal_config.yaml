@@ -1,0 +1,6 @@
+database:
+  host: minimalhost
+  database: minimaldb
+
+server:
+  port: 7070

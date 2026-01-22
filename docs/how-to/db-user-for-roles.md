@@ -25,6 +25,8 @@ CREATE ROLE app_introspect;
 
 -- Grant permissions to each role
 GRANT SELECT ON tidb_graphql_tutorial.products TO app_viewer;
+GRANT SELECT ON tidb_graphql_tutorial.categories TO app_viewer;
+GRANT SELECT ON tidb_graphql_tutorial.product_categories TO app_viewer;
 GRANT SELECT ON tidb_graphql_tutorial.orders TO app_viewer;
 GRANT SELECT ON tidb_graphql_tutorial.order_items TO app_viewer;
 

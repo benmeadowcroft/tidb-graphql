@@ -89,3 +89,14 @@ func (t GraphQLType) FilterTypeName() string {
 		return "StringFilter"
 	}
 }
+
+// IsNumeric returns true if the type can be used with AVG/SUM aggregations.
+func (t GraphQLType) IsNumeric() bool {
+	return t == TypeInt || t == TypeFloat
+}
+
+// IsComparable returns true if the type can be used with MIN/MAX aggregations.
+// All types except JSON are comparable in SQL.
+func (t GraphQLType) IsComparable() bool {
+	return t != TypeJSON
+}

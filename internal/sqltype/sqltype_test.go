@@ -169,3 +169,41 @@ func TestMapToGraphQL_WithSizeSpecifiers(t *testing.T) {
 		})
 	}
 }
+
+func TestIsNumeric(t *testing.T) {
+	testCases := []struct {
+		graphQLType GraphQLType
+		expected    bool
+	}{
+		{TypeInt, true},
+		{TypeFloat, true},
+		{TypeString, false},
+		{TypeBoolean, false},
+		{TypeJSON, false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.graphQLType.String(), func(t *testing.T) {
+			assert.Equal(t, tc.expected, tc.graphQLType.IsNumeric())
+		})
+	}
+}
+
+func TestIsComparable(t *testing.T) {
+	testCases := []struct {
+		graphQLType GraphQLType
+		expected    bool
+	}{
+		{TypeInt, true},
+		{TypeFloat, true},
+		{TypeString, true},
+		{TypeBoolean, true},
+		{TypeJSON, false}, // JSON is not comparable
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.graphQLType.String(), func(t *testing.T) {
+			assert.Equal(t, tc.expected, tc.graphQLType.IsComparable())
+		})
+	}
+}

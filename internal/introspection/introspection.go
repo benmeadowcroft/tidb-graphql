@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"tidb-graphql/internal/naming"
+	"tidb-graphql/internal/sqltype"
 )
 
 // Column represents a database column
@@ -660,6 +661,28 @@ func getPKColumn(table *Table) string {
 		}
 	}
 	return ""
+}
+
+// NumericColumns returns columns eligible for AVG/SUM aggregation (Int, Float types).
+func NumericColumns(table Table) []Column {
+	var cols []Column
+	for _, col := range table.Columns {
+		if sqltype.MapToGraphQL(col.DataType).IsNumeric() {
+			cols = append(cols, col)
+		}
+	}
+	return cols
+}
+
+// ComparableColumns returns columns eligible for MIN/MAX aggregation (all except JSON).
+func ComparableColumns(table Table) []Column {
+	var cols []Column
+	for _, col := range table.Columns {
+		if sqltype.MapToGraphQL(col.DataType).IsComparable() {
+			cols = append(cols, col)
+		}
+	}
+	return cols
 }
 
 func startSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {

@@ -1,0 +1,320 @@
+package planner
+
+import (
+	"fmt"
+	"strings"
+
+	sq "github.com/Masterminds/squirrel"
+	"github.com/graphql-go/graphql/language/ast"
+
+	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/sqltype"
+	"tidb-graphql/internal/sqlutil"
+)
+
+// AggregateSelection represents which aggregate functions to compute.
+type AggregateSelection struct {
+	Count                bool
+	CountDistinctColumns []string // Column names for COUNT(DISTINCT)
+	AvgColumns           []string // Column names for AVG
+	SumColumns           []string // Column names for SUM
+	MinColumns           []string // Column names for MIN
+	MaxColumns           []string // Column names for MAX
+}
+
+// AggregateFilters defines the list-style filters applicable to aggregate queries.
+type AggregateFilters struct {
+	Where   *WhereClause
+	OrderBy *OrderBy
+	Limit   *int
+	Offset  *int
+}
+
+// PlanAggregate builds SQL for aggregate queries on a table.
+func PlanAggregate(
+	table introspection.Table,
+	selection AggregateSelection,
+	filters *AggregateFilters,
+) (SQLQuery, error) {
+	selectClauses := buildAggregateSelectClauses(selection)
+	if !selection.Count {
+		selectClauses = append([]string{"COUNT(*) AS __count"}, selectClauses...)
+	}
+
+	if len(selectClauses) == 0 {
+		selectClauses = []string{"COUNT(*) AS __count"}
+	}
+
+	base := sq.Select("*").From(sqlutil.QuoteIdentifier(table.Name))
+	if filters != nil && filters.Where != nil && filters.Where.Condition != nil {
+		base = base.Where(filters.Where.Condition)
+	}
+	if filters != nil && filters.OrderBy != nil {
+		base = base.OrderBy(orderByClauses(filters.OrderBy)...)
+	}
+	if filters != nil && filters.Limit != nil {
+		base = base.Limit(uint64(*filters.Limit))
+	}
+	if filters != nil && filters.Offset != nil {
+		base = base.Offset(uint64(*filters.Offset))
+	}
+
+	baseSQL, args, err := base.PlaceholderFormat(sq.Question).ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	query := fmt.Sprintf(
+		"SELECT %s FROM (%s) AS __agg",
+		strings.Join(selectClauses, ", "),
+		baseSQL,
+	)
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanRelationshipAggregate builds SQL for aggregating related rows via a foreign key.
+func PlanRelationshipAggregate(
+	relatedTable introspection.Table,
+	selection AggregateSelection,
+	remoteColumn string,
+	fkValue interface{},
+	filters *AggregateFilters,
+) (SQLQuery, error) {
+	selectClauses := buildAggregateSelectClauses(selection)
+	if !selection.Count {
+		selectClauses = append([]string{"COUNT(*) AS __count"}, selectClauses...)
+	}
+	if len(selectClauses) == 0 {
+		selectClauses = []string{"COUNT(*) AS __count"}
+	}
+
+	// Build WHERE combining relationship filter and user filter
+	fkCondition := sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue}
+	var finalCondition sq.Sqlizer = fkCondition
+
+	if filters != nil && filters.Where != nil && filters.Where.Condition != nil {
+		finalCondition = sq.And{fkCondition, filters.Where.Condition}
+	}
+
+	base := sq.Select("*").
+		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
+		Where(finalCondition)
+
+	if filters != nil && filters.OrderBy != nil {
+		base = base.OrderBy(orderByClauses(filters.OrderBy)...)
+	}
+	if filters != nil && filters.Limit != nil {
+		base = base.Limit(uint64(*filters.Limit))
+	}
+	if filters != nil && filters.Offset != nil {
+		base = base.Offset(uint64(*filters.Offset))
+	}
+
+	baseSQL, args, err := base.PlaceholderFormat(sq.Question).ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	query := fmt.Sprintf(
+		"SELECT %s FROM (%s) AS __agg",
+		strings.Join(selectClauses, ", "),
+		baseSQL,
+	)
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanRelationshipAggregateBatch builds SQL for batched relationship aggregates with GROUP BY.
+func PlanRelationshipAggregateBatch(
+	relatedTable introspection.Table,
+	selection AggregateSelection,
+	remoteColumn string,
+	values []interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	if len(values) == 0 {
+		return SQLQuery{}, nil
+	}
+
+	selectClauses := buildAggregateSelectClauses(selection)
+	if !selection.Count {
+		selectClauses = append([]string{"COUNT(*) AS __count"}, selectClauses...)
+	}
+	if len(selectClauses) == 0 {
+		selectClauses = []string{"COUNT(*) AS __count"}
+	}
+
+	// Add grouping column to select
+	groupCol := sqlutil.QuoteIdentifier(remoteColumn)
+	selectClauses = append([]string{groupCol + " AS __group_key"}, selectClauses...)
+
+	// Build WHERE combining IN clause and user filter
+	inCondition := sq.Eq{groupCol: values}
+	var finalCondition sq.Sqlizer = inCondition
+
+	if whereClause != nil && whereClause.Condition != nil {
+		finalCondition = sq.And{inCondition, whereClause.Condition}
+	}
+
+	builder := sq.Select(selectClauses...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
+		Where(finalCondition).
+		GroupBy(groupCol)
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// buildAggregateSelectClauses builds the SELECT clauses for aggregate functions.
+func buildAggregateSelectClauses(selection AggregateSelection) []string {
+	var clauses []string
+
+	if selection.Count {
+		clauses = append(clauses, "COUNT(*) AS __count")
+	}
+
+	for _, col := range selection.CountDistinctColumns {
+		quotedCol := sqlutil.QuoteIdentifier(col)
+		alias := fmt.Sprintf("__count_distinct_%s", col)
+		clauses = append(clauses, fmt.Sprintf("COUNT(DISTINCT %s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+	}
+
+	for _, col := range selection.AvgColumns {
+		quotedCol := sqlutil.QuoteIdentifier(col)
+		alias := fmt.Sprintf("__avg_%s", col)
+		clauses = append(clauses, fmt.Sprintf("AVG(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+	}
+
+	for _, col := range selection.SumColumns {
+		quotedCol := sqlutil.QuoteIdentifier(col)
+		alias := fmt.Sprintf("__sum_%s", col)
+		clauses = append(clauses, fmt.Sprintf("SUM(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+	}
+
+	for _, col := range selection.MinColumns {
+		quotedCol := sqlutil.QuoteIdentifier(col)
+		alias := fmt.Sprintf("__min_%s", col)
+		clauses = append(clauses, fmt.Sprintf("MIN(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+	}
+
+	for _, col := range selection.MaxColumns {
+		quotedCol := sqlutil.QuoteIdentifier(col)
+		alias := fmt.Sprintf("__max_%s", col)
+		clauses = append(clauses, fmt.Sprintf("MAX(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+	}
+
+	return clauses
+}
+
+// ParseAggregateSelection extracts aggregate column selections from GraphQL AST.
+func ParseAggregateSelection(table introspection.Table, field *ast.Field, fragments map[string]ast.Definition) AggregateSelection {
+	selection := AggregateSelection{}
+
+	if field == nil || field.SelectionSet == nil {
+		return selection
+	}
+
+	var visitSelections func(selections []ast.Selection)
+	visitSelections = func(selections []ast.Selection) {
+		for _, aggSel := range selections {
+			switch f := aggSel.(type) {
+			case *ast.Field:
+				if f.Name == nil {
+					continue
+				}
+				switch f.Name.Value {
+				case "count":
+					selection.Count = true
+				case "countDistinct":
+					selection.CountDistinctColumns = mergeColumns(selection.CountDistinctColumns, extractColumnNames(f, table, false))
+				case "avg":
+					selection.AvgColumns = mergeColumns(selection.AvgColumns, extractColumnNames(f, table, true))
+				case "sum":
+					selection.SumColumns = mergeColumns(selection.SumColumns, extractColumnNames(f, table, true))
+				case "min":
+					selection.MinColumns = mergeColumns(selection.MinColumns, extractColumnNames(f, table, false))
+				case "max":
+					selection.MaxColumns = mergeColumns(selection.MaxColumns, extractColumnNames(f, table, false))
+				}
+			case *ast.InlineFragment:
+				if f.SelectionSet != nil {
+					visitSelections(f.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || f.Name == nil {
+					continue
+				}
+				def, ok := fragments[f.Name.Value]
+				if !ok {
+					continue
+				}
+				fragment, ok := def.(*ast.FragmentDefinition)
+				if !ok || fragment.SelectionSet == nil {
+					continue
+				}
+				visitSelections(fragment.SelectionSet.Selections)
+			}
+		}
+	}
+
+	visitSelections(field.SelectionSet.Selections)
+
+	return selection
+}
+
+// extractColumnNames extracts database column names from a GraphQL field selection.
+func extractColumnNames(field *ast.Field, table introspection.Table, numericOnly bool) []string {
+	if field == nil || field.SelectionSet == nil {
+		return nil
+	}
+
+	var columns []string
+	for _, sel := range field.SelectionSet.Selections {
+		f, ok := sel.(*ast.Field)
+		if !ok || f.Name == nil {
+			continue
+		}
+
+		fieldName := f.Name.Value
+		// Find the actual column name from GraphQL field name
+		for _, col := range table.Columns {
+			if introspection.GraphQLFieldName(col) == fieldName {
+				if numericOnly && !sqltype.MapToGraphQL(col.DataType).IsNumeric() {
+					continue
+				}
+				columns = append(columns, col.Name)
+				break
+			}
+		}
+	}
+
+	return columns
+}
+
+func mergeColumns(existing, added []string) []string {
+	if len(added) == 0 {
+		return existing
+	}
+	if len(existing) == 0 {
+		return append([]string{}, added...)
+	}
+
+	seen := make(map[string]struct{}, len(existing))
+	result := append([]string{}, existing...)
+	for _, col := range existing {
+		seen[col] = struct{}{}
+	}
+	for _, col := range added {
+		if _, ok := seen[col]; ok {
+			continue
+		}
+		seen[col] = struct{}{}
+		result = append(result, col)
+	}
+	return result
+}

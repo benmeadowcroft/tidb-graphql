@@ -32,6 +32,7 @@ type Resolver struct {
 	orderByCache   map[string]*graphql.InputObject
 	whereCache     map[string]*graphql.InputObject
 	filterCache    map[string]*graphql.InputObject
+	aggregateCache map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
 	orderDirection *graphql.Enum
 	nonNegativeInt *graphql.Scalar
 	jsonType       *graphql.Scalar
@@ -48,14 +49,15 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		defaultLimit = planner.DefaultListLimit
 	}
 	return &Resolver{
-		executor:     executor,
-		dbSchema:     dbSchema,
-		typeCache:    make(map[string]*graphql.Object),
-		orderByCache: make(map[string]*graphql.InputObject),
-		whereCache:   make(map[string]*graphql.InputObject),
-		filterCache:  make(map[string]*graphql.InputObject),
-		limits:       limits,
-		defaultLimit: defaultLimit,
+		executor:       executor,
+		dbSchema:       dbSchema,
+		typeCache:      make(map[string]*graphql.Object),
+		orderByCache:   make(map[string]*graphql.InputObject),
+		whereCache:     make(map[string]*graphql.InputObject),
+		filterCache:    make(map[string]*graphql.InputObject),
+		aggregateCache: make(map[string]*graphql.Object),
+		limits:         limits,
+		defaultLimit:   defaultLimit,
 	}
 }
 
@@ -139,6 +141,16 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 
 	// Unique key queries
 	r.addUniqueKeyQueries(fields, table, tableType, fieldName)
+
+	// Aggregate query
+	aggregateFieldName := fieldName + "_aggregate"
+	aggregateType := r.buildAggregateFieldsType(table)
+
+	fields[aggregateFieldName] = &graphql.Field{
+		Type:    aggregateType,
+		Args:    r.aggregateArgs(table),
+		Resolve: r.makeAggregateResolver(table),
+	}
 
 	return fields
 }
@@ -288,6 +300,15 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 					Type: orderByInput,
 				}
 			}
+
+			// Add aggregate field for this one-to-many relationship
+			aggregateFieldName := rel.GraphQLFieldName + "_aggregate"
+			aggregateType := r.buildAggregateFieldsType(relatedTable)
+			fields[aggregateFieldName] = &graphql.Field{
+				Type:    aggregateType,
+				Args:    r.aggregateArgs(relatedTable),
+				Resolve: r.makeRelationshipAggregateResolver(table, rel),
+			}
 		} else if rel.IsManyToMany {
 			// Many-to-many through pure junction: returns list of related entities
 			relatedTable, err := r.findTable(rel.RemoteTable)
@@ -356,6 +377,172 @@ func (r *Resolver) findTable(tableName string) (introspection.Table, error) {
 		}
 	}
 	return introspection.Table{}, fmt.Errorf("table not found: %s", tableName)
+}
+
+// buildAggregateFieldsType creates the aggregate fields container.
+// Example: EmployeeAggregateFields { count: Int!, avg: EmployeeAvgFields, ... }
+func (r *Resolver) buildAggregateFieldsType(table introspection.Table) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + "AggregateFields"
+
+	r.mu.RLock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	fields := graphql.Fields{
+		"count": &graphql.Field{
+			Type: graphql.NewNonNull(graphql.Int),
+		},
+	}
+
+	// Add avg/sum fields if table has numeric columns
+	numericCols := introspection.NumericColumns(table)
+	if len(numericCols) > 0 {
+		fields["avg"] = &graphql.Field{
+			Type: r.buildNumericAggregateFieldsType(table, "Avg"),
+		}
+		fields["sum"] = &graphql.Field{
+			Type: r.buildNumericAggregateFieldsType(table, "Sum"),
+		}
+	}
+
+	// Add min/max fields for comparable columns
+	comparableCols := introspection.ComparableColumns(table)
+	if len(comparableCols) > 0 {
+		fields["countDistinct"] = &graphql.Field{
+			Type: r.buildCountDistinctFieldsType(table),
+		}
+		fields["min"] = &graphql.Field{
+			Type: r.buildComparableAggregateFieldsType(table, "Min"),
+		}
+		fields["max"] = &graphql.Field{
+			Type: r.buildComparableAggregateFieldsType(table, "Max"),
+		}
+	}
+
+	objType := graphql.NewObject(graphql.ObjectConfig{
+		Name:   typeName,
+		Fields: fields,
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.aggregateCache[typeName] = objType
+	r.mu.Unlock()
+
+	return objType
+}
+
+// buildNumericAggregateFieldsType creates fields for avg/sum operations.
+// Example: EmployeeAvgFields { salary: Float, age: Float }
+func (r *Resolver) buildNumericAggregateFieldsType(table introspection.Table, suffix string) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + suffix + "Fields"
+
+	r.mu.RLock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	fields := graphql.Fields{}
+	for _, col := range introspection.NumericColumns(table) {
+		fieldName := introspection.GraphQLFieldName(col)
+		fields[fieldName] = &graphql.Field{
+			Type: graphql.Float, // AVG/SUM always returns Float
+		}
+	}
+
+	objType := graphql.NewObject(graphql.ObjectConfig{
+		Name:   typeName,
+		Fields: fields,
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.aggregateCache[typeName] = objType
+	r.mu.Unlock()
+
+	return objType
+}
+
+// buildComparableAggregateFieldsType creates fields for min/max operations.
+// Example: EmployeeMinFields { salary: Float, name: String, hireDate: String }
+func (r *Resolver) buildComparableAggregateFieldsType(table introspection.Table, suffix string) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + suffix + "Fields"
+
+	r.mu.RLock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	fields := graphql.Fields{}
+	for _, col := range introspection.ComparableColumns(table) {
+		fieldName := introspection.GraphQLFieldName(col)
+		// MIN/MAX preserve the original column type
+		fields[fieldName] = &graphql.Field{
+			Type: r.mapColumnTypeToGraphQL(&col),
+		}
+	}
+
+	objType := graphql.NewObject(graphql.ObjectConfig{
+		Name:   typeName,
+		Fields: fields,
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.aggregateCache[typeName] = objType
+	r.mu.Unlock()
+
+	return objType
+}
+
+func (r *Resolver) buildCountDistinctFieldsType(table introspection.Table) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + "CountDistinctFields"
+
+	r.mu.RLock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	fields := graphql.Fields{}
+	for _, col := range introspection.ComparableColumns(table) {
+		fieldName := introspection.GraphQLFieldName(col)
+		fields[fieldName] = &graphql.Field{
+			Type: graphql.NewNonNull(graphql.Int),
+		}
+	}
+
+	objType := graphql.NewObject(graphql.ObjectConfig{
+		Name:   typeName,
+		Fields: fields,
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.aggregateCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.aggregateCache[typeName] = objType
+	r.mu.Unlock()
+
+	return objType
 }
 
 func (r *Resolver) makeListResolver(table introspection.Table) graphql.FieldResolveFn {
@@ -440,11 +627,125 @@ func (r *Resolver) planFromParams(p graphql.ResolveParams) (*planner.Plan, error
 	return planner.PlanQuery(r.dbSchema, field, p.Args, planner.WithFragments(p.Info.Fragments), planner.WithDefaultListLimit(r.defaultLimit))
 }
 
+func (r *Resolver) aggregateArgs(table introspection.Table) graphql.FieldConfigArgument {
+	args := graphql.FieldConfigArgument{
+		"limit": &graphql.ArgumentConfig{
+			Type: r.nonNegativeIntScalar(),
+		},
+		"offset": &graphql.ArgumentConfig{
+			Type: r.nonNegativeIntScalar(),
+		},
+		"inheritListDefaults": &graphql.ArgumentConfig{
+			Type:         graphql.Boolean,
+			DefaultValue: false,
+		},
+	}
+
+	if orderByInput := r.orderByInput(table); orderByInput != nil {
+		args["orderBy"] = &graphql.ArgumentConfig{
+			Type: orderByInput,
+		}
+	}
+	if whereInput := r.whereInput(table); whereInput != nil {
+		args["where"] = &graphql.ArgumentConfig{
+			Type: whereInput,
+		}
+	}
+
+	return args
+}
+
+func (r *Resolver) aggregateFiltersFromArgs(table introspection.Table, args map[string]interface{}, extraIndexedColumns ...string) (*planner.AggregateFilters, error) {
+	limit, hasLimit := optionalIntArg(args, "limit")
+	offset, hasOffset := optionalIntArg(args, "offset")
+	inheritDefaults := boolArg(args, "inheritListDefaults")
+	if inheritDefaults {
+		if !hasLimit {
+			limit = r.defaultLimit
+			hasLimit = true
+		}
+		if !hasOffset {
+			offset = 0
+			hasOffset = true
+		}
+	}
+
+	orderBy, err := planner.ParseOrderBy(table, args)
+	if err != nil {
+		return nil, err
+	}
+
+	var whereClause *planner.WhereClause
+	if whereArg, ok := args["where"]; ok {
+		if whereMap, ok := whereArg.(map[string]interface{}); ok {
+			whereClause, err = planner.BuildWhereClause(table, whereMap)
+			if err != nil {
+				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
+			}
+			if whereClause != nil {
+				usedColumns := append([]string{}, whereClause.UsedColumns...)
+				if len(extraIndexedColumns) > 0 {
+					usedColumns = append(usedColumns, extraIndexedColumns...)
+				}
+				if err := planner.ValidateIndexedColumns(table, usedColumns); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
+	filters := &planner.AggregateFilters{
+		Where:   whereClause,
+		OrderBy: orderBy,
+	}
+	if hasLimit {
+		filters.Limit = &limit
+	}
+	if hasOffset {
+		filters.Offset = &offset
+	}
+
+	return filters, nil
+}
+
 func firstFieldAST(fields []*ast.Field) *ast.Field {
 	if len(fields) == 0 {
 		return nil
 	}
 	return fields[0]
+}
+
+func optionalIntArg(args map[string]interface{}, key string) (int, bool) {
+	if args == nil {
+		return 0, false
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+	intValue, ok := value.(int)
+	if !ok {
+		return 0, false
+	}
+	if intValue < 0 {
+		return 0, false
+	}
+	return intValue, true
+}
+
+func boolArg(args map[string]interface{}, key string) bool {
+	if args == nil {
+		return false
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return false
+	}
+	boolValue, ok := value.(bool)
+	if !ok {
+		return false
+	}
+	return boolValue
 }
 
 func (r *Resolver) orderByInput(table introspection.Table) *graphql.InputObject {
@@ -1403,4 +1704,214 @@ func (r *Resolver) makeEdgeListResolver(table introspection.Table, rel introspec
 
 		return results, nil
 	}
+}
+
+// makeAggregateResolver creates a resolver for root-level aggregate queries.
+func (r *Resolver) makeAggregateResolver(table introspection.Table) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		// Parse aggregate selection from GraphQL query
+		selection := planner.ParseAggregateSelection(table, field, p.Info.Fragments)
+
+		filters, err := r.aggregateFiltersFromArgs(table, p.Args)
+		if err != nil {
+			return nil, err
+		}
+
+		// Plan and execute aggregate query
+		planned, err := planner.PlanAggregate(table, selection, filters)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan aggregate: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() {
+			_ = rows.Close()
+		}()
+
+		// Scan aggregate results
+		aggregateResult, err := scanAggregateRow(rows, selection, table)
+		if err != nil {
+			return nil, err
+		}
+
+		return aggregateResult, nil
+	}
+}
+
+// makeRelationshipAggregateResolver creates a resolver for aggregate queries on relationships.
+func (r *Resolver) makeRelationshipAggregateResolver(table introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type")
+		}
+
+		// Get parent key value
+		pkFieldName := graphQLFieldNameForColumn(table, rel.LocalColumn)
+		pkValue := source[pkFieldName]
+		if pkValue == nil {
+			return map[string]interface{}{"count": int64(0)}, nil
+		}
+
+		relatedTable, err := r.findTable(rel.RemoteTable)
+		if err != nil {
+			return nil, err
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		selection := planner.ParseAggregateSelection(relatedTable, field, p.Info.Fragments)
+
+		filters, err := r.aggregateFiltersFromArgs(relatedTable, p.Args, rel.RemoteColumn)
+		if err != nil {
+			return nil, err
+		}
+
+		// Execute single relationship aggregate query
+		planned, err := planner.PlanRelationshipAggregate(relatedTable, selection, rel.RemoteColumn, pkValue, filters)
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() {
+			_ = rows.Close()
+		}()
+
+		aggregateResult, err := scanAggregateRow(rows, selection, relatedTable)
+		if err != nil {
+			return nil, err
+		}
+
+		return aggregateResult, nil
+	}
+}
+
+// scanAggregateRow scans a single row of aggregate results into a map.
+func scanAggregateRow(rows dbexec.Rows, selection planner.AggregateSelection, table introspection.Table) (map[string]interface{}, error) {
+	result := map[string]interface{}{}
+
+	if !rows.Next() {
+		// No rows means count is 0
+		result["count"] = int64(0)
+		return result, rows.Err()
+	}
+
+	// Build scan destinations based on selection
+	var scanDests []interface{}
+
+	// Always scan count first (it's always included)
+	var count int64
+	scanDests = append(scanDests, &count)
+
+	// COUNT DISTINCT columns
+	countDistinctValues := make([]*int64, len(selection.CountDistinctColumns))
+	for i := range selection.CountDistinctColumns {
+		countDistinctValues[i] = new(int64)
+		scanDests = append(scanDests, countDistinctValues[i])
+	}
+
+	// AVG columns
+	avgValues := make([]*float64, len(selection.AvgColumns))
+	for i := range selection.AvgColumns {
+		avgValues[i] = new(float64)
+		scanDests = append(scanDests, avgValues[i])
+	}
+
+	// SUM columns
+	sumValues := make([]*float64, len(selection.SumColumns))
+	for i := range selection.SumColumns {
+		sumValues[i] = new(float64)
+		scanDests = append(scanDests, sumValues[i])
+	}
+
+	// MIN columns
+	minValues := make([]interface{}, len(selection.MinColumns))
+	for i := range selection.MinColumns {
+		var v interface{}
+		minValues[i] = &v
+		scanDests = append(scanDests, &minValues[i])
+	}
+
+	// MAX columns
+	maxValues := make([]interface{}, len(selection.MaxColumns))
+	for i := range selection.MaxColumns {
+		var v interface{}
+		maxValues[i] = &v
+		scanDests = append(scanDests, &maxValues[i])
+	}
+
+	if err := rows.Scan(scanDests...); err != nil {
+		return nil, err
+	}
+
+	// Build result map
+	result["count"] = count
+
+	if len(selection.CountDistinctColumns) > 0 {
+		countDistinctResult := map[string]interface{}{}
+		for i, col := range selection.CountDistinctColumns {
+			fieldName := graphQLFieldNameForColumn(table, col)
+			if countDistinctValues[i] != nil {
+				countDistinctResult[fieldName] = *countDistinctValues[i]
+			}
+		}
+		result["countDistinct"] = countDistinctResult
+	}
+
+	if len(selection.AvgColumns) > 0 {
+		avgResult := map[string]interface{}{}
+		for i, col := range selection.AvgColumns {
+			fieldName := graphQLFieldNameForColumn(table, col)
+			if avgValues[i] != nil {
+				avgResult[fieldName] = *avgValues[i]
+			}
+		}
+		result["avg"] = avgResult
+	}
+
+	if len(selection.SumColumns) > 0 {
+		sumResult := map[string]interface{}{}
+		for i, col := range selection.SumColumns {
+			fieldName := graphQLFieldNameForColumn(table, col)
+			if sumValues[i] != nil {
+				sumResult[fieldName] = *sumValues[i]
+			}
+		}
+		result["sum"] = sumResult
+	}
+
+	if len(selection.MinColumns) > 0 {
+		minResult := map[string]interface{}{}
+		for i, col := range selection.MinColumns {
+			fieldName := graphQLFieldNameForColumn(table, col)
+			minResult[fieldName] = convertValue(minValues[i])
+		}
+		result["min"] = minResult
+	}
+
+	if len(selection.MaxColumns) > 0 {
+		maxResult := map[string]interface{}{}
+		for i, col := range selection.MaxColumns {
+			fieldName := graphQLFieldNameForColumn(table, col)
+			maxResult[fieldName] = convertValue(maxValues[i])
+		}
+		result["max"] = maxResult
+	}
+
+	return result, rows.Err()
 }

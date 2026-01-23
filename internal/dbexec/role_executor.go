@@ -61,13 +61,6 @@ func (e *RoleExecutor) QueryContext(ctx context.Context, query string, args ...a
 				return nil, fmt.Errorf("role not allowed: %s", role)
 			}
 		}
-		// First disable all roles to start from a clean slate.
-		// This ensures we only have the privileges of the specified role,
-		// not accumulated privileges from default roles.
-		if _, err := conn.ExecContext(ctx, "SET ROLE NONE"); err != nil {
-			cleanup()
-			return nil, fmt.Errorf("failed to clear roles for database %s: %w", e.databaseName, err)
-		}
 		// MySQL/TiDB don't support parameterized SET ROLE, use string formatting
 		// Safe because role is validated against allowlist above
 		setRoleSQL := fmt.Sprintf("SET ROLE %s", sqlutil.QuoteIdentifier(role))

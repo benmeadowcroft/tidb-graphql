@@ -20,6 +20,7 @@ func TestNewBatchingContext(t *testing.T) {
 
 	t.Run("handles nil context", func(t *testing.T) {
 		//nolint:staticcheck // intentionally testing nil handling
+		//lint:ignore SA1012 intentionally testing nil handling
 		ctx := NewBatchingContext(nil)
 		require.NotNil(t, ctx)
 
@@ -46,6 +47,7 @@ func TestGetBatchState(t *testing.T) {
 
 	t.Run("returns false for nil context", func(t *testing.T) {
 		//nolint:staticcheck // intentionally testing nil handling
+		//lint:ignore SA1012 intentionally testing nil handling
 		state, ok := GetBatchState(nil)
 		assert.False(t, ok)
 		assert.Nil(t, state)

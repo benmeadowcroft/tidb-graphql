@@ -115,12 +115,13 @@ func TestApply_RemovesForeignKeysAndRelationshipsForFilteredColumns(t *testing.T
 	posts := findTable(schema, "posts")
 	if posts == nil {
 		t.Fatalf("expected posts table to remain")
-	}
-	if len(posts.ForeignKeys) != 0 {
-		t.Fatalf("expected foreign keys removed, got %+v", posts.ForeignKeys)
-	}
-	if len(posts.Relationships) != 0 {
-		t.Fatalf("expected relationships removed, got %+v", posts.Relationships)
+	} else {
+		if len(posts.ForeignKeys) != 0 {
+			t.Fatalf("expected foreign keys removed, got %+v", posts.ForeignKeys)
+		}
+		if len(posts.Relationships) != 0 {
+			t.Fatalf("expected relationships removed, got %+v", posts.Relationships)
+		}
 	}
 }
 

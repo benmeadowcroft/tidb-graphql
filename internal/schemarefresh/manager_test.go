@@ -179,9 +179,10 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 	snapshot := manager.CurrentSnapshot()
 	if snapshot == nil {
 		t.Fatalf("expected snapshot after refresh")
-	}
-	if snapshot.Fingerprint != expected {
-		t.Fatalf("fingerprint not updated: got %s want %s", snapshot.Fingerprint, expected)
+	} else {
+		if snapshot.Fingerprint != expected {
+			t.Fatalf("fingerprint not updated: got %s want %s", snapshot.Fingerprint, expected)
+		}
 	}
 	if interval != manager.minInterval {
 		t.Fatalf("interval should reset to min interval, got %v", interval)

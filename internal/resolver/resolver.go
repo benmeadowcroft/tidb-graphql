@@ -4,6 +4,7 @@
 package resolver
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -635,6 +636,9 @@ func (r *Resolver) aggregateArgs(table introspection.Table) graphql.FieldConfigA
 		"offset": &graphql.ArgumentConfig{
 			Type: r.nonNegativeIntScalar(),
 		},
+		// inheritListDefaults: When true, applies the same default limit/offset as list queries.
+		// Useful for ensuring aggregate queries match their corresponding list queries
+		// (e.g., "show me 50 orders AND their total").
 		"inheritListDefaults": &graphql.ArgumentConfig{
 			Type:         graphql.Boolean,
 			DefaultValue: false,
@@ -655,6 +659,9 @@ func (r *Resolver) aggregateArgs(table introspection.Table) graphql.FieldConfigA
 	return args
 }
 
+// aggregateFiltersFromArgs parses aggregate filter arguments from GraphQL args.
+// extraIndexedColumns are added to index validation (e.g., relationship FK columns
+// which are implicitly indexed but not in the user's WHERE clause).
 func (r *Resolver) aggregateFiltersFromArgs(table introspection.Table, args map[string]interface{}, extraIndexedColumns ...string) (*planner.AggregateFilters, error) {
 	limit, hasLimit := optionalIntArg(args, "limit")
 	offset, hasOffset := optionalIntArg(args, "offset")
@@ -1716,6 +1723,7 @@ func (r *Resolver) makeAggregateResolver(table introspection.Table) graphql.Fiel
 
 		// Parse aggregate selection from GraphQL query
 		selection := planner.ParseAggregateSelection(table, field, p.Info.Fragments)
+		columns := planner.BuildAggregateColumns(selection)
 
 		filters, err := r.aggregateFiltersFromArgs(table, p.Args)
 		if err != nil {
@@ -1736,8 +1744,8 @@ func (r *Resolver) makeAggregateResolver(table introspection.Table) graphql.Fiel
 			_ = rows.Close()
 		}()
 
-		// Scan aggregate results
-		aggregateResult, err := scanAggregateRow(rows, selection, table)
+		// Scan aggregate results using columns list for correct ordering
+		aggregateResult, err := scanAggregateRow(rows, columns, table)
 		if err != nil {
 			return nil, err
 		}
@@ -1772,6 +1780,7 @@ func (r *Resolver) makeRelationshipAggregateResolver(table introspection.Table, 
 		}
 
 		selection := planner.ParseAggregateSelection(relatedTable, field, p.Info.Fragments)
+		columns := planner.BuildAggregateColumns(selection)
 
 		filters, err := r.aggregateFiltersFromArgs(relatedTable, p.Args, rel.RemoteColumn)
 		if err != nil {
@@ -1792,7 +1801,8 @@ func (r *Resolver) makeRelationshipAggregateResolver(table introspection.Table, 
 			_ = rows.Close()
 		}()
 
-		aggregateResult, err := scanAggregateRow(rows, selection, relatedTable)
+		// Scan aggregate results using columns list for correct ordering
+		aggregateResult, err := scanAggregateRow(rows, columns, relatedTable)
 		if err != nil {
 			return nil, err
 		}
@@ -1802,7 +1812,9 @@ func (r *Resolver) makeRelationshipAggregateResolver(table introspection.Table, 
 }
 
 // scanAggregateRow scans a single row of aggregate results into a map.
-func scanAggregateRow(rows dbexec.Rows, selection planner.AggregateSelection, table introspection.Table) (map[string]interface{}, error) {
+// It uses the columns list from BuildAggregateColumns to ensure scan order
+// matches SQL SELECT clause order exactly.
+func scanAggregateRow(rows dbexec.Rows, columns []planner.AggregateColumn, table introspection.Table) (map[string]interface{}, error) {
 	result := map[string]interface{}{}
 
 	if !rows.Next() {
@@ -1811,106 +1823,76 @@ func scanAggregateRow(rows dbexec.Rows, selection planner.AggregateSelection, ta
 		return result, rows.Err()
 	}
 
-	// Build scan destinations based on selection
-	var scanDests []interface{}
+	// Build scan destinations in the SAME order as columns (which matches SQL SELECT order).
+	// This ordering is guaranteed by using BuildAggregateColumns as the single source of truth.
+	scanDests := make([]interface{}, len(columns))
+	intValues := make([]sql.NullInt64, len(columns))
+	floatValues := make([]sql.NullFloat64, len(columns))
+	anyValues := make([]interface{}, len(columns))
 
-	// Always scan count first (it's always included)
-	var count int64
-	scanDests = append(scanDests, &count)
-
-	// COUNT DISTINCT columns
-	countDistinctValues := make([]*int64, len(selection.CountDistinctColumns))
-	for i := range selection.CountDistinctColumns {
-		countDistinctValues[i] = new(int64)
-		scanDests = append(scanDests, countDistinctValues[i])
-	}
-
-	// AVG columns
-	avgValues := make([]*float64, len(selection.AvgColumns))
-	for i := range selection.AvgColumns {
-		avgValues[i] = new(float64)
-		scanDests = append(scanDests, avgValues[i])
-	}
-
-	// SUM columns
-	sumValues := make([]*float64, len(selection.SumColumns))
-	for i := range selection.SumColumns {
-		sumValues[i] = new(float64)
-		scanDests = append(scanDests, sumValues[i])
-	}
-
-	// MIN columns
-	minValues := make([]interface{}, len(selection.MinColumns))
-	for i := range selection.MinColumns {
-		var v interface{}
-		minValues[i] = &v
-		scanDests = append(scanDests, &minValues[i])
-	}
-
-	// MAX columns
-	maxValues := make([]interface{}, len(selection.MaxColumns))
-	for i := range selection.MaxColumns {
-		var v interface{}
-		maxValues[i] = &v
-		scanDests = append(scanDests, &maxValues[i])
+	for i, col := range columns {
+		switch col.ValueType {
+		case planner.AggregateInt:
+			scanDests[i] = &intValues[i]
+		case planner.AggregateFloat:
+			scanDests[i] = &floatValues[i]
+		case planner.AggregateAny:
+			scanDests[i] = &anyValues[i]
+		}
 	}
 
 	if err := rows.Scan(scanDests...); err != nil {
 		return nil, err
 	}
 
-	// Build result map
-	result["count"] = count
+	// Build result map, grouping columns by their ResultKey
+	groupedResults := map[string]map[string]interface{}{}
 
-	if len(selection.CountDistinctColumns) > 0 {
-		countDistinctResult := map[string]interface{}{}
-		for i, col := range selection.CountDistinctColumns {
-			fieldName := graphQLFieldNameForColumn(table, col)
-			if countDistinctValues[i] != nil {
-				countDistinctResult[fieldName] = *countDistinctValues[i]
+	for i, col := range columns {
+		var value interface{}
+		var hasValue bool
+
+		switch col.ValueType {
+		case planner.AggregateInt:
+			if intValues[i].Valid {
+				value = intValues[i].Int64
+				hasValue = true
 			}
-		}
-		result["countDistinct"] = countDistinctResult
-	}
-
-	if len(selection.AvgColumns) > 0 {
-		avgResult := map[string]interface{}{}
-		for i, col := range selection.AvgColumns {
-			fieldName := graphQLFieldNameForColumn(table, col)
-			if avgValues[i] != nil {
-				avgResult[fieldName] = *avgValues[i]
+		case planner.AggregateFloat:
+			if floatValues[i].Valid {
+				value = floatValues[i].Float64
+				hasValue = true
 			}
+		case planner.AggregateAny:
+			value = convertValue(anyValues[i])
+			hasValue = true
 		}
-		result["avg"] = avgResult
-	}
 
-	if len(selection.SumColumns) > 0 {
-		sumResult := map[string]interface{}{}
-		for i, col := range selection.SumColumns {
-			fieldName := graphQLFieldNameForColumn(table, col)
-			if sumValues[i] != nil {
-				sumResult[fieldName] = *sumValues[i]
+		// Handle plain count specially (no column name, goes directly in result)
+		if col.ResultKey == "count" && col.ColumnName == "" {
+			if hasValue {
+				result["count"] = value
+			} else {
+				result["count"] = int64(0)
 			}
+			continue
 		}
-		result["sum"] = sumResult
+
+		// For column-specific aggregates, group by ResultKey
+		if hasValue {
+			if groupedResults[col.ResultKey] == nil {
+				groupedResults[col.ResultKey] = map[string]interface{}{}
+			}
+			fieldName := graphQLFieldNameForColumn(table, col.ColumnName)
+			groupedResults[col.ResultKey][fieldName] = value
+		}
 	}
 
-	if len(selection.MinColumns) > 0 {
-		minResult := map[string]interface{}{}
-		for i, col := range selection.MinColumns {
-			fieldName := graphQLFieldNameForColumn(table, col)
-			minResult[fieldName] = convertValue(minValues[i])
+	// Add grouped results to main result
+	for key, values := range groupedResults {
+		if len(values) > 0 {
+			result[key] = values
 		}
-		result["min"] = minResult
-	}
-
-	if len(selection.MaxColumns) > 0 {
-		maxResult := map[string]interface{}{}
-		for i, col := range selection.MaxColumns {
-			fieldName := graphQLFieldNameForColumn(table, col)
-			maxResult[fieldName] = convertValue(maxValues[i])
-		}
-		result["max"] = maxResult
 	}
 
 	return result, rows.Err()

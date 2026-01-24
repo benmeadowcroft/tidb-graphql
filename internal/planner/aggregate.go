@@ -23,11 +23,37 @@ type AggregateSelection struct {
 }
 
 // AggregateFilters defines the list-style filters applicable to aggregate queries.
+// These filters are applied to the base dataset BEFORE aggregation occurs,
+// allowing queries like "sum of the 50 most recent orders" rather than
+// "sum of all orders, limited to 50 results" (which would be meaningless).
 type AggregateFilters struct {
 	Where   *WhereClause
 	OrderBy *OrderBy
 	Limit   *int
 	Offset  *int
+}
+
+// AggregateValueType indicates how to scan an aggregate result value.
+type AggregateValueType int
+
+const (
+	// AggregateInt is for COUNT, COUNT DISTINCT - always returns integer.
+	AggregateInt AggregateValueType = iota
+	// AggregateFloat is for AVG, SUM - returns float (nullable).
+	AggregateFloat
+	// AggregateAny is for MIN, MAX - can return any comparable type.
+	AggregateAny
+)
+
+// AggregateColumn represents a single aggregate computation with all metadata
+// needed for both SQL generation and result scanning. This struct is the single
+// source of truth for aggregate column ordering, ensuring SQL SELECT clauses
+// and scan destinations stay in sync.
+type AggregateColumn struct {
+	SQLClause  string             // SQL fragment, e.g., "AVG(`salary`) AS `__avg_salary`"
+	ResultKey  string             // Top-level result key: "count", "countDistinct", "avg", "sum", "min", "max"
+	ColumnName string             // Original column name (empty for plain count)
+	ValueType  AggregateValueType // Determines how to scan the value
 }
 
 // PlanAggregate builds SQL for aggregate queries on a table.
@@ -37,13 +63,6 @@ func PlanAggregate(
 	filters *AggregateFilters,
 ) (SQLQuery, error) {
 	selectClauses := buildAggregateSelectClauses(selection)
-	if !selection.Count {
-		selectClauses = append([]string{"COUNT(*) AS __count"}, selectClauses...)
-	}
-
-	if len(selectClauses) == 0 {
-		selectClauses = []string{"COUNT(*) AS __count"}
-	}
 
 	base := sq.Select("*").From(sqlutil.QuoteIdentifier(table.Name))
 	if filters != nil && filters.Where != nil && filters.Where.Condition != nil {
@@ -64,6 +83,9 @@ func PlanAggregate(
 		return SQLQuery{}, err
 	}
 
+	// Wrap in subquery to apply filters before aggregation.
+	// This ensures ORDER BY + LIMIT filters the dataset, not the aggregate result.
+	// Example: "sum of the 50 most recent orders" vs "sum of all orders" (wrong).
 	query := fmt.Sprintf(
 		"SELECT %s FROM (%s) AS __agg",
 		strings.Join(selectClauses, ", "),
@@ -82,12 +104,6 @@ func PlanRelationshipAggregate(
 	filters *AggregateFilters,
 ) (SQLQuery, error) {
 	selectClauses := buildAggregateSelectClauses(selection)
-	if !selection.Count {
-		selectClauses = append([]string{"COUNT(*) AS __count"}, selectClauses...)
-	}
-	if len(selectClauses) == 0 {
-		selectClauses = []string{"COUNT(*) AS __count"}
-	}
 
 	// Build WHERE combining relationship filter and user filter
 	fkCondition := sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue}
@@ -138,12 +154,6 @@ func PlanRelationshipAggregateBatch(
 	}
 
 	selectClauses := buildAggregateSelectClauses(selection)
-	if !selection.Count {
-		selectClauses = append([]string{"COUNT(*) AS __count"}, selectClauses...)
-	}
-	if len(selectClauses) == 0 {
-		selectClauses = []string{"COUNT(*) AS __count"}
-	}
 
 	// Add grouping column to select
 	groupCol := sqlutil.QuoteIdentifier(remoteColumn)
@@ -170,45 +180,92 @@ func PlanRelationshipAggregateBatch(
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
-// buildAggregateSelectClauses builds the SELECT clauses for aggregate functions.
-func buildAggregateSelectClauses(selection AggregateSelection) []string {
-	var clauses []string
+// BuildAggregateColumns returns the ordered list of aggregate columns for a selection.
+// This is the SINGLE SOURCE OF TRUTH for the order of aggregate operations.
+// Both SQL generation (via SQLClauses) and result scanning must use this order.
+// NOTE: COUNT(*) is ALWAYS included first to match PlanAggregate SQL generation.
+func BuildAggregateColumns(selection AggregateSelection) []AggregateColumn {
+	var columns []AggregateColumn
 
-	if selection.Count {
-		clauses = append(clauses, "COUNT(*) AS __count")
-	}
+	// Always include count - PlanAggregate always adds COUNT(*) to SQL
+	columns = append(columns, AggregateColumn{
+		SQLClause:  "COUNT(*) AS __count",
+		ResultKey:  "count",
+		ColumnName: "",
+		ValueType:  AggregateInt,
+	})
 
 	for _, col := range selection.CountDistinctColumns {
 		quotedCol := sqlutil.QuoteIdentifier(col)
 		alias := fmt.Sprintf("__count_distinct_%s", col)
-		clauses = append(clauses, fmt.Sprintf("COUNT(DISTINCT %s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+		columns = append(columns, AggregateColumn{
+			SQLClause:  fmt.Sprintf("COUNT(DISTINCT %s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)),
+			ResultKey:  "countDistinct",
+			ColumnName: col,
+			ValueType:  AggregateInt,
+		})
 	}
 
 	for _, col := range selection.AvgColumns {
 		quotedCol := sqlutil.QuoteIdentifier(col)
 		alias := fmt.Sprintf("__avg_%s", col)
-		clauses = append(clauses, fmt.Sprintf("AVG(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+		columns = append(columns, AggregateColumn{
+			SQLClause:  fmt.Sprintf("AVG(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)),
+			ResultKey:  "avg",
+			ColumnName: col,
+			ValueType:  AggregateFloat,
+		})
 	}
 
 	for _, col := range selection.SumColumns {
 		quotedCol := sqlutil.QuoteIdentifier(col)
 		alias := fmt.Sprintf("__sum_%s", col)
-		clauses = append(clauses, fmt.Sprintf("SUM(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+		columns = append(columns, AggregateColumn{
+			SQLClause:  fmt.Sprintf("SUM(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)),
+			ResultKey:  "sum",
+			ColumnName: col,
+			ValueType:  AggregateFloat,
+		})
 	}
 
 	for _, col := range selection.MinColumns {
 		quotedCol := sqlutil.QuoteIdentifier(col)
 		alias := fmt.Sprintf("__min_%s", col)
-		clauses = append(clauses, fmt.Sprintf("MIN(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+		columns = append(columns, AggregateColumn{
+			SQLClause:  fmt.Sprintf("MIN(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)),
+			ResultKey:  "min",
+			ColumnName: col,
+			ValueType:  AggregateAny,
+		})
 	}
 
 	for _, col := range selection.MaxColumns {
 		quotedCol := sqlutil.QuoteIdentifier(col)
 		alias := fmt.Sprintf("__max_%s", col)
-		clauses = append(clauses, fmt.Sprintf("MAX(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)))
+		columns = append(columns, AggregateColumn{
+			SQLClause:  fmt.Sprintf("MAX(%s) AS %s", quotedCol, sqlutil.QuoteIdentifier(alias)),
+			ResultKey:  "max",
+			ColumnName: col,
+			ValueType:  AggregateAny,
+		})
 	}
 
+	return columns
+}
+
+// SQLClauses extracts just the SQL clause strings from a list of AggregateColumns.
+func SQLClauses(columns []AggregateColumn) []string {
+	clauses := make([]string, len(columns))
+	for i, col := range columns {
+		clauses[i] = col.SQLClause
+	}
 	return clauses
+}
+
+// buildAggregateSelectClauses builds the SELECT clauses for aggregate functions.
+// Deprecated: Use BuildAggregateColumns and SQLClauses instead for type-safe ordering.
+func buildAggregateSelectClauses(selection AggregateSelection) []string {
+	return SQLClauses(BuildAggregateColumns(selection))
 }
 
 // ParseAggregateSelection extracts aggregate column selections from GraphQL AST.
@@ -296,6 +353,8 @@ func extractColumnNames(field *ast.Field, table introspection.Table, numericOnly
 	return columns
 }
 
+// mergeColumns deduplicates columns when the same aggregate field appears
+// multiple times in a query (e.g., via fragment spreads). Preserves order.
 func mergeColumns(existing, added []string) []string {
 	if len(added) == 0 {
 		return existing

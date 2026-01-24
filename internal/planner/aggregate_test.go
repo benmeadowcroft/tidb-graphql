@@ -204,9 +204,11 @@ func TestBuildAggregateSelectClauses(t *testing.T) {
 		assert.Contains(t, clauses[5], "MAX")
 	})
 
-	t.Run("empty selection", func(t *testing.T) {
+	t.Run("empty selection still includes count", func(t *testing.T) {
+		// COUNT(*) is always included to match PlanAggregate SQL generation
 		selection := AggregateSelection{}
 		clauses := buildAggregateSelectClauses(selection)
-		assert.Empty(t, clauses)
+		assert.Len(t, clauses, 1)
+		assert.Contains(t, clauses[0], "COUNT(*)")
 	})
 }

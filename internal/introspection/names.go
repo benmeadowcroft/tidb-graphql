@@ -32,6 +32,14 @@ func GraphQLQueryName(table Table) string {
 	return ToGraphQLFieldName(table.Name)
 }
 
+// GraphQLSingleQueryName returns the resolved root field name prefix for single-row lookups.
+func GraphQLSingleQueryName(table Table) string {
+	if table.GraphQLSingleQueryName != "" {
+		return table.GraphQLSingleQueryName
+	}
+	return ToGraphQLFieldName(defaultNamer.Singularize(table.Name))
+}
+
 // GraphQLFieldName returns the resolved GraphQL field name for a column.
 func GraphQLFieldName(col Column) string {
 	if col.GraphQLFieldName != "" {

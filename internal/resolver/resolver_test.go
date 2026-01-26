@@ -9,7 +9,9 @@ import (
 
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/planner"
+	"tidb-graphql/internal/schemafilter"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/graphql-go/graphql"
@@ -30,7 +32,7 @@ func TestListResolver(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	field := &ast.Field{Name: &ast.Name{Value: "users"}}
 	args := map[string]interface{}{"limit": 2, "offset": 1}
@@ -75,9 +77,9 @@ func TestPKResolver(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
-	field := &ast.Field{Name: &ast.Name{Value: "users_by_pk"}}
+	field := &ast.Field{Name: &ast.Name{Value: "user_by_pk"}}
 	args := map[string]interface{}{"id": 1}
 	plan, err := planner.PlanQuery(dbSchema, field, args)
 	require.NoError(t, err)
@@ -124,7 +126,7 @@ func TestManyToOneResolver(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	rel := introspection.Relationship{
 		IsManyToOne:      true,
@@ -184,7 +186,7 @@ func TestOneToManyResolver(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	rel := introspection.Relationship{
 		IsOneToMany:      true,
@@ -249,7 +251,7 @@ func TestOneToManyResolverBatch(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	ctx := NewBatchingContext(context.Background())
 
@@ -345,7 +347,7 @@ func TestManyToOneResolverBatch(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	ctx := NewBatchingContext(context.Background())
 
@@ -417,7 +419,7 @@ func TestManyToOneResolverBatch(t *testing.T) {
 }
 
 func TestWhereInput_SkipsViews(t *testing.T) {
-	r := NewResolver(nil, &introspection.Schema{}, nil, 0)
+	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 	input := r.whereInput(introspection.Table{Name: "active_users", IsView: true})
 	assert.Nil(t, input)
 }
@@ -425,7 +427,7 @@ func TestWhereInput_SkipsViews(t *testing.T) {
 func TestTryBatchOneToMany_NoBatchState(t *testing.T) {
 	users := introspection.Table{Name: "users"}
 	posts := introspection.Table{Name: "posts"}
-	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users, posts}}, nil, 0)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users, posts}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	rel := introspection.Relationship{
 		IsOneToMany:      true,
@@ -469,7 +471,7 @@ func TestTryBatchOneToMany_CachesResults(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	// Seed parent rows into the batch state via the list resolver.
 	ctx := NewBatchingContext(context.Background())
@@ -561,7 +563,7 @@ func TestTryBatchOneToMany_CachesResults(t *testing.T) {
 
 func TestTryBatchManyToOne_NoBatchState(t *testing.T) {
 	users := introspection.Table{Name: "users"}
-	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users}}, nil, 0)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	rel := introspection.Relationship{
 		IsManyToOne:      true,
@@ -605,7 +607,7 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
-	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0)
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	// Seed parent rows into the batch state via the list resolver.
 	ctx := NewBatchingContext(context.Background())

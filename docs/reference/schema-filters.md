@@ -14,10 +14,13 @@ Matching is case-insensitive against raw table and column names.
 schema_filters:
   allow_tables: ["*"]
   deny_tables: ["*_intern"]
+  deny_mutation_tables: ["audit_*"]
   allow_columns:
     "*": ["*"]
   deny_columns:
     "*": ["*_secret"]
+  deny_mutation_columns:
+    "*": ["*_readonly"]
 ```
 
 ## Behavior
@@ -27,6 +30,8 @@ schema_filters:
 - Column filtering applies before index-driven features.
 - Indexes are only exposed when all indexed columns remain allowed.
 - Unique lookup queries are only generated for remaining unique indexes.
+- Mutation deny lists only affect mutation input fields; query visibility is unchanged.
+- Tables/views filtered out by schema filters are not available for mutations.
 
 ## Examples
 
@@ -59,6 +64,18 @@ schema_filters:
   deny_columns:
     "users": ["password_*", "ssn"]
     "*": ["*_secret"]
+```
+
+Disable mutations for audit tables and read-only columns:
+
+```yaml
+schema_filters:
+  allow_tables: ["*"]
+  allow_columns:
+    "*": ["*"]
+  deny_mutation_tables: ["audit_*"]
+  deny_mutation_columns:
+    "*": ["*_readonly"]
 ```
 
 ## Notes on DB permissions

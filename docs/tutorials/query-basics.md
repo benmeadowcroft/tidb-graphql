@@ -103,7 +103,7 @@ Every table with a primary key gets a `_by_pk` lookup field:
 
 ```graphql
 query test {
-  users_by_pk(id:1){
+  user_by_pk(id:1){
     fullName
     email
     status
@@ -121,7 +121,7 @@ If a table has a unique index, you get a direct lookup field. For example:
 
 ```graphql
 {
-  users_by_email(email: "ben.turner@example.com") {
+  user_by_email(email: "ben.turner@example.com") {
     id
     email
     status

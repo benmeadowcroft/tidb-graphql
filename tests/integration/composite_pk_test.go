@@ -29,7 +29,7 @@ func TestCompositePK_TwoColumns(t *testing.T) {
 	// Test: Lookup order item by composite PK (order_id, product_id)
 	query := `
 		{
-			orderItems_by_pk(orderId: 100, productId: 2) {
+			orderItem_by_pk(orderId: 100, productId: 2) {
 				orderId
 				productId
 				quantity
@@ -46,7 +46,7 @@ func TestCompositePK_TwoColumns(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	item := data["orderItems_by_pk"].(map[string]interface{})
+	item := data["orderItem_by_pk"].(map[string]interface{})
 
 	assert.EqualValues(t, 100, item["orderId"])
 	assert.EqualValues(t, 2, item["productId"])
@@ -68,7 +68,7 @@ func TestCompositePK_ThreeColumns(t *testing.T) {
 	// Test: Lookup inventory location by composite PK (warehouse_id, aisle, shelf)
 	query := `
 		{
-			inventoryLocations_by_pk(warehouseId: 1, aisle: "B", shelf: 2) {
+			inventoryLocation_by_pk(warehouseId: 1, aisle: "B", shelf: 2) {
 				warehouseId
 				aisle
 				shelf
@@ -86,7 +86,7 @@ func TestCompositePK_ThreeColumns(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	location := data["inventoryLocations_by_pk"].(map[string]interface{})
+	location := data["inventoryLocation_by_pk"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, location["warehouseId"])
 	assert.Equal(t, "B", location["aisle"])
@@ -109,7 +109,7 @@ func TestCompositePK_NotFound(t *testing.T) {
 	// Test: Lookup non-existent order item
 	query := `
 		{
-			orderItems_by_pk(orderId: 999, productId: 999) {
+			orderItem_by_pk(orderId: 999, productId: 999) {
 				orderId
 				productId
 			}
@@ -124,7 +124,7 @@ func TestCompositePK_NotFound(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	item := data["orderItems_by_pk"]
+	item := data["orderItem_by_pk"]
 	assert.Nil(t, item, "Non-existent item should return null")
 }
 
@@ -142,7 +142,7 @@ func TestCompositePK_SingleColumnStillWorks(t *testing.T) {
 	// Test: Single-column PK still works as expected
 	query := `
 		{
-			warehouses_by_pk(id: 1) {
+			warehouse_by_pk(id: 1) {
 				id
 				name
 				location
@@ -158,7 +158,7 @@ func TestCompositePK_SingleColumnStillWorks(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	warehouse := data["warehouses_by_pk"].(map[string]interface{})
+	warehouse := data["warehouse_by_pk"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, warehouse["id"])
 	assert.Equal(t, "Main Warehouse", warehouse["name"])

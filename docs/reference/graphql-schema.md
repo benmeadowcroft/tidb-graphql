@@ -14,13 +14,27 @@ This section describes how the GraphQL schema is derived from the TiDB schema.
 For each table `users`:
 
 - List query: `users(limit, offset, where, orderBy)` returns `[User]`.
-- Primary key lookup: `users_by_pk(id: ID!)` returns `User`.
-- Unique index lookups: `users_by_email(email: String!)` returns `User`.
+- Primary key lookup: `user_by_pk(id: ID!)` returns `User`.
+- Unique index lookups: `user_by_email(email: String!)` returns `User`.
 
 Notes:
 - `limit` default is `100`.
 - `offset` default is `0`.
 - `orderBy` only accepts indexed fields (see `docs/reference/filters.md`).
+
+## Root mutation fields
+
+For each table `users`:
+
+- Create: `createUser(input: CreateUserInput!): Users`
+- Update: `updateUser(id: ID!, set: UpdateUserSetInput): Users`
+- Delete: `deleteUser(id: ID!): DeleteUserPayload`
+
+Notes:
+- Mutations are not generated for views.
+- Update/delete require primary key arguments (composite keys are multiple args).
+- Create/update return the row directly using the selection set.
+- Delete returns the primary key fields in `DeleteXPayload`.
 
 ## Relationships
 

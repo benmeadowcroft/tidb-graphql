@@ -321,7 +321,7 @@ func (m *Manager) buildSnapshot(ctx context.Context, fingerprint string) (*Snaps
 		)
 	}
 
-	res := resolver.NewResolver(m.executor, dbSchema, m.limits, m.defaultLimit)
+	res := resolver.NewResolver(m.executor, dbSchema, m.limits, m.defaultLimit, m.filters, m.namingConfig)
 	graphqlSchema, err := res.BuildGraphQLSchema()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build GraphQL schema: %w", err)

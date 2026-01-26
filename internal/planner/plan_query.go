@@ -162,7 +162,8 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 			return &Plan{Root: planned, Table: table, Columns: selected}, nil
 		}
 
-		pkField := listField + "_by_pk"
+		singleField := introspection.GraphQLSingleQueryName(table)
+		pkField := singleField + "_by_pk"
 		if fieldName == pkField {
 			pkCols := introspection.PrimaryKeyColumns(table)
 			if len(pkCols) == 0 {
@@ -210,7 +211,7 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 			}
 
 			// Build expected field name
-			uniqueField := listField + "_by"
+			uniqueField := singleField + "_by"
 			for _, colName := range idx.Columns {
 				col, ok := findColumn(table.Columns, colName)
 				if ok {

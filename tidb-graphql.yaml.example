@@ -128,11 +128,14 @@ observability:
 schema_filters:
   allow_tables: ["*"]       # Glob patterns of tables to include (empty = allow none)
   deny_tables: ["*_intern"] # Glob patterns of tables to exclude
+  deny_mutation_tables: []  # Glob patterns of tables to exclude from mutations
   scan_views: false         # Include SQL views in schema introspection
   allow_columns:
     "*": ["*"]              # Glob patterns of columns per table (use "*" for all tables)
   deny_columns:
     "*": ["*_secret"]       # Glob patterns of columns to exclude per table
+  deny_mutation_columns:
+    "*": ["*_readonly"]     # Glob patterns of columns to exclude from mutation inputs
 
 # Naming configuration (optional overrides for pluralization/singularization)
 naming:

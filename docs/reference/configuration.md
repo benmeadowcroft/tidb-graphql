@@ -118,9 +118,11 @@ OTLP (applies to all signals unless overridden):
 
 - `schema_filters.allow_tables` (list of string, default: `["*"]`)
 - `schema_filters.deny_tables` (list of string, default: empty)
+- `schema_filters.deny_mutation_tables` (list of string, default: empty)
 - `schema_filters.scan_views` (bool, default: `false`)
 - `schema_filters.allow_columns` (map of table => list of glob patterns, default: `{"*": ["*"]}`)
 - `schema_filters.deny_columns` (map of table => list of glob patterns, default: empty)
+- `schema_filters.deny_mutation_columns` (map of table => list of glob patterns, default: empty)
 
 See `docs/reference/schema-filters.md` for behavior details.
 

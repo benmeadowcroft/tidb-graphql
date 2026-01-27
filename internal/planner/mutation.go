@@ -40,15 +40,8 @@ func PlanUpdate(table introspection.Table, set map[string]interface{}, pkValues 
 		return SQLQuery{}, fmt.Errorf("update set cannot be empty")
 	}
 
-	// Defensive check: ensure all PK columns are provided to prevent partial WHERE clauses
-	pkCols := introspection.PrimaryKeyColumns(table)
-	if len(pkValues) != len(pkCols) {
-		return SQLQuery{}, fmt.Errorf("pkValues count (%d) does not match primary key column count (%d)", len(pkValues), len(pkCols))
-	}
-	for _, col := range pkCols {
-		if _, ok := pkValues[col.Name]; !ok {
-			return SQLQuery{}, fmt.Errorf("missing primary key column %q in pkValues", col.Name)
-		}
+	if err := validatePKValues(table, pkValues); err != nil {
+		return SQLQuery{}, err
 	}
 
 	update := sq.Update(sqlutil.QuoteIdentifier(table.Name))
@@ -74,15 +67,8 @@ func PlanUpdate(table introspection.Table, set map[string]interface{}, pkValues 
 
 // PlanDelete builds SQL for deleting a single row by primary key.
 func PlanDelete(table introspection.Table, pkValues map[string]interface{}) (SQLQuery, error) {
-	// Defensive check: ensure all PK columns are provided to prevent partial WHERE clauses
-	pkCols := introspection.PrimaryKeyColumns(table)
-	if len(pkValues) != len(pkCols) {
-		return SQLQuery{}, fmt.Errorf("pkValues count (%d) does not match primary key column count (%d)", len(pkValues), len(pkCols))
-	}
-	for _, col := range pkCols {
-		if _, ok := pkValues[col.Name]; !ok {
-			return SQLQuery{}, fmt.Errorf("missing primary key column %q in pkValues", col.Name)
-		}
+	if err := validatePKValues(table, pkValues); err != nil {
+		return SQLQuery{}, err
 	}
 
 	deleteBuilder := sq.Delete(sqlutil.QuoteIdentifier(table.Name))
@@ -98,4 +84,18 @@ func PlanDelete(table introspection.Table, pkValues map[string]interface{}) (SQL
 	}
 
 	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+func validatePKValues(table introspection.Table, pkValues map[string]interface{}) error {
+	// Defensive check: ensure all PK columns are provided to prevent partial WHERE clauses
+	pkCols := introspection.PrimaryKeyColumns(table)
+	if len(pkValues) != len(pkCols) {
+		return fmt.Errorf("pkValues count (%d) does not match primary key column count (%d)", len(pkValues), len(pkCols))
+	}
+	for _, col := range pkCols {
+		if _, ok := pkValues[col.Name]; !ok {
+			return fmt.Errorf("missing primary key column %q in pkValues", col.Name)
+		}
+	}
+	return nil
 }

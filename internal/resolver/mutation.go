@@ -222,37 +222,28 @@ func (r *Resolver) primaryKeyArgs(pkCols []introspection.Column) graphql.FieldCo
 }
 
 func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[string]bool) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		mc := MutationContextFromContext(p.Context)
-		if mc == nil || mc.Tx() == nil {
-			return nil, fmt.Errorf("mutation transaction not available")
-		}
+	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
 
 		inputArg, ok := p.Args["input"].(map[string]interface{})
 		if !ok {
-			mc.MarkError()
 			return nil, newMutationError("invalid input", "invalid_input", 0)
 		}
 
 		columns, values, err := mapInputColumns(table, inputArg, insertable)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 		if len(inputArg) > 0 && len(columns) == 0 {
-			mc.MarkError()
 			return nil, newMutationError("no insertable columns in input", "invalid_input", 0)
 		}
 
 		query, err := planner.PlanInsert(table, columns, values)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 
 		result, err := mc.Tx().ExecContext(p.Context, query.SQL, query.Args...)
 		if err != nil {
-			mc.MarkError()
 			return nil, normalizeMutationError(err)
 		}
 
@@ -262,29 +253,22 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 		}
 		pkValues, err := resolveInsertPKValues(table, pkCols, inputArg, result)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 
 		row, err := r.selectRowByPK(p, table, pkCols, pkValues, mc.Tx())
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 		return row, nil
-	}
+	})
 }
 
 func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[string]bool, pkCols []introspection.Column) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		mc := MutationContextFromContext(p.Context)
-		if mc == nil || mc.Tx() == nil {
-			return nil, fmt.Errorf("mutation transaction not available")
-		}
+	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
 
 		pkValues, err := pkValuesFromArgs(pkCols, p.Args)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 
@@ -292,7 +276,6 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 		if !hasSet || setArg == nil {
 			row, err := r.selectRowByPK(p, table, pkCols, pkValues, mc.Tx())
 			if err != nil {
-				mc.MarkError()
 				return nil, err
 			}
 			return row, nil
@@ -300,13 +283,11 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 
 		setMap, ok := setArg.(map[string]interface{})
 		if !ok {
-			mc.MarkError()
 			return nil, newMutationError("invalid set input", "invalid_input", 0)
 		}
 		if len(setMap) == 0 {
 			row, err := r.selectRowByPK(p, table, pkCols, pkValues, mc.Tx())
 			if err != nil {
-				mc.MarkError()
 				return nil, err
 			}
 			return row, nil
@@ -314,29 +295,24 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 
 		setValues, err := mapSetColumns(table, setMap, updatable)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 		if len(setMap) > 0 && len(setValues) == 0 {
-			mc.MarkError()
 			return nil, newMutationError("no updatable columns in set", "invalid_input", 0)
 		}
 
 		planned, err := planner.PlanUpdate(table, setValues, pkValues)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 
 		result, err := mc.Tx().ExecContext(p.Context, planned.SQL, planned.Args...)
 		if err != nil {
-			mc.MarkError()
 			return nil, normalizeMutationError(err)
 		}
 
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 		if rowsAffected == 0 {
@@ -345,41 +321,32 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 
 		row, err := r.selectRowByPK(p, table, pkCols, pkValues, mc.Tx())
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 		return row, nil
-	}
+	})
 }
 
 func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		mc := MutationContextFromContext(p.Context)
-		if mc == nil || mc.Tx() == nil {
-			return nil, fmt.Errorf("mutation transaction not available")
-		}
+	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
 
 		pkValues, err := pkValuesFromArgs(pkCols, p.Args)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 
 		planned, err := planner.PlanDelete(table, pkValues)
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 
 		result, err := mc.Tx().ExecContext(p.Context, planned.SQL, planned.Args...)
 		if err != nil {
-			mc.MarkError()
 			return nil, normalizeMutationError(err)
 		}
 
 		rowsAffected, err := result.RowsAffected()
 		if err != nil {
-			mc.MarkError()
 			return nil, err
 		}
 		if rowsAffected == 0 {
@@ -393,6 +360,20 @@ func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []intros
 		}
 
 		return payload, nil
+	})
+}
+
+func withMutationContext(fn func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error)) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		mc := MutationContextFromContext(p.Context)
+		if mc == nil || mc.Tx() == nil {
+			return nil, fmt.Errorf("mutation transaction not available")
+		}
+		result, err := fn(p, mc)
+		if err != nil {
+			mc.MarkError()
+		}
+		return result, err
 	}
 }
 
@@ -437,31 +418,14 @@ func mapInputColumns(table introspection.Table, input map[string]interface{}, al
 	if len(input) == 0 {
 		return nil, nil, nil
 	}
-	seen := make(map[string]struct{}, len(input))
 	columns := make([]string, 0, len(input))
 	values := make([]interface{}, 0, len(input))
-	for _, col := range table.Columns {
-		if !allowed[col.Name] {
-			continue
-		}
-		fieldName := introspection.GraphQLFieldName(col)
-		value, ok := input[fieldName]
-		if !ok {
-			continue
-		}
+	if err := collectInputColumns(table, input, allowed, func(col introspection.Column, value interface{}) {
 		columns = append(columns, col.Name)
 		values = append(values, value)
-		seen[fieldName] = struct{}{}
+	}); err != nil {
+		return nil, nil, err
 	}
-
-	if len(seen) < len(input) {
-		for key := range input {
-			if _, ok := seen[key]; !ok {
-				return nil, nil, newMutationError("unknown or disallowed column: "+key, "invalid_input", 0)
-			}
-		}
-	}
-
 	return columns, values, nil
 }
 
@@ -469,8 +433,17 @@ func mapSetColumns(table introspection.Table, input map[string]interface{}, allo
 	if len(input) == 0 {
 		return nil, nil
 	}
-	seen := make(map[string]struct{}, len(input))
 	setValues := make(map[string]interface{}, len(input))
+	if err := collectInputColumns(table, input, allowed, func(col introspection.Column, value interface{}) {
+		setValues[col.Name] = value
+	}); err != nil {
+		return nil, err
+	}
+	return setValues, nil
+}
+
+func collectInputColumns(table introspection.Table, input map[string]interface{}, allowed map[string]bool, handle func(col introspection.Column, value interface{})) error {
+	seen := make(map[string]struct{}, len(input))
 	for _, col := range table.Columns {
 		if !allowed[col.Name] {
 			continue
@@ -480,19 +453,19 @@ func mapSetColumns(table introspection.Table, input map[string]interface{}, allo
 		if !ok {
 			continue
 		}
-		setValues[col.Name] = value
+		handle(col, value)
 		seen[fieldName] = struct{}{}
 	}
 
 	if len(seen) < len(input) {
 		for key := range input {
 			if _, ok := seen[key]; !ok {
-				return nil, newMutationError("unknown or disallowed column: "+key, "invalid_input", 0)
+				return newMutationError("unknown or disallowed column: "+key, "invalid_input", 0)
 			}
 		}
 	}
 
-	return setValues, nil
+	return nil
 }
 
 func pkValuesFromArgs(pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {

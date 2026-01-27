@@ -1,6 +1,8 @@
 module tidb-graphql
 
-go 1.24.11
+go 1.25.0
+
+toolchain go1.25.6
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2

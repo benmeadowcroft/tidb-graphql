@@ -102,10 +102,12 @@ type Table struct {
 	GraphQLQueryName string
 	// GraphQLSingleQueryName is the resolved root field name prefix for single-row lookups.
 	GraphQLSingleQueryName string
-	Columns                []Column
-	ForeignKeys            []ForeignKey
-	Relationships          []Relationship
-	Indexes                []Index
+	// GraphQLSingleTypeName is the resolved type name used for singular operations (mutations, payloads).
+	GraphQLSingleTypeName string
+	Columns               []Column
+	ForeignKeys           []ForeignKey
+	Relationships         []Relationship
+	Indexes               []Index
 }
 
 // Schema represents the introspected database schema

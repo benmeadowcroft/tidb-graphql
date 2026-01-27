@@ -153,14 +153,7 @@ func (r *Resolver) singularTypeName(table introspection.Table) string {
 	}
 	r.mu.RUnlock()
 
-	var name string
-	if r.singularNamer != nil {
-		singularTable := r.singularNamer.Singularize(table.Name)
-		name = r.singularNamer.RegisterType(singularTable)
-	} else {
-		namer := naming.Default()
-		name = namer.ToGraphQLTypeName(namer.Singularize(table.Name))
-	}
+	name := introspection.GraphQLSingleTypeName(table)
 
 	r.mu.Lock()
 	if cached, ok := r.singularTypeCache[key]; ok {
@@ -212,10 +205,10 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 	}
 
 	// Primary key query (supports both single and composite primary keys)
+	// Uses singular name (e.g., "user" not "user_by_pk") for cleaner API
 	pkCols := introspection.PrimaryKeyColumns(table)
 	if len(pkCols) > 0 {
-		singularName := r.singularQueryName(table)
-		pkFieldName := fmt.Sprintf("%s_by_pk", singularName)
+		pkFieldName := r.singularQueryName(table)
 		r.addSingleRowQuery(fields, table, tableType, pkFieldName, pkCols)
 	}
 

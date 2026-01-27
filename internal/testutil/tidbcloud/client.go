@@ -52,7 +52,7 @@ func NewTestDB(t *testing.T) *TestDB {
 	// Create a unique database name for this test run
 	dbName := fmt.Sprintf("test_%s_%d",
 		sanitizeName(t.Name()),
-		time.Now().UnixNano())
+		time.Now().UnixMilli())
 
 	// Connect to default database first
 	dsn := buildDSN(cfg, "information_schema")
@@ -136,9 +136,10 @@ func NewRoleTestDB(t *testing.T) *RoleTestDB {
 
 	cfg := getTestConfig(t)
 
+	// Use milliseconds instead of nanoseconds to keep name under 64 char limit
 	dbName := fmt.Sprintf("test_%s_%d",
 		sanitizeName(t.Name()),
-		time.Now().UnixNano())
+		time.Now().UnixMilli())
 
 	adminBootstrap, err := sql.Open("mysql", buildDSN(cfg, "information_schema"))
 	if err != nil {

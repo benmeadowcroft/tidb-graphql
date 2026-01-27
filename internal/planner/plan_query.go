@@ -163,8 +163,8 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 		}
 
 		singleField := introspection.GraphQLSingleQueryName(table)
-		pkField := singleField + "_by_pk"
-		if fieldName == pkField {
+		// Primary key lookup uses the singular field name (e.g., "user" not "user_by_pk")
+		if fieldName == singleField {
 			pkCols := introspection.PrimaryKeyColumns(table)
 			if len(pkCols) == 0 {
 				return nil, fmt.Errorf("no primary key for table %s", table.Name)

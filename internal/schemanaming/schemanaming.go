@@ -29,6 +29,7 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 		table.GraphQLQueryName = namer.RegisterQueryField(table.Name)
 		singularTableName := singularNamer.Singularize(table.Name)
 		table.GraphQLSingleQueryName = singularNamer.RegisterQueryField(singularTableName)
+		table.GraphQLSingleTypeName = singularNamer.RegisterType(singularTableName)
 
 		for ci := range table.Columns {
 			col := &table.Columns[ci]

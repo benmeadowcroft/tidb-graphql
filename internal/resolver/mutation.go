@@ -398,6 +398,9 @@ func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []intros
 
 func (r *Resolver) selectRowByPK(p graphql.ResolveParams, table introspection.Table, pkCols []introspection.Column, pkValues map[string]interface{}, tx dbexec.TxExecutor) (map[string]interface{}, error) {
 	field := firstFieldAST(p.Info.FieldASTs)
+	if field == nil {
+		return nil, fmt.Errorf("missing field AST in resolve params")
+	}
 	selected := planner.SelectedColumns(table, field, p.Info.Fragments)
 
 	var query planner.SQLQuery

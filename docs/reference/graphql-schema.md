@@ -14,7 +14,7 @@ This section describes how the GraphQL schema is derived from the TiDB schema.
 For each table `users`:
 
 - List query: `users(limit, offset, where, orderBy)` returns `[User]`.
-- Primary key lookup: `user_by_pk(id: ID!)` returns `User`.
+- Primary key lookup: `user(id: ID!)` returns `User`.
 - Unique index lookups: `user_by_email(email: String!)` returns `User`.
 
 Notes:

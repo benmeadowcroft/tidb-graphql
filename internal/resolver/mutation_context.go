@@ -11,9 +11,10 @@ type mutationContextKey struct{}
 
 // MutationContext holds a shared transaction for a mutation operation.
 type MutationContext struct {
-	tx       dbexec.TxExecutor
-	hasError bool
-	mu       sync.Mutex
+	tx        dbexec.TxExecutor
+	hasError  bool
+	finalized bool
+	mu        sync.Mutex
 }
 
 func NewMutationContext(tx dbexec.TxExecutor) *MutationContext {
@@ -30,12 +31,19 @@ func (mc *MutationContext) MarkError() {
 	mc.mu.Unlock()
 }
 
+// Finalize commits or rolls back the transaction based on the error state.
+// It holds the lock through the entire operation to prevent race conditions
+// where MarkError could be called between checking hasError and committing.
 func (mc *MutationContext) Finalize() error {
 	mc.mu.Lock()
-	hasError := mc.hasError
-	mc.mu.Unlock()
+	defer mc.mu.Unlock()
 
-	if hasError {
+	if mc.finalized {
+		return nil
+	}
+	mc.finalized = true
+
+	if mc.hasError {
 		return mc.tx.Rollback()
 	}
 	return mc.tx.Commit()

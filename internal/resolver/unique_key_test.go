@@ -107,9 +107,9 @@ func TestUniqueKeyLookups(t *testing.T) {
 		queryType := graphqlSchema.QueryType()
 		fields := queryType.Fields()
 
-		// Should have product_by_pk but not product_by_id (from PRIMARY index)
-		if _, ok := fields["product_by_pk"]; !ok {
-			t.Error("product_by_pk query not found")
+		// Should have product (PK lookup) but not product_by_id (from PRIMARY index)
+		if _, ok := fields["product"]; !ok {
+			t.Error("product PK query not found")
 		}
 		if _, ok := fields["product_by_id"]; ok {
 			t.Error("product_by_id query generated (PRIMARY should be skipped)")

@@ -79,7 +79,7 @@ func TestPKResolver(t *testing.T) {
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
-	field := &ast.Field{Name: &ast.Name{Value: "user_by_pk"}}
+	field := &ast.Field{Name: &ast.Name{Value: "user"}}
 	args := map[string]interface{}{"id": 1}
 	plan, err := planner.PlanQuery(dbSchema, field, args)
 	require.NoError(t, err)

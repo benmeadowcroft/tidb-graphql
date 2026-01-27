@@ -1,9 +1,11 @@
 package middleware
 
 import (
+	"log/slog"
 	"net/http"
 
 	"tidb-graphql/internal/dbexec"
+	"tidb-graphql/internal/logging"
 	"tidb-graphql/internal/resolver"
 
 	"github.com/graphql-go/graphql/language/ast"
@@ -15,20 +17,34 @@ import (
 func MutationTransactionMiddleware(executor dbexec.QueryExecutor) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reqLogger := logging.FromContext(r.Context())
+
 			if executor == nil {
+				reqLogger.Debug("mutation middleware: executor is nil, skipping transaction handling")
 				next.ServeHTTP(w, r)
 				return
 			}
 
 			query, operationName := extractGraphQLRequest(r)
-			opType, ok := resolveOperationType(query, operationName)
-			if !ok || opType != ast.OperationTypeMutation {
+			opType, parseErr := resolveOperationType(query, operationName)
+			if parseErr != nil {
+				reqLogger.Debug("mutation middleware: failed to parse operation type",
+					slog.String("error", parseErr.Error()),
+				)
+				next.ServeHTTP(w, r)
+				return
+			}
+			if opType != ast.OperationTypeMutation {
 				next.ServeHTTP(w, r)
 				return
 			}
 
+
 			tx, err := executor.BeginTx(r.Context())
 			if err != nil {
+				reqLogger.Error("failed to start mutation transaction",
+					slog.String("error", err.Error()),
+				)
 				http.Error(w, "failed to start transaction", http.StatusInternalServerError)
 				return
 			}
@@ -37,12 +53,23 @@ func MutationTransactionMiddleware(executor dbexec.QueryExecutor) func(http.Hand
 			ctx := resolver.WithMutationContext(r.Context(), mc)
 
 			defer func() {
+				var finalizeErr error
 				if rec := recover(); rec != nil {
 					mc.MarkError()
-					_ = mc.Finalize()
+					finalizeErr = mc.Finalize()
+					if finalizeErr != nil {
+						reqLogger.Error("failed to rollback mutation transaction after panic",
+							slog.String("error", finalizeErr.Error()),
+						)
+					}
 					panic(rec)
 				}
-				_ = mc.Finalize()
+				finalizeErr = mc.Finalize()
+				if finalizeErr != nil {
+					reqLogger.Error("failed to finalize mutation transaction",
+						slog.String("error", finalizeErr.Error()),
+					)
+				}
 			}()
 
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -50,9 +77,9 @@ func MutationTransactionMiddleware(executor dbexec.QueryExecutor) func(http.Hand
 	}
 }
 
-func resolveOperationType(query, operationName string) (string, bool) {
+func resolveOperationType(query, operationName string) (string, error) {
 	if query == "" {
-		return "", false
+		return "", nil
 	}
 
 	doc, err := parser.Parse(parser.ParseParams{
@@ -62,7 +89,7 @@ func resolveOperationType(query, operationName string) (string, bool) {
 		}),
 	})
 	if err != nil {
-		return "", false
+		return "", err
 	}
 
 	var first *ast.OperationDefinition
@@ -77,15 +104,15 @@ func resolveOperationType(query, operationName string) (string, bool) {
 			first = op
 		}
 		if operationName != "" && op.Name != nil && op.Name.Value == operationName {
-			return op.Operation, true
+			return op.Operation, nil
 		}
 	}
 
 	if operationName != "" {
-		return "", false
+		return "", nil
 	}
 	if ops == 1 && first != nil {
-		return first.Operation, true
+		return first.Operation, nil
 	}
-	return "", false
+	return "", nil
 }

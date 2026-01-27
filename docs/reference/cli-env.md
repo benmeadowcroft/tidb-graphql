@@ -51,7 +51,7 @@ Version info:
 Example with a password manager:
 
 ```bash
-op read "op://MyVault/TiDB/password" | ./bin/tidb-graphql --database.password=@-
+op read "op://MyVault/TiDB/password" | ./bin/tidb-graphql --database.password_file=@-
 ```
 
 ## Precedence

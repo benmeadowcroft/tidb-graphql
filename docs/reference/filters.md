@@ -1,6 +1,7 @@
 # Filter language
 
 Filters are expressed with a `where` input object on list fields and one-to-many relationship fields.
+JSON columns are excluded from `where` inputs.
 
 ## Logical operators
 

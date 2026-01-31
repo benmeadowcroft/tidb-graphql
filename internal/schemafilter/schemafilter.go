@@ -16,6 +16,10 @@ type Config struct {
 	ScanViews    bool                `mapstructure:"scan_views"`
 	AllowColumns map[string][]string `mapstructure:"allow_columns"`
 	DenyColumns  map[string][]string `mapstructure:"deny_columns"`
+	// DenyMutationTables and DenyMutationColumns apply additional restrictions to writes.
+	// They do not affect query visibility and are evaluated during mutation schema generation.
+	DenyMutationTables  []string            `mapstructure:"deny_mutation_tables"`
+	DenyMutationColumns map[string][]string `mapstructure:"deny_mutation_columns"`
 }
 
 // Apply filters tables, columns, indexes, and relationships in place.
@@ -163,4 +167,17 @@ func matchesAny(value string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// MutationTableAllowed reports whether a table is eligible for mutations.
+// It only applies deny lists and keeps matching logic consistent with query filters.
+func MutationTableAllowed(table string, cfg Config) bool {
+	return !matchesAny(table, cfg.DenyMutationTables)
+}
+
+// MutationColumnAllowed reports whether a column is eligible for mutation inputs.
+// It only applies deny lists and keeps matching logic consistent with query filters.
+func MutationColumnAllowed(table, column string, cfg Config) bool {
+	denyPatterns := mergePatterns(cfg.DenyMutationColumns, table)
+	return !matchesAny(column, denyPatterns)
 }

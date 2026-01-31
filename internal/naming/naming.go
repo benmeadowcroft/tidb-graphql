@@ -30,6 +30,11 @@ func Default() *Namer {
 	return New(DefaultConfig(), nil)
 }
 
+// Config returns the naming configuration.
+func (n *Namer) Config() Config {
+	return n.config
+}
+
 // Reset clears the collision resolver state, allowing the namer to be reused
 // for a new schema build.
 func (n *Namer) Reset() {

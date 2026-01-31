@@ -5,7 +5,9 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/planner"
+	"tidb-graphql/internal/schemafilter"
 )
 
 // TestUniqueKeyLookups tests unique key query generation and resolution
@@ -42,7 +44,7 @@ func TestUniqueKeyLookups(t *testing.T) {
 	// Test 1: Verify single-column unique key query is generated
 	t.Run("SingleColumnUniqueKeyQuery", func(t *testing.T) {
 		// Create resolver with mock DB (not actually connecting)
-		resolver := NewResolver(nil, schema, nil, 0)
+		resolver := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 		// Build GraphQL schema
 		graphqlSchema, err := resolver.BuildGraphQLSchema()
@@ -50,21 +52,21 @@ func TestUniqueKeyLookups(t *testing.T) {
 			t.Fatalf("Failed to build GraphQL schema: %v", err)
 		}
 
-		// Check that products_by_sku query exists
+		// Check that product_by_sku query exists
 		queryType := graphqlSchema.QueryType()
 		if queryType == nil {
 			t.Fatal("Query type is nil")
 		}
 
 		fields := queryType.Fields()
-		if _, ok := fields["products_by_sku"]; !ok {
-			t.Error("products_by_sku query not generated")
+		if _, ok := fields["product_by_sku"]; !ok {
+			t.Error("product_by_sku query not generated")
 		}
 	})
 
 	// Test 2: Verify composite unique key query is generated
 	t.Run("CompositeUniqueKeyQuery", func(t *testing.T) {
-		resolver := NewResolver(nil, schema, nil, 0)
+		resolver := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 		graphqlSchema, err := resolver.BuildGraphQLSchema()
 		if err != nil {
 			t.Fatalf("Failed to build GraphQL schema: %v", err)
@@ -73,14 +75,14 @@ func TestUniqueKeyLookups(t *testing.T) {
 		queryType := graphqlSchema.QueryType()
 		fields := queryType.Fields()
 
-		if _, ok := fields["products_by_manufacturerId_sku"]; !ok {
-			t.Error("products_by_manufacturerId_sku query not generated for composite unique key")
+		if _, ok := fields["product_by_manufacturerId_sku"]; !ok {
+			t.Error("product_by_manufacturerId_sku query not generated for composite unique key")
 		}
 	})
 
 	// Test 3: Verify non-unique indexes don't generate queries
 	t.Run("NonUniqueIndexIgnored", func(t *testing.T) {
-		resolver := NewResolver(nil, schema, nil, 0)
+		resolver := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 		graphqlSchema, err := resolver.BuildGraphQLSchema()
 		if err != nil {
 			t.Fatalf("Failed to build GraphQL schema: %v", err)
@@ -89,14 +91,14 @@ func TestUniqueKeyLookups(t *testing.T) {
 		queryType := graphqlSchema.QueryType()
 		fields := queryType.Fields()
 
-		if _, ok := fields["products_by_name"]; ok {
-			t.Error("products_by_name query generated for non-unique index (should not exist)")
+		if _, ok := fields["product_by_name"]; ok {
+			t.Error("product_by_name query generated for non-unique index (should not exist)")
 		}
 	})
 
 	// Test 4: Verify PRIMARY key is not duplicated
 	t.Run("PrimaryKeyNotDuplicated", func(t *testing.T) {
-		resolver := NewResolver(nil, schema, nil, 0)
+		resolver := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 		graphqlSchema, err := resolver.BuildGraphQLSchema()
 		if err != nil {
 			t.Fatalf("Failed to build GraphQL schema: %v", err)
@@ -105,12 +107,12 @@ func TestUniqueKeyLookups(t *testing.T) {
 		queryType := graphqlSchema.QueryType()
 		fields := queryType.Fields()
 
-		// Should have products_by_pk but not products_by_id (from PRIMARY index)
-		if _, ok := fields["products_by_pk"]; !ok {
-			t.Error("products_by_pk query not found")
+		// Should have product (PK lookup) but not product_by_id (from PRIMARY index)
+		if _, ok := fields["product"]; !ok {
+			t.Error("product PK query not found")
 		}
-		if _, ok := fields["products_by_id"]; ok {
-			t.Error("products_by_id query generated (PRIMARY should be skipped)")
+		if _, ok := fields["product_by_id"]; ok {
+			t.Error("product_by_id query generated (PRIMARY should be skipped)")
 		}
 	})
 }

@@ -29,7 +29,7 @@ func TestUniqueKeyLookup_SingleColumn(t *testing.T) {
 	// Test: Lookup product by SKU (single-column unique index)
 	query := `
 		{
-			products_by_sku(sku: "WIDGET-001") {
+			product_by_sku(sku: "WIDGET-001") {
 				id
 				sku
 				name
@@ -46,7 +46,7 @@ func TestUniqueKeyLookup_SingleColumn(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	product := data["products_by_sku"].(map[string]interface{})
+	product := data["product_by_sku"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, product["id"])
 	assert.Equal(t, "WIDGET-001", product["sku"])
@@ -68,7 +68,7 @@ func TestUniqueKeyLookup_CompositeKey(t *testing.T) {
 	// Test: Lookup product by composite unique key (manufacturer_id + sku)
 	query := `
 		{
-			products_by_manufacturerId_sku(manufacturerId: 1, sku: "WIDGET-001") {
+			product_by_manufacturerId_sku(manufacturerId: 1, sku: "WIDGET-001") {
 				id
 				sku
 				name
@@ -85,7 +85,7 @@ func TestUniqueKeyLookup_CompositeKey(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	product := data["products_by_manufacturerId_sku"].(map[string]interface{})
+	product := data["product_by_manufacturerId_sku"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, product["id"])
 	assert.Equal(t, "WIDGET-001", product["sku"])
@@ -107,7 +107,7 @@ func TestUniqueKeyLookup_NotFound(t *testing.T) {
 	// Test: Lookup non-existent product
 	query := `
 		{
-			products_by_sku(sku: "NONEXISTENT") {
+			product_by_sku(sku: "NONEXISTENT") {
 				id
 				sku
 				name
@@ -123,7 +123,7 @@ func TestUniqueKeyLookup_NotFound(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	product := data["products_by_sku"]
+	product := data["product_by_sku"]
 
 	// Should return null for not found
 	assert.Nil(t, product)
@@ -143,7 +143,7 @@ func TestUniqueKeyLookup_Nullable(t *testing.T) {
 	// Test: Lookup manufacturer by email (nullable unique field)
 	query := `
 		{
-			manufacturers_by_email(email: "contact@acme.com") {
+			manufacturer_by_email(email: "contact@acme.com") {
 				id
 				name
 				email
@@ -160,7 +160,7 @@ func TestUniqueKeyLookup_Nullable(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	manufacturer := data["manufacturers_by_email"].(map[string]interface{})
+	manufacturer := data["manufacturer_by_email"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, manufacturer["id"])
 	assert.Equal(t, "Acme Corp", manufacturer["name"])
@@ -182,7 +182,7 @@ func TestUniqueKeyLookup_WithRelationships(t *testing.T) {
 	// Test: Lookup order by order number and traverse relationship
 	query := `
 		{
-			orders_by_orderNumber(orderNumber: "ORD-2023-0001") {
+			order_by_orderNumber(orderNumber: "ORD-2023-0001") {
 				id
 				orderNumber
 				customerEmail
@@ -204,7 +204,7 @@ func TestUniqueKeyLookup_WithRelationships(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	order := data["orders_by_orderNumber"].(map[string]interface{})
+	order := data["order_by_orderNumber"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, order["id"])
 	assert.Equal(t, "ORD-2023-0001", order["orderNumber"])
@@ -232,15 +232,15 @@ func TestUniqueKeyLookup_MultipleQueries(t *testing.T) {
 	// Test: Multiple unique key lookups in one query
 	query := `
 		{
-			widget1: products_by_sku(sku: "WIDGET-001") {
+			widget1: product_by_sku(sku: "WIDGET-001") {
 				id
 				name
 			}
-			widget2: products_by_sku(sku: "WIDGET-002") {
+			widget2: product_by_sku(sku: "WIDGET-002") {
 				id
 				name
 			}
-			acme: manufacturers_by_name(name: "Acme Corp") {
+			acme: manufacturer_by_name(name: "Acme Corp") {
 				id
 				name
 				country
@@ -285,7 +285,7 @@ func TestUniqueKeyLookup_CategorySlug(t *testing.T) {
 	// Test: Lookup category by slug
 	query := `
 		{
-			categories_by_slug(slug: "electronics") {
+			category_by_slug(slug: "electronics") {
 				id
 				slug
 				name
@@ -302,7 +302,7 @@ func TestUniqueKeyLookup_CategorySlug(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	category := data["categories_by_slug"].(map[string]interface{})
+	category := data["category_by_slug"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, category["id"])
 	assert.Equal(t, "electronics", category["slug"])

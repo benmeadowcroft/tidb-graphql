@@ -19,10 +19,15 @@ import (
 
 // Column represents a database column
 type Column struct {
-	Name         string
-	DataType     string
-	IsNullable   bool
-	IsPrimaryKey bool
+	Name            string
+	DataType        string
+	IsNullable      bool
+	IsPrimaryKey    bool
+	IsGenerated     bool
+	IsAutoIncrement bool
+	IsAutoRandom    bool
+	HasDefault      bool
+	ColumnDefault   string
 	// GraphQLFieldName is the resolved GraphQL field name for this column.
 	GraphQLFieldName string
 }
@@ -78,10 +83,10 @@ type JunctionFKInfo struct {
 
 // JunctionConfig contains configuration for a single junction table.
 type JunctionConfig struct {
-	Table    string         // Junction table name
-	Type     JunctionType   // Pure or Attribute
-	LeftFK   JunctionFKInfo // First FK (alphabetically by referenced table)
-	RightFK  JunctionFKInfo // Second FK
+	Table   string         // Junction table name
+	Type    JunctionType   // Pure or Attribute
+	LeftFK  JunctionFKInfo // First FK (alphabetically by referenced table)
+	RightFK JunctionFKInfo // Second FK
 }
 
 // JunctionMap maps junction table names to their configuration.
@@ -95,10 +100,14 @@ type Table struct {
 	GraphQLTypeName string
 	// GraphQLQueryName is the resolved GraphQL root field name for this table.
 	GraphQLQueryName string
-	Columns          []Column
-	ForeignKeys      []ForeignKey
-	Relationships    []Relationship
-	Indexes          []Index
+	// GraphQLSingleQueryName is the resolved root field name prefix for single-row lookups.
+	GraphQLSingleQueryName string
+	// GraphQLSingleTypeName is the resolved type name used for singular operations (mutations, payloads).
+	GraphQLSingleTypeName string
+	Columns               []Column
+	ForeignKeys           []ForeignKey
+	Relationships         []Relationship
+	Indexes               []Index
 }
 
 // Schema represents the introspected database schema
@@ -284,7 +293,9 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		SELECT
 			COLUMN_NAME,
 			DATA_TYPE,
-			IS_NULLABLE
+			IS_NULLABLE,
+			COLUMN_DEFAULT,
+			EXTRA
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
@@ -303,11 +314,21 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 	for rows.Next() {
 		var col Column
 		var isNullable string
-		if err := rows.Scan(&col.Name, &col.DataType, &isNullable); err != nil {
+		var columnDefault sql.NullString
+		var extra string
+		if err := rows.Scan(&col.Name, &col.DataType, &isNullable, &columnDefault, &extra); err != nil {
 			recordSpanError(span, err)
 			return nil, err
 		}
 		col.IsNullable = strings.ToUpper(isNullable) == "YES"
+		if columnDefault.Valid {
+			col.ColumnDefault = columnDefault.String
+			col.HasDefault = true
+		}
+		extraLower := strings.ToLower(extra)
+		col.IsAutoIncrement = strings.Contains(extraLower, "auto_increment")
+		col.IsAutoRandom = strings.Contains(extraLower, "auto_random")
+		col.IsGenerated = strings.Contains(extraLower, "generated")
 		columns = append(columns, col)
 	}
 

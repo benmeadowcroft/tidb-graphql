@@ -9,7 +9,9 @@ import (
 
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/resolver"
+	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/testutil/tidbcloud"
 
 	"github.com/graphql-go/graphql"
@@ -93,7 +95,7 @@ func buildGraphQLSchema(t *testing.T, testDB *tidbcloud.TestDB) graphql.Schema {
 	dbSchema, err := introspection.IntrospectDatabase(testDB.DB, testDB.DatabaseName)
 	require.NoError(t, err)
 
-	res := resolver.NewResolver(dbexec.NewStandardExecutor(testDB.DB), dbSchema, nil, 0)
+	res := resolver.NewResolver(dbexec.NewStandardExecutor(testDB.DB), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 	schema, err := res.BuildGraphQLSchema()
 	require.NoError(t, err)
 

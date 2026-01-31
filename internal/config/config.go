@@ -518,6 +518,8 @@ func setDefaults(v *viper.Viper) {
 		"*": {"*"},
 	})
 	v.SetDefault("schema_filters.scan_views", false)
+	v.SetDefault("schema_filters.deny_mutation_tables", []string{})
+	v.SetDefault("schema_filters.deny_mutation_columns", map[string][]string{})
 
 	// Naming defaults
 	v.SetDefault("naming.plural_overrides", map[string]string{})

@@ -202,7 +202,7 @@ func run() error {
 		return manager.Wait(ctx)
 	})
 
-	graphqlHandler, err := buildGraphQLHandler(cfg, logger, manager, graphqlMetrics, securityMetrics, availableRoles)
+	graphqlHandler, err := buildGraphQLHandler(cfg, logger, manager, graphqlMetrics, securityMetrics, queryExecutor, availableRoles)
 	if err != nil {
 		return fmt.Errorf("failed to initialize GraphQL handler: %w", err)
 	}
@@ -600,7 +600,7 @@ func oidcAuthConfig(cfg *config.Config) middleware.OIDCAuthConfig {
 	}
 }
 
-func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *schemarefresh.Manager, graphqlMetrics *observability.GraphQLMetrics, securityMetrics *observability.SecurityMetrics, availableRoles []string) (http.Handler, error) {
+func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *schemarefresh.Manager, graphqlMetrics *observability.GraphQLMetrics, securityMetrics *observability.SecurityMetrics, executor dbexec.QueryExecutor, availableRoles []string) (http.Handler, error) {
 	graphqlHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		manager.Handler().ServeHTTP(w, r)
 	})
@@ -621,8 +621,12 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 	// Middleware order: OIDC auth runs outermost, then DB role extraction.
 	// DB role middleware must run after OIDC because it reads claims from the
 	// validated JWT token that OIDC places in context. The chain is:
-	//   request -> logging -> OIDC auth -> DB role -> metrics -> tracing -> batching -> graphql
+	//   request -> logging -> OIDC auth -> DB role -> mutation tx -> metrics -> tracing -> batching -> graphql
 	baseHandler := metricsHandler
+	if executor != nil {
+		baseHandler = middleware.MutationTransactionMiddleware(executor)(baseHandler)
+		logger.Info("mutation transaction middleware enabled")
+	}
 	dbRoleHandler := baseHandler
 	if cfg.Server.DBRoleEnabled {
 		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.DBRoleClaimName, cfg.Server.DBRoleValidation, availableRoles)(baseHandler)

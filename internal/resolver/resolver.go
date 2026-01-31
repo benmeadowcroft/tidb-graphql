@@ -20,45 +20,61 @@ import (
 	"github.com/graphql-go/graphql/language/ast"
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/planner"
+	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/sqltype"
 )
 
 // Resolver handles GraphQL query execution against a database.
 // It maintains caches for GraphQL types and input objects to avoid redundant construction.
 type Resolver struct {
-	executor       dbexec.QueryExecutor
-	dbSchema       *introspection.Schema
-	typeCache      map[string]*graphql.Object
-	orderByCache   map[string]*graphql.InputObject
-	whereCache     map[string]*graphql.InputObject
-	filterCache    map[string]*graphql.InputObject
-	aggregateCache map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
-	orderDirection *graphql.Enum
-	nonNegativeInt *graphql.Scalar
-	jsonType       *graphql.Scalar
-	limits         *planner.PlanLimits
-	defaultLimit   int
-	mu             sync.RWMutex
+	executor           dbexec.QueryExecutor
+	dbSchema           *introspection.Schema
+	typeCache          map[string]*graphql.Object
+	orderByCache       map[string]*graphql.InputObject
+	whereCache         map[string]*graphql.InputObject
+	filterCache        map[string]*graphql.InputObject
+	aggregateCache     map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
+	createInputCache   map[string]*graphql.InputObject
+	updateInputCache   map[string]*graphql.InputObject
+	deletePayloadCache map[string]*graphql.Object
+	singularQueryCache map[string]string
+	singularTypeCache  map[string]string
+	singularNamer      *naming.Namer
+	orderDirection     *graphql.Enum
+	nonNegativeInt     *graphql.Scalar
+	jsonType           *graphql.Scalar
+	limits             *planner.PlanLimits
+	defaultLimit       int
+	filters            schemafilter.Config
+	mu                 sync.RWMutex
 }
 
 // NewResolver creates a new resolver with the given executor, schema, and optional limits.
 // The executor handles SQL query execution, dbSchema provides the database structure,
 // and limits (if non-nil) enforces query depth, complexity, and row count constraints.
-func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int) *Resolver {
+func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int, filters schemafilter.Config, namingConfig naming.Config) *Resolver {
 	if defaultLimit <= 0 {
 		defaultLimit = planner.DefaultListLimit
 	}
 	return &Resolver{
-		executor:       executor,
-		dbSchema:       dbSchema,
-		typeCache:      make(map[string]*graphql.Object),
-		orderByCache:   make(map[string]*graphql.InputObject),
-		whereCache:     make(map[string]*graphql.InputObject),
-		filterCache:    make(map[string]*graphql.InputObject),
-		aggregateCache: make(map[string]*graphql.Object),
-		limits:         limits,
-		defaultLimit:   defaultLimit,
+		executor:           executor,
+		dbSchema:           dbSchema,
+		typeCache:          make(map[string]*graphql.Object),
+		orderByCache:       make(map[string]*graphql.InputObject),
+		whereCache:         make(map[string]*graphql.InputObject),
+		filterCache:        make(map[string]*graphql.InputObject),
+		aggregateCache:     make(map[string]*graphql.Object),
+		createInputCache:   make(map[string]*graphql.InputObject),
+		updateInputCache:   make(map[string]*graphql.InputObject),
+		deletePayloadCache: make(map[string]*graphql.Object),
+		singularQueryCache: make(map[string]string),
+		singularTypeCache:  make(map[string]string),
+		singularNamer:      naming.New(namingConfig, nil),
+		limits:             limits,
+		defaultLimit:       defaultLimit,
+		filters:            filters,
 	}
 }
 
@@ -88,11 +104,66 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 		Fields: queryFields,
 	}
 
+	mutationFields := graphql.Fields{}
+	for _, table := range r.dbSchema.Tables {
+		mutationFields = r.addTableMutations(mutationFields, table)
+	}
+
 	schemaConfig := graphql.SchemaConfig{
 		Query: graphql.NewObject(rootQuery),
 	}
+	if len(mutationFields) > 0 {
+		schemaConfig.Mutation = graphql.NewObject(graphql.ObjectConfig{
+			Name:   "Mutation",
+			Fields: mutationFields,
+		})
+	}
 
 	return graphql.NewSchema(schemaConfig)
+}
+
+func (r *Resolver) singularQueryName(table introspection.Table) string {
+	key := table.Name
+	r.mu.RLock()
+	if cached, ok := r.singularQueryCache[key]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	name := introspection.GraphQLSingleQueryName(table)
+
+	r.mu.Lock()
+	if cached, ok := r.singularQueryCache[key]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.singularQueryCache[key] = name
+	r.mu.Unlock()
+
+	return name
+}
+
+func (r *Resolver) singularTypeName(table introspection.Table) string {
+	key := table.Name
+	r.mu.RLock()
+	if cached, ok := r.singularTypeCache[key]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	name := introspection.GraphQLSingleTypeName(table)
+
+	r.mu.Lock()
+	if cached, ok := r.singularTypeCache[key]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.singularTypeCache[key] = name
+	r.mu.Unlock()
+
+	return name
 }
 
 func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Table) graphql.Fields {
@@ -134,14 +205,15 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 	}
 
 	// Primary key query (supports both single and composite primary keys)
+	// Uses singular name (e.g., "user" not "user_by_pk") for cleaner API
 	pkCols := introspection.PrimaryKeyColumns(table)
 	if len(pkCols) > 0 {
-		pkFieldName := fmt.Sprintf("%s_by_pk", fieldName)
+		pkFieldName := r.singularQueryName(table)
 		r.addSingleRowQuery(fields, table, tableType, pkFieldName, pkCols)
 	}
 
 	// Unique key queries
-	r.addUniqueKeyQueries(fields, table, tableType, fieldName)
+	r.addUniqueKeyQueries(fields, table, tableType, r.singularQueryName(table))
 
 	// Aggregate query
 	aggregateFieldName := fieldName + "_aggregate"
@@ -1454,6 +1526,21 @@ func convertValue(val interface{}) interface{} {
 }
 
 func (r *Resolver) mapColumnTypeToGraphQL(col *introspection.Column) graphql.Output {
+	switch sqltype.MapToGraphQL(col.DataType) {
+	case sqltype.TypeJSON:
+		return r.jsonScalar()
+	case sqltype.TypeInt:
+		return graphql.Int
+	case sqltype.TypeFloat:
+		return graphql.Float
+	case sqltype.TypeBoolean:
+		return graphql.Boolean
+	default:
+		return graphql.String
+	}
+}
+
+func (r *Resolver) mapColumnTypeToGraphQLInput(col *introspection.Column) graphql.Input {
 	switch sqltype.MapToGraphQL(col.DataType) {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()

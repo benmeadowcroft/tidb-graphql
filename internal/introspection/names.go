@@ -25,11 +25,28 @@ func GraphQLTypeName(table Table) string {
 }
 
 // GraphQLQueryName returns the resolved GraphQL root field name for a table.
+// Returns the pluralized table name for list queries (e.g., "persons" for "person" table).
 func GraphQLQueryName(table Table) string {
 	if table.GraphQLQueryName != "" {
 		return table.GraphQLQueryName
 	}
-	return ToGraphQLFieldName(table.Name)
+	return ToGraphQLFieldName(defaultNamer.Pluralize(table.Name))
+}
+
+// GraphQLSingleQueryName returns the resolved root field name prefix for single-row lookups.
+func GraphQLSingleQueryName(table Table) string {
+	if table.GraphQLSingleQueryName != "" {
+		return table.GraphQLSingleQueryName
+	}
+	return ToGraphQLFieldName(defaultNamer.Singularize(table.Name))
+}
+
+// GraphQLSingleTypeName returns the resolved type name used for singular operations.
+func GraphQLSingleTypeName(table Table) string {
+	if table.GraphQLSingleTypeName != "" {
+		return table.GraphQLSingleTypeName
+	}
+	return ToGraphQLTypeName(defaultNamer.Singularize(table.Name))
 }
 
 // GraphQLFieldName returns the resolved GraphQL field name for a column.

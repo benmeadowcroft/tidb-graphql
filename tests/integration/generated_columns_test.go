@@ -95,7 +95,7 @@ func TestGenCol_VirtualQuery(t *testing.T) {
 	// Query virtual generated column (city extracted from JSON)
 	query := `
 		{
-			person(limit: 10) {
+			people(limit: 10) {
 				name
 				city
 			}
@@ -110,12 +110,12 @@ func TestGenCol_VirtualQuery(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	persons := data["person"].([]interface{})
-	require.Len(t, persons, 4, "Should have 4 persons")
+	people := data["people"].([]interface{})
+	require.Len(t, people, 4, "Should have 4 people")
 
 	// Verify city values are extracted from JSON
 	cities := make(map[string]bool)
-	for _, p := range persons {
+	for _, p := range people {
 		person := p.(map[string]interface{})
 		if city, ok := person["city"].(string); ok {
 			cities[city] = true
@@ -141,7 +141,7 @@ func TestGenCol_StoredQuery(t *testing.T) {
 	// Query stored generated column (country extracted from JSON)
 	query := `
 		{
-			person(limit: 10) {
+			people(limit: 10) {
 				name
 				country
 			}
@@ -156,12 +156,12 @@ func TestGenCol_StoredQuery(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	persons := data["person"].([]interface{})
-	require.Len(t, persons, 4, "Should have 4 persons")
+	people := data["people"].([]interface{})
+	require.Len(t, people, 4, "Should have 4 people")
 
 	// Verify country values are extracted from JSON
 	countries := make(map[string]bool)
-	for _, p := range persons {
+	for _, p := range people {
 		person := p.(map[string]interface{})
 		if country, ok := person["country"].(string); ok {
 			countries[country] = true
@@ -186,7 +186,7 @@ func TestGenCol_FilterVirtual(t *testing.T) {
 	// Filter on virtual generated column with index
 	query := `
 		{
-			person(where: { city: { eq: "New York" } }, limit: 10) {
+			people(where: { city: { eq: "New York" } }, limit: 10) {
 				name
 				city
 			}
@@ -201,10 +201,10 @@ func TestGenCol_FilterVirtual(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	persons := data["person"].([]interface{})
-	require.Len(t, persons, 1, "Should find exactly 1 person in New York")
+	people := data["people"].([]interface{})
+	require.Len(t, people, 1, "Should find exactly 1 person in New York")
 
-	person := persons[0].(map[string]interface{})
+	person := people[0].(map[string]interface{})
 	assert.Equal(t, "Alice", person["name"])
 	assert.Equal(t, "New York", person["city"])
 }
@@ -227,7 +227,7 @@ func TestGenCol_FilterStored(t *testing.T) {
 	// Gadget D: 5.00 * 500 = 2500.00
 	query := `
 		{
-			productsComputed(where: { totalValue: { gt: 1000 } }, limit: 10) {
+			productsComputeds(where: { totalValue: { gt: 1000 } }, limit: 10) {
 				name
 				price
 				quantity
@@ -244,7 +244,7 @@ func TestGenCol_FilterStored(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["productsComputed"].([]interface{})
+	products := data["productsComputeds"].([]interface{})
 	require.Len(t, products, 2, "Should find 2 products with total_value > 1000")
 
 	// Verify the products are Widget B and Gadget D
@@ -309,7 +309,7 @@ func TestGenCol_ComputedNumeric(t *testing.T) {
 	// Query computed numeric column and verify calculation
 	query := `
 		{
-			productsComputed(limit: 10) {
+			productsComputeds(limit: 10) {
 				name
 				price
 				quantity
@@ -326,7 +326,7 @@ func TestGenCol_ComputedNumeric(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["productsComputed"].([]interface{})
+	products := data["productsComputeds"].([]interface{})
 	require.Len(t, products, 4, "Should have 4 products")
 
 	// Verify computed values
@@ -357,7 +357,7 @@ func TestGenCol_WithJSON(t *testing.T) {
 	// Query both JSON column and generated columns in same request
 	query := `
 		{
-			person(where: { name: { eq: "Alice" } }, limit: 1) {
+			people(where: { name: { eq: "Alice" } }, limit: 1) {
 				name
 				addressInfo
 				city
@@ -374,10 +374,10 @@ func TestGenCol_WithJSON(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	persons := data["person"].([]interface{})
-	require.Len(t, persons, 1, "Should find exactly 1 person")
+	people := data["people"].([]interface{})
+	require.Len(t, people, 1, "Should find exactly 1 person")
 
-	person := persons[0].(map[string]interface{})
+	person := people[0].(map[string]interface{})
 	assert.Equal(t, "Alice", person["name"])
 
 	// JSON column returns raw JSON string

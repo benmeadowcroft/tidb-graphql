@@ -293,7 +293,7 @@ func TestPlanQuery_PKField(t *testing.T) {
 		},
 	}
 
-	field := &ast.Field{Name: &ast.Name{Value: "users_by_pk"}}
+	field := &ast.Field{Name: &ast.Name{Value: "user"}}
 	plan, err := PlanQuery(dbSchema, field, map[string]interface{}{
 		"id": 9,
 	})
@@ -329,7 +329,7 @@ func TestPlanQuery_MissingPKArg(t *testing.T) {
 		},
 	}
 
-	field := &ast.Field{Name: &ast.Name{Value: "users_by_pk"}}
+	field := &ast.Field{Name: &ast.Name{Value: "user"}}
 	plan, err := PlanQuery(dbSchema, field, map[string]interface{}{})
 	require.Error(t, err)
 	assert.Nil(t, plan)
@@ -347,7 +347,7 @@ func TestPlanQuery_NoPrimaryKey(t *testing.T) {
 		},
 	}
 
-	field := &ast.Field{Name: &ast.Name{Value: "users_by_pk"}}
+	field := &ast.Field{Name: &ast.Name{Value: "user"}}
 	plan, err := PlanQuery(dbSchema, field, map[string]interface{}{
 		"id": 1,
 	})

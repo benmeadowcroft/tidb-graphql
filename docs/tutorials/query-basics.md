@@ -99,11 +99,11 @@ query {
 
 ## 6) Fetch by primary key
 
-Every table with a primary key gets a `_by_pk` lookup field:
+Every table with a primary key gets a singular lookup field using the table's singular name:
 
 ```graphql
 query test {
-  users_by_pk(id:1){
+  user(id:1){
     fullName
     email
     status
@@ -121,7 +121,7 @@ If a table has a unique index, you get a direct lookup field. For example:
 
 ```graphql
 {
-  users_by_email(email: "ben.turner@example.com") {
+  user_by_email(email: "ben.turner@example.com") {
     id
     email
     status

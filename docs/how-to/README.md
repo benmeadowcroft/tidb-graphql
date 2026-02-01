@@ -10,6 +10,9 @@ Task-focused steps for common operations.
 - [Configure CORS for browser clients](cors.md)
 - [Run integration tests locally](integration-tests.md)
 - [Use config precedence correctly](config-precedence.md)
+- [Handle mutation errors](handle-mutation-errors.md)
+- [Control mutation access](mutation-access-control.md)
+- [Work with auto-generated columns](auto-generated-columns.md)
 
 ---
 # Related Docs

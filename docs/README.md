@@ -8,6 +8,7 @@ If you want to get something working end-to-end and understand it as you go.
 - [Your first schema in five minutes](tutorials/first-schema.md)
 - [Secure local dev with OIDC/JWKS](tutorials/local-oidc.md)
 - [Query with filters and unique keys](tutorials/query-basics.md)
+- [Modifying data with mutations](tutorials/mutation-basics.md)
 - [Operations with guardrails](tutorials/ops-guardrails.md)
 
 ## How-To Guides
@@ -21,6 +22,9 @@ If you already know what you want to do, and just need the steps.
 - [Configure CORS for browser clients](how-to/cors.md)
 - [Run integration tests locally](how-to/integration-tests.md)
 - [Use config precedence correctly](how-to/config-precedence.md)
+- [Handle mutation errors](how-to/handle-mutation-errors.md)
+- [Control mutation access](how-to/mutation-access-control.md)
+- [Work with auto-generated columns](how-to/auto-generated-columns.md)
 
 ## Technical Reference
 If you need authoritative, detailed, and complete information.
@@ -49,3 +53,4 @@ If you want the "why" behind the design choices.
 - [Performance constraints as safety rails](explanation/performance-constraints.md)
 - [Database-first authorization](explanation/database-first-auth.md)
 - [Auth architecture](explanation/auth-architecture.md)
+- [Mutation transaction handling](explanation/mutation-transactions.md)

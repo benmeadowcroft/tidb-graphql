@@ -10,7 +10,7 @@
 # Database configuration
 database:
   host: localhost
-  port: "4000"
+  port: 4000
   user: root
   # password: ""  # Leave empty to use --database.password-prompt flag for secure input
   # password_file: "" # Path to file containing the password (use @- for stdin)

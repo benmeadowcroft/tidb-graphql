@@ -27,17 +27,60 @@ Notes:
 
 ## Root mutation fields
 
-For each table `users`:
+For each table with a primary key (excluding views and pure junction tables):
 
-- Create: `createUser(input: CreateUserInput!): User`
-- Update: `updateUser(id: ID!, set: UpdateUserSetInput): User`
-- Delete: `deleteUser(id: ID!): DeleteUserPayload`
+### Create mutation
 
-Notes:
-- Mutations are not generated for views.
-- Update/delete require primary key arguments (composite keys are multiple args).
-- Create/update return the row directly using the selection set on the table type.
-- Delete returns the primary key fields in `DeleteXPayload`.
+- Field name: `create` + SingularTableName (e.g., `createUser`)
+- Arguments: `input: CreateUserInput!` (NonNull required)
+- Return type: table's GraphQL type (e.g., `User`)
+- Behavior: Executes INSERT, re-queries by PK, returns full row with requested fields
+
+Input type includes all insertable columns (non-generated, not in `deny_mutation_columns`).
+Required fields (NonNull): columns that are NOT NULL, have no DEFAULT, not auto-increment, not generated.
+
+### Update mutation
+
+- Field name: `update` + SingularTableName (e.g., `updateUser`)
+- Arguments: PK columns (one or more, all NonNull) + `set: UpdateUserSetInput` (nullable)
+- Return type: table's GraphQL type (e.g., `User`) or null if not found
+- Behavior: Executes UPDATE by PK, re-queries, returns updated row
+
+Set input includes updatable columns (non-PK, non-generated, not in `deny_mutation_columns`).
+All set fields are nullable (optional).
+Empty/null set is a no-op that returns current row.
+
+### Delete mutation
+
+- Field name: `delete` + SingularTableName (e.g., `deleteUser`)
+- Arguments: PK columns (one or more, all NonNull)
+- Return type: `DeleteUserPayload` (contains only PK fields)
+- Behavior: Executes DELETE by PK, returns PK values if deleted, null if not found
+
+Cannot re-query deleted row, so return type only includes PK for confirmation.
+
+### Composite primary keys
+
+For tables with composite PKs, all PK columns become separate arguments:
+
+```graphql
+updateProductCategory(
+  productId: Int!
+  categoryId: Int!
+  set: UpdateProductCategorySetInput
+): ProductCategory
+
+deleteProductCategory(
+  productId: Int!
+  categoryId: Int!
+): DeleteProductCategoryPayload
+```
+
+### Transaction semantics
+
+Each mutation request executes in a transaction. Multiple mutations in one request execute sequentially and commit atomically (all succeed or all roll back).
+
+See [Mutation reference](./mutations.md) for complete details.
 
 ## Relationships
 

@@ -5,6 +5,7 @@ These are guided walkthroughs. Each one builds something working, with just enou
 - [Your first schema in five minutes](first-schema.md)
 - [Secure local dev with OIDC/JWKS](local-oidc.md)
 - [Query with filters and unique keys](query-basics.md)
+- [Modifying data with mutations](mutation-basics.md)
 - [Operations with guardrails](ops-guardrails.md)
 
 Optional sample data:

@@ -13,6 +13,7 @@ Concepts and design rationale for how TiDB GraphQL works.
 - [Performance constraints as safety rails](performance-constraints.md)
 - [Database-first authorization](database-first-auth.md)
 - [Auth architecture](auth-architecture.md)
+- [Mutation transaction handling](mutation-transactions.md)
 
 ---
 # Related Docs

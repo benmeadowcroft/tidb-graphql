@@ -1,4 +1,4 @@
-.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server
+.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server container-build
 
 # Default target
 help:
@@ -17,6 +17,7 @@ help:
 	@echo "  jwt-keys           - Generate local JWT keypair in .auth/"
 	@echo "  jwt-token          - Mint a JWT token from local keypair"
 	@echo "  jwks-server        - Run a local JWKS server for dev auth testing"
+	@echo "  container-build    - Build container image locally (podman/docker)"
 
 # Load test environment variables from .env.test if it exists
 -include .env.test
@@ -111,6 +112,13 @@ jwt-token:
 # Run a local JWKS server for dev auth testing
 jwks-server:
 	go run ./scripts/jwks-server
+
+# Build container image locally (podman or docker)
+container-build:
+	podman build \
+		--build-arg VERSION=$$(cat VERSION 2>/dev/null || echo dev) \
+		--build-arg COMMIT=$$(git rev-parse --short HEAD 2>/dev/null || echo none) \
+		-t tidb-graphql:local .
 
 # Build and run in one command
 dev: build run

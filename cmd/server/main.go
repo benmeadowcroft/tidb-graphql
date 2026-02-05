@@ -452,14 +452,8 @@ func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) e
 	db.SetMaxIdleConns(cfg.Database.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.Database.ConnMaxLifetime)
 
-	if cfg.Server.DBRoleEnabled {
-		if err := verifyRoleDatabaseAccess(cfg, db); err != nil {
-			return err
-		}
-	} else {
-		if err := db.Ping(); err != nil {
-			return err
-		}
+	if err := waitForDatabase(cfg, logger, db); err != nil {
+		return err
 	}
 
 	logger.Info("connected to database",
@@ -469,6 +463,53 @@ func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) e
 		slog.Duration("conn_max_lifetime", cfg.Database.ConnMaxLifetime),
 	)
 	return nil
+}
+
+func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) error {
+	timeout := cfg.Database.ConnectTimeout
+	interval := cfg.Database.ConnectRetryInterval
+
+	// Helper to attempt connection
+	tryConnect := func() error {
+		if cfg.Server.DBRoleEnabled {
+			return verifyRoleDatabaseAccess(cfg, db)
+		}
+		return db.Ping()
+	}
+
+	// If timeout is 0, try once and fail immediately (backward-compatible)
+	if timeout == 0 {
+		return tryConnect()
+	}
+
+	deadline := time.Now().Add(timeout)
+	attempt := 0
+
+	for {
+		attempt++
+		err := tryConnect()
+
+		if err == nil {
+			if attempt > 1 {
+				logger.Info("database connection established", slog.Int("attempts", attempt))
+			}
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("database not available after %v: %w", timeout, err)
+		}
+
+		logger.Warn("database not ready, retrying...",
+			slog.Int("attempt", attempt),
+			slog.Duration("retry_in", interval),
+			slog.String("error", err.Error()),
+		)
+		time.Sleep(interval)
+
+		// Exponential backoff, capped at 30s
+		interval = min(interval*2, 30*time.Second)
+	}
 }
 
 func verifyRoleDatabaseAccess(cfg *config.Config, db *sql.DB) error {

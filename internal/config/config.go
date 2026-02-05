@@ -35,17 +35,19 @@ type Config struct {
 
 // DatabaseConfig holds database connection parameters.
 type DatabaseConfig struct {
-	Host            string        `mapstructure:"host"`
-	Port            int           `mapstructure:"port"`
-	User            string        `mapstructure:"user"`
-	Password        string        `mapstructure:"password"`
-	PasswordFile    string        `mapstructure:"password_file"`
-	PasswordPrompt  bool          `mapstructure:"password_prompt"`
-	Database        string        `mapstructure:"database"`
-	TLSMode         string        `mapstructure:"tls_mode"` // TLS mode: skip-verify, true, or false
-	MaxOpenConns    int           `mapstructure:"max_open_conns"`
-	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
-	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
+	Host                 string        `mapstructure:"host"`
+	Port                 int           `mapstructure:"port"`
+	User                 string        `mapstructure:"user"`
+	Password             string        `mapstructure:"password"`
+	PasswordFile         string        `mapstructure:"password_file"`
+	PasswordPrompt       bool          `mapstructure:"password_prompt"`
+	Database             string        `mapstructure:"database"`
+	TLSMode              string        `mapstructure:"tls_mode"` // TLS mode: skip-verify, true, or false
+	MaxOpenConns         int           `mapstructure:"max_open_conns"`
+	MaxIdleConns         int           `mapstructure:"max_idle_conns"`
+	ConnMaxLifetime      time.Duration `mapstructure:"conn_max_lifetime"`
+	ConnectTimeout       time.Duration `mapstructure:"connect_timeout"`        // Max time to wait for DB on startup
+	ConnectRetryInterval time.Duration `mapstructure:"connect_retry_interval"` // Initial retry interval
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -342,6 +344,8 @@ func defineFlags() {
 		pflag.Int("database.max_open_conns", 0, "Maximum open database connections")
 		pflag.Int("database.max_idle_conns", 0, "Maximum idle connections in pool")
 		pflag.Duration("database.conn_max_lifetime", 0, "Connection max lifetime (e.g. 5m, 30s)")
+		pflag.Duration("database.connect_timeout", 0, "Max time to wait for database on startup (0 = fail immediately)")
+		pflag.Duration("database.connect_retry_interval", 0, "Initial interval between connection retries")
 
 		// Server flags
 		pflag.Int("server.port", 0, "HTTP server port")
@@ -445,6 +449,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.max_open_conns", 25)
 	v.SetDefault("database.max_idle_conns", 5)
 	v.SetDefault("database.conn_max_lifetime", 5*time.Minute)
+	v.SetDefault("database.connect_timeout", 60*time.Second)
+	v.SetDefault("database.connect_retry_interval", 2*time.Second)
 
 	// Server defaults
 	v.SetDefault("server.port", 8080)
@@ -669,6 +675,27 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 			Field:   "database.max_idle_conns",
 			Message: "max_idle_conns is greater than max_open_conns",
 			Hint:    "idle connections will be limited to max_open_conns",
+		})
+	}
+
+	// Connection retry validation
+	if d.ConnectTimeout > 0 && d.ConnectRetryInterval > d.ConnectTimeout {
+		result.Warnings = append(result.Warnings, ValidationWarning{
+			Field:   "database.connect_retry_interval",
+			Message: "connect_retry_interval is greater than connect_timeout",
+			Hint:    "only one connection attempt will be made",
+		})
+	}
+	if d.ConnectRetryInterval < 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.connect_retry_interval",
+			Message: "connect_retry_interval cannot be negative",
+		})
+	}
+	if d.ConnectTimeout < 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.connect_timeout",
+			Message: "connect_timeout cannot be negative",
 		})
 	}
 }

@@ -1,0 +1,52 @@
+# Default configuration for containerized tidb-graphql
+#
+# This file is baked into the container image at /etc/tidb-graphql/tidb-graphql.yaml.
+# Override individual values with TIGQL_* environment variables, or replace the
+# entire file by mounting your own config:
+#
+#   Docker:  -v ./my-config.yaml:/etc/tidb-graphql/tidb-graphql.yaml
+#   K8s:     ConfigMap mounted at /etc/tidb-graphql/
+#
+# See docs/reference/configuration.md for the full reference.
+
+database:
+  host: tidb              # Service name — resolves via Docker Compose / K8s DNS
+  port: 4000
+  user: root
+  database: test
+  tls_mode: skip-verify
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 5m
+  connect_timeout: 60s          # Wait for DB on startup (container-friendly)
+  connect_retry_interval: 2s    # Initial retry interval (exponential backoff)
+
+server:
+  port: 8080
+  graphql_max_depth: 5
+  graphql_max_complexity: 0
+  graphql_max_rows: 0
+  graphql_list_limit_default: 100
+  schema_refresh_min_interval: 30s
+  schema_refresh_max_interval: 5m
+  graphiql_enabled: false
+
+observability:
+  service_name: tidb-graphql
+  environment: production
+  metrics_enabled: true
+  tracing_enabled: false
+  logging:
+    level: info
+    format: json
+    exports_enabled: false
+
+schema_filters:
+  allow_tables: ["*"]
+  deny_tables: []
+  deny_mutation_tables: []
+  scan_views: false
+  allow_columns:
+    "*": ["*"]
+  deny_columns: {}
+  deny_mutation_columns: {}

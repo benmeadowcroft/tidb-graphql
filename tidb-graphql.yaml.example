@@ -22,6 +22,10 @@ database:
   max_idle_conns: 5       # Maximum number of idle connections in pool
   conn_max_lifetime: 5m   # Connection max lifetime
 
+  # Startup connection retry (container-friendly)
+  connect_timeout: 60s         # Max time to wait for DB on startup (0 = fail immediately)
+  connect_retry_interval: 2s   # Initial retry interval (exponential backoff, max 30s)
+
 # Server configuration
 server:
   port: "8080"

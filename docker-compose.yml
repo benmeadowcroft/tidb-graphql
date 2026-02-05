@@ -1,0 +1,43 @@
+# Development environment: TiDB + tidb-graphql
+#
+# Usage:
+#   podman compose up        (or docker compose up)
+#   podman compose up -d     (detached)
+#   podman compose down      (stop and remove)
+#   podman compose down -v   (stop and remove, including data volume)
+#
+# The GraphQL API will be available at http://localhost:8080/graphql
+# TiDB MySQL protocol is exposed at localhost:4000
+#
+# On first run, sample data is loaded from docs/tutorials/sample-data.sql.
+# Data persists across restarts in the 'tidb-data' volume.
+
+services:
+  tidb:
+    image: pingcap/tidb:v8.5.5
+    command:
+      - "--config=/tidb.toml"
+      - "--initialize-sql-file=/init.sql"
+    volumes:
+      - ./config/tidb/tidb.toml:/tidb.toml:ro
+      - ./docs/tutorials/sample-data.sql:/init.sql:ro
+      - tidb-data:/tmp/tidb
+    ports:
+      - "4000:4000"
+      - "10080:10080"
+
+  tidb-graphql:
+    build:
+      context: .
+      dockerfile: Containerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - TIGQL_DATABASE_HOST=tidb
+      - TIGQL_DATABASE_PORT=4000
+      - TIGQL_DATABASE_DATABASE=tidb_graphql_tutorial
+    depends_on:
+      - tidb
+
+volumes:
+  tidb-data:

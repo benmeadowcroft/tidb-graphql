@@ -42,6 +42,8 @@ See `docs/how-to/config-precedence.md` for precedence rules.
 - `database.max_open_conns` (int, default: `25`)
 - `database.max_idle_conns` (int, default: `5`)
 - `database.conn_max_lifetime` (duration, default: `5m`)
+- `database.connect_timeout` (duration, default: `60s`) — Maximum time to wait for database on startup. Set to `0` to fail immediately.
+- `database.connect_retry_interval` (duration, default: `2s`) — Initial interval between connection retry attempts. Uses exponential backoff capped at 30s.
 
 ## server
 

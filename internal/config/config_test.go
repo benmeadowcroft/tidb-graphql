@@ -96,13 +96,15 @@ func TestConfig_Validate(t *testing.T) {
 	validConfig := func() *Config {
 		return &Config{
 			Database: DatabaseConfig{
-				Host:         "localhost",
-				Port:         4000,
-				User:         "root",
-				Database:     "test",
-				TLSMode:      "skip-verify",
-				MaxOpenConns: 25,
-				MaxIdleConns: 5,
+				Host:     "localhost",
+				Port:     4000,
+				User:     "root",
+				Database: "test",
+				TLSMode:  "skip-verify",
+				Pool: PoolConfig{
+					MaxOpen: 25,
+					MaxIdle: 5,
+				},
 			},
 			Server: ServerConfig{
 				Port: 8080,
@@ -303,8 +305,7 @@ func TestConfig_Validate(t *testing.T) {
 	t.Run("CORS http origins with TLS enabled warns", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Server.CORSEnabled = true
-		cfg.Server.TLSEnabled = true
-		cfg.Server.TLSCertMode = "selfsigned"
+		cfg.Server.TLSMode = "auto"
 		cfg.Server.CORSAllowedOrigins = []string{"http://example.com"}
 		result := cfg.Validate()
 		assert.False(t, result.HasErrors())
@@ -312,10 +313,9 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Contains(t, result.Warnings[0].Message, "http://")
 	})
 
-	t.Run("TLS enabled with file mode requires cert files", func(t *testing.T) {
+	t.Run("TLS file mode requires cert files", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.Server.TLSEnabled = true
-		cfg.Server.TLSCertMode = "file"
+		cfg.Server.TLSMode = "file"
 		cfg.Server.TLSCertFile = ""
 		cfg.Server.TLSKeyFile = ""
 		result := cfg.Validate()
@@ -324,29 +324,28 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Contains(t, result.Error(), "tls_key_file")
 	})
 
-	t.Run("TLS enabled with selfsigned mode valid", func(t *testing.T) {
+	t.Run("TLS auto mode valid", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.Server.TLSEnabled = true
-		cfg.Server.TLSCertMode = "selfsigned"
+		cfg.Server.TLSMode = "auto"
 		result := cfg.Validate()
 		assert.False(t, result.HasErrors())
 	})
 
-	t.Run("max_idle_conns greater than max_open_conns warns", func(t *testing.T) {
+	t.Run("max_idle greater than max_open warns", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.Database.MaxOpenConns = 10
-		cfg.Database.MaxIdleConns = 20
+		cfg.Database.Pool.MaxOpen = 10
+		cfg.Database.Pool.MaxIdle = 20
 		result := cfg.Validate()
 		assert.False(t, result.HasErrors())
 		assert.Len(t, result.Warnings, 1)
-		assert.Contains(t, result.Warnings[0].Message, "max_idle_conns")
+		assert.Contains(t, result.Warnings[0].Message, "max_idle")
 	})
 
 	t.Run("db role enabled requires OIDC", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.Server.DBRoleEnabled = true
-		cfg.Server.OIDCEnabled = false
-		cfg.Server.DBRoleIntrospectionRole = "app_introspect"
+		cfg.Server.Auth.DBRoleEnabled = true
+		cfg.Server.Auth.OIDCEnabled = false
+		cfg.Server.Auth.DBRoleIntrospectionRole = "app_introspect"
 		result := cfg.Validate()
 		assert.True(t, result.HasErrors())
 		assert.Contains(t, result.Error(), "db_role_enabled")
@@ -354,11 +353,11 @@ func TestConfig_Validate(t *testing.T) {
 
 	t.Run("db role enabled requires introspection role", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.Server.DBRoleEnabled = true
-		cfg.Server.OIDCEnabled = true
-		cfg.Server.DBRoleIntrospectionRole = ""
-		cfg.Server.OIDCIssuerURL = "https://issuer.test"
-		cfg.Server.OIDCAudience = "aud"
+		cfg.Server.Auth.DBRoleEnabled = true
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.DBRoleIntrospectionRole = ""
+		cfg.Server.Auth.OIDCIssuerURL = "https://issuer.test"
+		cfg.Server.Auth.OIDCAudience = "aud"
 		result := cfg.Validate()
 		assert.True(t, result.HasErrors())
 		assert.Contains(t, result.Error(), "db_role_introspection_role")
@@ -366,9 +365,9 @@ func TestConfig_Validate(t *testing.T) {
 
 	t.Run("OIDC enabled requires issuer and audience", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.Server.OIDCEnabled = true
-		cfg.Server.OIDCIssuerURL = ""
-		cfg.Server.OIDCAudience = ""
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.OIDCIssuerURL = ""
+		cfg.Server.Auth.OIDCAudience = ""
 		result := cfg.Validate()
 		assert.True(t, result.HasErrors())
 		assert.Contains(t, result.Error(), "oidc_issuer_url")
@@ -380,13 +379,13 @@ func TestConfig_Validate(t *testing.T) {
 		cfg.Server.GraphQLMaxDepth = -1
 		cfg.Server.GraphQLMaxComplexity = -1
 		cfg.Server.GraphQLMaxRows = -1
-		cfg.Server.GraphQLDefaultListLimit = -1
+		cfg.Server.GraphQLDefaultLimit = -1
 		result := cfg.Validate()
 		assert.True(t, result.HasErrors())
 		assert.Contains(t, result.Error(), "graphql_max_depth")
 		assert.Contains(t, result.Error(), "graphql_max_complexity")
 		assert.Contains(t, result.Error(), "graphql_max_rows")
-		assert.Contains(t, result.Error(), "graphql_list_limit_default")
+		assert.Contains(t, result.Error(), "graphql_default_limit")
 	})
 
 	t.Run("multiple errors collected", func(t *testing.T) {

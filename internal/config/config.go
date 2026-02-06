@@ -33,21 +33,39 @@ type Config struct {
 	Naming        naming.Config       `mapstructure:"naming"`
 }
 
+// PoolConfig holds connection pool parameters.
+type PoolConfig struct {
+	MaxOpen     int           `mapstructure:"max_open"`
+	MaxIdle     int           `mapstructure:"max_idle"`
+	MaxLifetime time.Duration `mapstructure:"max_lifetime"`
+}
+
 // DatabaseConfig holds database connection parameters.
 type DatabaseConfig struct {
-	Host                 string        `mapstructure:"host"`
-	Port                 int           `mapstructure:"port"`
-	User                 string        `mapstructure:"user"`
-	Password             string        `mapstructure:"password"`
-	PasswordFile         string        `mapstructure:"password_file"`
-	PasswordPrompt       bool          `mapstructure:"password_prompt"`
-	Database             string        `mapstructure:"database"`
-	TLSMode              string        `mapstructure:"tls_mode"` // TLS mode: skip-verify, true, or false
-	MaxOpenConns         int           `mapstructure:"max_open_conns"`
-	MaxIdleConns         int           `mapstructure:"max_idle_conns"`
-	ConnMaxLifetime      time.Duration `mapstructure:"conn_max_lifetime"`
-	ConnectTimeout       time.Duration `mapstructure:"connect_timeout"`        // Max time to wait for DB on startup
-	ConnectRetryInterval time.Duration `mapstructure:"connect_retry_interval"` // Initial retry interval
+	Host                      string        `mapstructure:"host"`
+	Port                      int           `mapstructure:"port"`
+	User                      string        `mapstructure:"user"`
+	Password                  string        `mapstructure:"password"`
+	PasswordFile              string        `mapstructure:"password_file"`
+	PasswordPrompt            bool          `mapstructure:"password_prompt"`
+	Database                  string        `mapstructure:"database"`
+	TLSMode                   string        `mapstructure:"tls_mode"` // TLS mode: skip-verify, true, or false
+	Pool                      PoolConfig    `mapstructure:"pool"`
+	ConnectionTimeout         time.Duration `mapstructure:"connection_timeout"`       // Max time to wait for DB on startup
+	ConnectionRetryInterval   time.Duration `mapstructure:"connection_retry_interval"` // Initial retry interval
+}
+
+// AuthConfig holds authentication and authorization parameters.
+type AuthConfig struct {
+	OIDCEnabled              bool          `mapstructure:"oidc_enabled"`
+	OIDCIssuerURL            string        `mapstructure:"oidc_issuer_url"`
+	OIDCAudience             string        `mapstructure:"oidc_audience"`
+	OIDCClockSkew            time.Duration `mapstructure:"oidc_clock_skew"`
+	OIDCSkipTLSVerify        bool          `mapstructure:"oidc_skip_tls_verify"`
+	DBRoleEnabled            bool          `mapstructure:"db_role_enabled"`
+	DBRoleClaimName          string        `mapstructure:"db_role_claim_name"`
+	DBRoleValidationEnabled  bool          `mapstructure:"db_role_validation_enabled"`
+	DBRoleIntrospectionRole  string        `mapstructure:"db_role_introspection_role"`
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -56,19 +74,11 @@ type ServerConfig struct {
 	GraphQLMaxDepth          int           `mapstructure:"graphql_max_depth"`
 	GraphQLMaxComplexity     int           `mapstructure:"graphql_max_complexity"`
 	GraphQLMaxRows           int           `mapstructure:"graphql_max_rows"`
-	GraphQLDefaultListLimit  int           `mapstructure:"graphql_list_limit_default"`
+	GraphQLDefaultLimit      int           `mapstructure:"graphql_default_limit"`
 	SchemaRefreshMinInterval time.Duration `mapstructure:"schema_refresh_min_interval"`
 	SchemaRefreshMaxInterval time.Duration `mapstructure:"schema_refresh_max_interval"`
 	GraphiQLEnabled          bool          `mapstructure:"graphiql_enabled"`
-	OIDCEnabled              bool          `mapstructure:"oidc_enabled"`
-	OIDCIssuerURL            string        `mapstructure:"oidc_issuer_url"`
-	OIDCAudience             string        `mapstructure:"oidc_audience"`
-	OIDCClockSkew            time.Duration `mapstructure:"oidc_clock_skew"`
-	OIDCSkipTLSVerify        bool          `mapstructure:"oidc_skip_tls_verify"`
-	DBRoleEnabled            bool          `mapstructure:"db_role_enabled"`
-	DBRoleClaimName          string        `mapstructure:"db_role_claim_name"`
-	DBRoleValidation         bool          `mapstructure:"db_role_validation"`
-	DBRoleIntrospectionRole  string        `mapstructure:"db_role_introspection_role"`
+	Auth                     AuthConfig    `mapstructure:"auth"`
 	RateLimitEnabled         bool          `mapstructure:"rate_limit_enabled"`
 	RateLimitRPS             float64       `mapstructure:"rate_limit_rps"`
 	RateLimitBurst           int           `mapstructure:"rate_limit_burst"`
@@ -86,11 +96,10 @@ type ServerConfig struct {
 	HealthCheckTimeout       time.Duration `mapstructure:"health_check_timeout"`
 
 	// TLS Configuration
-	TLSEnabled           bool   `mapstructure:"tls_enabled"`             // Enable HTTPS (default: false for backward compat)
-	TLSCertMode          string `mapstructure:"tls_cert_mode"`           // "file" or "selfsigned" (default: "file")
-	TLSCertFile          string `mapstructure:"tls_cert_file"`           // Path to certificate file (for "file" mode)
-	TLSKeyFile           string `mapstructure:"tls_key_file"`            // Path to private key file (for "file" mode)
-	TLSSelfSignedCertDir string `mapstructure:"tls_selfsigned_cert_dir"` // Directory for self-signed certs (default: ".tls")
+	TLSMode       string `mapstructure:"tls_mode"`         // "off", "auto", or "file" (default: "off")
+	TLSCertFile   string `mapstructure:"tls_cert_file"`    // Path to certificate file (for "file" mode)
+	TLSKeyFile    string `mapstructure:"tls_key_file"`     // Path to private key file (for "file" mode)
+	TLSAutoCertDir string `mapstructure:"tls_auto_cert_dir"` // Directory for auto-generated certs (default: ".tls")
 }
 
 // LoggingConfig holds logging parameters.
@@ -341,30 +350,30 @@ func defineFlags() {
 		pflag.Bool("database.password_prompt", false, "Prompt for database password securely")
 		pflag.String("database.database", "", "Database name")
 		pflag.String("database.tls_mode", "", "TLS mode (skip-verify, true, false)")
-		pflag.Int("database.max_open_conns", 0, "Maximum open database connections")
-		pflag.Int("database.max_idle_conns", 0, "Maximum idle connections in pool")
-		pflag.Duration("database.conn_max_lifetime", 0, "Connection max lifetime (e.g. 5m, 30s)")
-		pflag.Duration("database.connect_timeout", 0, "Max time to wait for database on startup (0 = fail immediately)")
-		pflag.Duration("database.connect_retry_interval", 0, "Initial interval between connection retries")
+		pflag.Int("database.pool.max_open", 0, "Maximum open database connections")
+		pflag.Int("database.pool.max_idle", 0, "Maximum idle connections in pool")
+		pflag.Duration("database.pool.max_lifetime", 0, "Connection max lifetime (e.g. 5m, 30s)")
+		pflag.Duration("database.connection_timeout", 0, "Max time to wait for database on startup (0 = fail immediately)")
+		pflag.Duration("database.connection_retry_interval", 0, "Initial interval between connection retries")
 
 		// Server flags
 		pflag.Int("server.port", 0, "HTTP server port")
 		pflag.Int("server.graphql_max_depth", 0, "Maximum GraphQL query depth limit")
 		pflag.Int("server.graphql_max_complexity", 0, "Maximum GraphQL query complexity limit")
 		pflag.Int("server.graphql_max_rows", 0, "Maximum estimated GraphQL rows per request")
-		pflag.Int("server.graphql_list_limit_default", 0, "Default list limit for GraphQL list queries")
+		pflag.Int("server.graphql_default_limit", 0, "Default list limit for GraphQL list queries")
 		pflag.Duration("server.schema_refresh_min_interval", 0, "Minimum interval between schema refresh checks")
 		pflag.Duration("server.schema_refresh_max_interval", 0, "Maximum interval between schema refresh checks")
 		pflag.Bool("server.graphiql_enabled", false, "Enable GraphiQL UI for /graphql (dev only)")
-		pflag.Bool("server.oidc_enabled", false, "Enable OIDC/JWKS authentication middleware")
-		pflag.String("server.oidc_issuer_url", "", "OIDC issuer URL (for discovery and JWKS)")
-		pflag.String("server.oidc_audience", "", "Expected JWT audience (client ID)")
-		pflag.Duration("server.oidc_clock_skew", 0, "Allowed JWT clock skew (e.g. 2m)")
-		pflag.Bool("server.oidc_skip_tls_verify", false, "Skip TLS verification for OIDC provider (dev only)")
-		pflag.Bool("server.db_role_enabled", false, "Enable database role-based authorization (SET ROLE)")
-		pflag.String("server.db_role_claim_name", "", "JWT claim name containing database role (default: db_role)")
-		pflag.Bool("server.db_role_validation", false, "Validate db_role against discovered database roles")
-		pflag.String("server.db_role_introspection_role", "", "Database role used for schema introspection when role auth is enabled")
+		pflag.Bool("server.auth.oidc_enabled", false, "Enable OIDC/JWKS authentication middleware")
+		pflag.String("server.auth.oidc_issuer_url", "", "OIDC issuer URL (for discovery and JWKS)")
+		pflag.String("server.auth.oidc_audience", "", "Expected JWT audience (client ID)")
+		pflag.Duration("server.auth.oidc_clock_skew", 0, "Allowed JWT clock skew (e.g. 2m)")
+		pflag.Bool("server.auth.oidc_skip_tls_verify", false, "Skip TLS verification for OIDC provider (dev only)")
+		pflag.Bool("server.auth.db_role_enabled", false, "Enable database role-based authorization (SET ROLE)")
+		pflag.String("server.auth.db_role_claim_name", "", "JWT claim name containing database role (default: db_role)")
+		pflag.Bool("server.auth.db_role_validation_enabled", false, "Validate db_role against discovered database roles")
+		pflag.String("server.auth.db_role_introspection_role", "", "Database role used for schema introspection when role auth is enabled")
 		pflag.Bool("server.rate_limit_enabled", false, "Enable global rate limiting for all HTTP endpoints")
 		pflag.Float64("server.rate_limit_rps", 0, "Global rate limit requests per second")
 		pflag.Int("server.rate_limit_burst", 0, "Global rate limit burst size")
@@ -382,11 +391,10 @@ func defineFlags() {
 		pflag.Duration("server.health_check_timeout", 0, "Health check timeout")
 
 		// TLS flags
-		pflag.Bool("server.tls_enabled", false, "Enable HTTPS server")
-		pflag.String("server.tls_cert_mode", "", "TLS certificate mode: file, selfsigned (default: file)")
+		pflag.String("server.tls_mode", "", "TLS mode: off, auto (self-signed), file (default: off)")
 		pflag.String("server.tls_cert_file", "", "Path to TLS certificate file (for file mode)")
 		pflag.String("server.tls_key_file", "", "Path to TLS private key file (for file mode)")
-		pflag.String("server.tls_selfsigned_cert_dir", "", "Directory for self-signed certificates (default: .tls)")
+		pflag.String("server.tls_auto_cert_dir", "", "Directory for auto-generated certificates (default: .tls)")
 
 		// Observability flags
 		pflag.String("observability.service_name", "", "Service name for observability")
@@ -446,30 +454,30 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.password_prompt", false)
 	v.SetDefault("database.database", "test")
 	v.SetDefault("database.tls_mode", "skip-verify") // Default for TiDB Cloud compatibility
-	v.SetDefault("database.max_open_conns", 25)
-	v.SetDefault("database.max_idle_conns", 5)
-	v.SetDefault("database.conn_max_lifetime", 5*time.Minute)
-	v.SetDefault("database.connect_timeout", 60*time.Second)
-	v.SetDefault("database.connect_retry_interval", 2*time.Second)
+	v.SetDefault("database.pool.max_open", 25)
+	v.SetDefault("database.pool.max_idle", 5)
+	v.SetDefault("database.pool.max_lifetime", 5*time.Minute)
+	v.SetDefault("database.connection_timeout", 60*time.Second)
+	v.SetDefault("database.connection_retry_interval", 2*time.Second)
 
 	// Server defaults
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.graphql_max_depth", 5)
 	v.SetDefault("server.graphql_max_complexity", 0)
 	v.SetDefault("server.graphql_max_rows", 0)
-	v.SetDefault("server.graphql_list_limit_default", 100)
+	v.SetDefault("server.graphql_default_limit", 100)
 	v.SetDefault("server.schema_refresh_min_interval", 30*time.Second)
 	v.SetDefault("server.schema_refresh_max_interval", 5*time.Minute)
 	v.SetDefault("server.graphiql_enabled", false)
-	v.SetDefault("server.oidc_enabled", false)
-	v.SetDefault("server.oidc_issuer_url", "")
-	v.SetDefault("server.oidc_audience", "")
-	v.SetDefault("server.oidc_clock_skew", 2*time.Minute)
-	v.SetDefault("server.oidc_skip_tls_verify", false)
-	v.SetDefault("server.db_role_enabled", false)
-	v.SetDefault("server.db_role_claim_name", "db_role")
-	v.SetDefault("server.db_role_validation", true)
-	v.SetDefault("server.db_role_introspection_role", "")
+	v.SetDefault("server.auth.oidc_enabled", false)
+	v.SetDefault("server.auth.oidc_issuer_url", "")
+	v.SetDefault("server.auth.oidc_audience", "")
+	v.SetDefault("server.auth.oidc_clock_skew", 2*time.Minute)
+	v.SetDefault("server.auth.oidc_skip_tls_verify", false)
+	v.SetDefault("server.auth.db_role_enabled", false)
+	v.SetDefault("server.auth.db_role_claim_name", "db_role")
+	v.SetDefault("server.auth.db_role_validation_enabled", true)
+	v.SetDefault("server.auth.db_role_introspection_role", "")
 	v.SetDefault("server.rate_limit_enabled", false)
 	v.SetDefault("server.rate_limit_rps", 0.0)
 	v.SetDefault("server.rate_limit_burst", 0)
@@ -487,11 +495,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.health_check_timeout", 2*time.Second)
 
 	// TLS defaults
-	v.SetDefault("server.tls_enabled", false)
-	v.SetDefault("server.tls_cert_mode", "file")
+	v.SetDefault("server.tls_mode", "off")
 	v.SetDefault("server.tls_cert_file", "")
 	v.SetDefault("server.tls_key_file", "")
-	v.SetDefault("server.tls_selfsigned_cert_dir", ".tls")
+	v.SetDefault("server.tls_auto_cert_dir", ".tls")
 
 	// Observability defaults
 	v.SetDefault("observability.service_name", "tidb-graphql")
@@ -523,7 +530,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("schema_filters.allow_columns", map[string][]string{
 		"*": {"*"},
 	})
-	v.SetDefault("schema_filters.scan_views", false)
+	v.SetDefault("schema_filters.scan_views_enabled", false)
 	v.SetDefault("schema_filters.deny_mutation_tables", []string{})
 	v.SetDefault("schema_filters.deny_mutation_columns", map[string][]string{})
 
@@ -658,44 +665,44 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 	}
 
 	// Connection pool validation
-	if d.MaxOpenConns < 0 {
+	if d.Pool.MaxOpen < 0 {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.max_open_conns",
-			Message: "max_open_conns cannot be negative",
+			Field:   "database.pool.max_open",
+			Message: "max_open cannot be negative",
 		})
 	}
-	if d.MaxIdleConns < 0 {
+	if d.Pool.MaxIdle < 0 {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.max_idle_conns",
-			Message: "max_idle_conns cannot be negative",
+			Field:   "database.pool.max_idle",
+			Message: "max_idle cannot be negative",
 		})
 	}
-	if d.MaxIdleConns > d.MaxOpenConns && d.MaxOpenConns > 0 {
+	if d.Pool.MaxIdle > d.Pool.MaxOpen && d.Pool.MaxOpen > 0 {
 		result.Warnings = append(result.Warnings, ValidationWarning{
-			Field:   "database.max_idle_conns",
-			Message: "max_idle_conns is greater than max_open_conns",
-			Hint:    "idle connections will be limited to max_open_conns",
+			Field:   "database.pool.max_idle",
+			Message: "max_idle is greater than max_open",
+			Hint:    "idle connections will be limited to max_open",
 		})
 	}
 
 	// Connection retry validation
-	if d.ConnectTimeout > 0 && d.ConnectRetryInterval > d.ConnectTimeout {
+	if d.ConnectionTimeout > 0 && d.ConnectionRetryInterval > d.ConnectionTimeout {
 		result.Warnings = append(result.Warnings, ValidationWarning{
-			Field:   "database.connect_retry_interval",
-			Message: "connect_retry_interval is greater than connect_timeout",
+			Field:   "database.connection_retry_interval",
+			Message: "connection_retry_interval is greater than connection_timeout",
 			Hint:    "only one connection attempt will be made",
 		})
 	}
-	if d.ConnectRetryInterval < 0 {
+	if d.ConnectionRetryInterval < 0 {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.connect_retry_interval",
-			Message: "connect_retry_interval cannot be negative",
+			Field:   "database.connection_retry_interval",
+			Message: "connection_retry_interval cannot be negative",
 		})
 	}
-	if d.ConnectTimeout < 0 {
+	if d.ConnectionTimeout < 0 {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.connect_timeout",
-			Message: "connect_timeout cannot be negative",
+			Field:   "database.connection_timeout",
+			Message: "connection_timeout cannot be negative",
 		})
 	}
 }
@@ -751,10 +758,10 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 			Message: "graphql_max_rows cannot be negative",
 		})
 	}
-	if s.GraphQLDefaultListLimit < 0 {
+	if s.GraphQLDefaultLimit < 0 {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "server.graphql_list_limit_default",
-			Message: "graphql_list_limit_default cannot be negative",
+			Field:   "server.graphql_default_limit",
+			Message: "graphql_default_limit cannot be negative",
 		})
 	}
 
@@ -793,7 +800,8 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 		}
 	}
 
-	if s.CORSEnabled && s.TLSEnabled && len(s.CORSAllowedOrigins) > 0 {
+	tlsEnabled := s.TLSMode != "" && s.TLSMode != "off"
+	if s.CORSEnabled && tlsEnabled && len(s.CORSAllowedOrigins) > 0 {
 		onlyHTTP := true
 		for _, origin := range s.CORSAllowedOrigins {
 			origin = strings.TrimSpace(origin)
@@ -819,61 +827,59 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 		}
 	}
 
-	if s.DBRoleEnabled && !s.OIDCEnabled {
+	if s.Auth.DBRoleEnabled && !s.Auth.OIDCEnabled {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "server.db_role_enabled",
+			Field:   "server.auth.db_role_enabled",
 			Message: "db_role_enabled requires OIDC to be enabled",
-			Hint:    "set server.oidc_enabled=true or disable db_role_enabled",
+			Hint:    "set server.auth.oidc_enabled=true or disable db_role_enabled",
 		})
 	}
 
-	if s.DBRoleEnabled && s.DBRoleIntrospectionRole == "" {
+	if s.Auth.DBRoleEnabled && s.Auth.DBRoleIntrospectionRole == "" {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "server.db_role_introspection_role",
+			Field:   "server.auth.db_role_introspection_role",
 			Message: "introspection role is required when db_role_enabled is true",
-			Hint:    "set server.db_role_introspection_role to a role with necessary schema read access",
+			Hint:    "set server.auth.db_role_introspection_role to a role with necessary schema read access",
 		})
 	}
 
-	if s.OIDCEnabled {
-		if s.OIDCIssuerURL == "" {
+	if s.Auth.OIDCEnabled {
+		if s.Auth.OIDCIssuerURL == "" {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "server.oidc_issuer_url",
+				Field:   "server.auth.oidc_issuer_url",
 				Message: "issuer URL is required when OIDC is enabled",
 			})
 		}
-		if s.OIDCAudience == "" {
+		if s.Auth.OIDCAudience == "" {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "server.oidc_audience",
+				Field:   "server.auth.oidc_audience",
 				Message: "audience is required when OIDC is enabled",
 			})
 		}
 	}
 
 	// TLS validation
-	if s.TLSEnabled {
-		validCertModes := map[string]bool{"file": true, "selfsigned": true}
-		if !validCertModes[s.TLSCertMode] {
+	validTLSModes := map[string]bool{"": true, "off": true, "auto": true, "file": true}
+	if !validTLSModes[s.TLSMode] {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "server.tls_mode",
+			Message: fmt.Sprintf("invalid TLS mode %q", s.TLSMode),
+			Hint:    "valid values are: off, auto, file",
+		})
+	}
+
+	if s.TLSMode == "file" {
+		if s.TLSCertFile == "" {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "server.tls_cert_mode",
-				Message: fmt.Sprintf("invalid TLS cert mode %q", s.TLSCertMode),
-				Hint:    "valid values are: file, selfsigned",
+				Field:   "server.tls_cert_file",
+				Message: "TLS cert file required when tls_mode is 'file'",
 			})
 		}
-
-		if s.TLSCertMode == "file" {
-			if s.TLSCertFile == "" {
-				result.Errors = append(result.Errors, ValidationError{
-					Field:   "server.tls_cert_file",
-					Message: "TLS cert file required when tls_cert_mode is 'file'",
-				})
-			}
-			if s.TLSKeyFile == "" {
-				result.Errors = append(result.Errors, ValidationError{
-					Field:   "server.tls_key_file",
-					Message: "TLS key file required when tls_cert_mode is 'file'",
-				})
-			}
+		if s.TLSKeyFile == "" {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "server.tls_key_file",
+				Message: "TLS key file required when tls_mode is 'file'",
+			})
 		}
 	}
 }

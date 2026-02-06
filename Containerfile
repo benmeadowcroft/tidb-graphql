@@ -10,12 +10,10 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build args for version injection
-ARG VERSION=dev
-ARG COMMIT=none
-
+# Extract version info from source
 RUN CGO_ENABLED=0 go build \
-    -ldflags "-X main.Version=${VERSION} -X main.Commit=${COMMIT}" \
+    -ldflags "-X main.Version=$(cat VERSION 2>/dev/null || echo dev) \
+              -X main.Commit=$(git rev-parse --short HEAD 2>/dev/null || echo none)" \
     -o /tidb-graphql ./cmd/server
 
 # Stage 2: Runtime

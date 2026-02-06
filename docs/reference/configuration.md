@@ -22,8 +22,9 @@ All configuration keys can be set via environment variables using this format:
 
 Examples:
 - `database.host` → `TIGQL_DATABASE_HOST`
-- `database.max_open_conns` → `TIGQL_DATABASE_MAX_OPEN_CONNS`
+- `database.pool.max_open` → `TIGQL_DATABASE_POOL_MAX_OPEN`
 - `server.graphql_max_depth` → `TIGQL_SERVER_GRAPHQL_MAX_DEPTH`
+- `server.auth.oidc_enabled` → `TIGQL_SERVER_AUTH_OIDC_ENABLED`
 - `observability.otlp.endpoint` → `TIGQL_OBSERVABILITY_OTLP_ENDPOINT`
 
 See `docs/how-to/config-precedence.md` for precedence rules.
@@ -39,11 +40,15 @@ See `docs/how-to/config-precedence.md` for precedence rules.
 - `database.database` (string, default: `test`)
 - `database.tls_mode` (string, default: `skip-verify`; values: `skip-verify`, `true`, `false`)
   - YAML booleans (`true`/`false`) are accepted and mapped to the string values.
-- `database.max_open_conns` (int, default: `25`)
-- `database.max_idle_conns` (int, default: `5`)
-- `database.conn_max_lifetime` (duration, default: `5m`)
-- `database.connect_timeout` (duration, default: `60s`) — Maximum time to wait for database on startup. Set to `0` to fail immediately.
-- `database.connect_retry_interval` (duration, default: `2s`) — Initial interval between connection retry attempts. Uses exponential backoff capped at 30s.
+
+Connection pool:
+- `database.pool.max_open` (int, default: `25`) — Maximum open database connections
+- `database.pool.max_idle` (int, default: `5`) — Maximum idle connections in pool
+- `database.pool.max_lifetime` (duration, default: `5m`) — Connection max lifetime
+
+Connection behavior:
+- `database.connection_timeout` (duration, default: `60s`) — Maximum time to wait for database on startup. Set to `0` to fail immediately.
+- `database.connection_retry_interval` (duration, default: `2s`) — Initial interval between connection retry attempts. Uses exponential backoff capped at 30s.
 
 ## server
 
@@ -51,7 +56,7 @@ See `docs/how-to/config-precedence.md` for precedence rules.
 - `server.graphql_max_depth` (int, default: `5`)
 - `server.graphql_max_complexity` (int, default: `0` = unlimited)
 - `server.graphql_max_rows` (int, default: `0` = unlimited)
-- `server.graphql_list_limit_default` (int, default: `100`)
+- `server.graphql_default_limit` (int, default: `100`)
 - `server.schema_refresh_min_interval` (duration, default: `30s`)
 - `server.schema_refresh_max_interval` (duration, default: `5m`)
 - `server.read_timeout` (duration, default: `15s`)
@@ -60,15 +65,19 @@ See `docs/how-to/config-precedence.md` for precedence rules.
 - `server.shutdown_timeout` (duration, default: `30s`)
 - `server.health_check_timeout` (duration, default: `2s`)
 - `server.graphiql_enabled` (bool, default: `false`)
-- `server.oidc_enabled` (bool, default: `false`)
-- `server.oidc_issuer_url` (string, default: empty; must be HTTPS)
-- `server.oidc_audience` (string, default: empty)
-- `server.oidc_clock_skew` (duration, default: `2m`)
-- `server.oidc_skip_tls_verify` (bool, default: `false`; dev-only)
-- `server.db_role_enabled` (bool, default: `false`)
-- `server.db_role_claim_name` (string, default: `db_role`)
-- `server.db_role_validation` (bool, default: `true`)
-- `server.db_role_introspection_role` (string, default: empty; role used only during schema refresh)
+
+Authentication (under `server.auth`):
+- `server.auth.oidc_enabled` (bool, default: `false`)
+- `server.auth.oidc_issuer_url` (string, default: empty; must be HTTPS)
+- `server.auth.oidc_audience` (string, default: empty)
+- `server.auth.oidc_clock_skew` (duration, default: `2m`)
+- `server.auth.oidc_skip_tls_verify` (bool, default: `false`; dev-only)
+- `server.auth.db_role_enabled` (bool, default: `false`)
+- `server.auth.db_role_claim_name` (string, default: `db_role`)
+- `server.auth.db_role_validation_enabled` (bool, default: `true`)
+- `server.auth.db_role_introspection_role` (string, default: empty; role used only during schema refresh)
+
+Rate limiting:
 - `server.rate_limit_enabled` (bool, default: `false`)
 - `server.rate_limit_rps` (float, default: `0`)
 - `server.rate_limit_burst` (int, default: `0`)
@@ -83,11 +92,13 @@ CORS:
 - `server.cors_max_age` (int seconds, default: `86400`)
 
 TLS/HTTPS:
-- `server.tls_enabled` (bool, default: `false`)
-- `server.tls_cert_mode` (string, default: `file`; values: `file`, `selfsigned`)
-- `server.tls_cert_file` (string, default: empty)
-- `server.tls_key_file` (string, default: empty)
-- `server.tls_selfsigned_cert_dir` (string, default: `.tls`)
+- `server.tls_mode` (string, default: `off`; values: `off`, `auto`, `file`)
+  - `off` — HTTP only (no TLS)
+  - `auto` — Auto-generate self-signed certificates (similar to TiDB's `auto-tls`)
+  - `file` — Use provided certificate and key files
+- `server.tls_cert_file` (string, default: empty) — Required when `tls_mode: file`
+- `server.tls_key_file` (string, default: empty) — Required when `tls_mode: file`
+- `server.tls_auto_cert_dir` (string, default: `.tls`) — Directory for auto-generated certs when `tls_mode: auto`
 
 ## observability
 
@@ -121,7 +132,7 @@ OTLP (applies to all signals unless overridden):
 - `schema_filters.allow_tables` (list of string, default: `["*"]`)
 - `schema_filters.deny_tables` (list of string, default: empty)
 - `schema_filters.deny_mutation_tables` (list of string, default: empty)
-- `schema_filters.scan_views` (bool, default: `false`)
+- `schema_filters.scan_views_enabled` (bool, default: `false`)
 - `schema_filters.allow_columns` (map of table => list of glob patterns, default: `{"*": ["*"]}`)
 - `schema_filters.deny_columns` (map of table => list of glob patterns, default: empty)
 - `schema_filters.deny_mutation_columns` (map of table => list of glob patterns, default: empty)

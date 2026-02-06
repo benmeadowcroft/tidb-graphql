@@ -181,7 +181,7 @@ func run() error {
 	limits := buildPlanLimits(cfg)
 
 	var availableRoles []string
-	if cfg.Server.DBRoleEnabled {
+	if cfg.Server.Auth.DBRoleEnabled {
 		availableRoles, err = discoverRoles(db, logger)
 		if err != nil {
 			return fmt.Errorf("failed to discover database roles: %w", err)
@@ -397,7 +397,7 @@ func connectDB(cfg *config.Config, logger *logging.Logger) (*sql.DB, interface{ 
 	var db *sql.DB
 	var dbStatsReg interface{ Unregister() error }
 	dsn := cfg.Database.DSN()
-	if cfg.Server.DBRoleEnabled {
+	if cfg.Server.Auth.DBRoleEnabled {
 		dsn = cfg.Database.DSNWithoutDatabase()
 	}
 
@@ -448,9 +448,9 @@ func connectDB(cfg *config.Config, logger *logging.Logger) (*sql.DB, interface{ 
 }
 
 func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) error {
-	db.SetMaxOpenConns(cfg.Database.MaxOpenConns)
-	db.SetMaxIdleConns(cfg.Database.MaxIdleConns)
-	db.SetConnMaxLifetime(cfg.Database.ConnMaxLifetime)
+	db.SetMaxOpenConns(cfg.Database.Pool.MaxOpen)
+	db.SetMaxIdleConns(cfg.Database.Pool.MaxIdle)
+	db.SetConnMaxLifetime(cfg.Database.Pool.MaxLifetime)
 
 	if err := waitForDatabase(cfg, logger, db); err != nil {
 		return err
@@ -458,20 +458,20 @@ func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) e
 
 	logger.Info("connected to database",
 		slog.String("database", cfg.Database.Database),
-		slog.Int("max_open_conns", cfg.Database.MaxOpenConns),
-		slog.Int("max_idle_conns", cfg.Database.MaxIdleConns),
-		slog.Duration("conn_max_lifetime", cfg.Database.ConnMaxLifetime),
+		slog.Int("pool_max_open", cfg.Database.Pool.MaxOpen),
+		slog.Int("pool_max_idle", cfg.Database.Pool.MaxIdle),
+		slog.Duration("pool_max_lifetime", cfg.Database.Pool.MaxLifetime),
 	)
 	return nil
 }
 
 func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) error {
-	timeout := cfg.Database.ConnectTimeout
-	interval := cfg.Database.ConnectRetryInterval
+	timeout := cfg.Database.ConnectionTimeout
+	interval := cfg.Database.ConnectionRetryInterval
 
 	// Helper to attempt connection
 	tryConnect := func() error {
-		if cfg.Server.DBRoleEnabled {
+		if cfg.Server.Auth.DBRoleEnabled {
 			return verifyRoleDatabaseAccess(cfg, db)
 		}
 		return db.Ping()
@@ -523,13 +523,13 @@ func verifyRoleDatabaseAccess(cfg *config.Config, db *sql.DB) error {
 		_ = conn.Close()
 	}()
 
-	if cfg.Server.DBRoleIntrospectionRole != "" {
+	if cfg.Server.Auth.DBRoleIntrospectionRole != "" {
 		if _, err := conn.ExecContext(ctx, "SET ROLE NONE"); err != nil {
 			return fmt.Errorf("failed to clear roles before introspection: %w", err)
 		}
-		setRoleSQL := fmt.Sprintf("SET ROLE %s", sqlutil.QuoteIdentifier(cfg.Server.DBRoleIntrospectionRole))
+		setRoleSQL := fmt.Sprintf("SET ROLE %s", sqlutil.QuoteIdentifier(cfg.Server.Auth.DBRoleIntrospectionRole))
 		if _, err := conn.ExecContext(ctx, setRoleSQL); err != nil {
-			return fmt.Errorf("failed to set introspection role %s: %w", cfg.Server.DBRoleIntrospectionRole, err)
+			return fmt.Errorf("failed to set introspection role %s: %w", cfg.Server.Auth.DBRoleIntrospectionRole, err)
 		}
 	}
 
@@ -590,7 +590,7 @@ func validateDBRolePrivileges(db *sql.DB, targetDatabase string, logger *logging
 
 func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string) dbexec.QueryExecutor {
 	queryExecutor := dbexec.QueryExecutor(dbexec.NewStandardExecutor(db))
-	if cfg.Server.DBRoleEnabled {
+	if cfg.Server.Auth.DBRoleEnabled {
 		queryExecutor = dbexec.NewRoleExecutor(dbexec.RoleExecutorConfig{
 			DB:           db,
 			DatabaseName: cfg.Database.Database,
@@ -599,7 +599,7 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string)
 				return role.Role, ok && role.Validated
 			},
 			AllowedRoles: availableRoles,
-			ValidateRole: cfg.Server.DBRoleValidation,
+			ValidateRole: cfg.Server.Auth.DBRoleValidationEnabled,
 		})
 	}
 	return queryExecutor
@@ -610,7 +610,7 @@ func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, 
 		DB:                db,
 		DatabaseName:      cfg.Database.Database,
 		Limits:            limits,
-		DefaultLimit:      cfg.Server.GraphQLDefaultListLimit,
+		DefaultLimit:      cfg.Server.GraphQLDefaultLimit,
 		Logger:            logger,
 		Metrics:           metrics,
 		MinInterval:       cfg.Server.SchemaRefreshMinInterval,
@@ -619,7 +619,7 @@ func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, 
 		Filters:           cfg.SchemaFilters,
 		Naming:            cfg.Naming,
 		Executor:          executor,
-		IntrospectionRole: cfg.Server.DBRoleIntrospectionRole,
+		IntrospectionRole: cfg.Server.Auth.DBRoleIntrospectionRole,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -633,11 +633,11 @@ func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, 
 
 func oidcAuthConfig(cfg *config.Config) middleware.OIDCAuthConfig {
 	return middleware.OIDCAuthConfig{
-		Enabled:       cfg.Server.OIDCEnabled,
-		IssuerURL:     cfg.Server.OIDCIssuerURL,
-		Audience:      cfg.Server.OIDCAudience,
-		ClockSkew:     cfg.Server.OIDCClockSkew,
-		SkipTLSVerify: cfg.Server.OIDCSkipTLSVerify,
+		Enabled:       cfg.Server.Auth.OIDCEnabled,
+		IssuerURL:     cfg.Server.Auth.OIDCIssuerURL,
+		Audience:      cfg.Server.Auth.OIDCAudience,
+		ClockSkew:     cfg.Server.Auth.OIDCClockSkew,
+		SkipTLSVerify: cfg.Server.Auth.OIDCSkipTLSVerify,
 	}
 }
 
@@ -669,13 +669,13 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 		logger.Info("mutation transaction middleware enabled")
 	}
 	dbRoleHandler := baseHandler
-	if cfg.Server.DBRoleEnabled {
-		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.DBRoleClaimName, cfg.Server.DBRoleValidation, availableRoles)(baseHandler)
+	if cfg.Server.Auth.DBRoleEnabled {
+		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.Auth.DBRoleClaimName, cfg.Server.Auth.DBRoleValidationEnabled, availableRoles)(baseHandler)
 		logger.Info("database role middleware enabled")
 	}
 
 	authHandler := dbRoleHandler
-	if cfg.Server.OIDCEnabled {
+	if cfg.Server.Auth.OIDCEnabled {
 		authMiddleware, err := middleware.OIDCAuthMiddleware(oidcAuthConfig(cfg), logger, securityMetrics)
 		if err != nil {
 			return nil, err
@@ -689,7 +689,7 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 
 func buildAdminHandler(cfg *config.Config, logger *logging.Logger, manager *schemarefresh.Manager, securityMetrics *observability.SecurityMetrics) (http.Handler, error) {
 	var adminHandler http.Handler = http.HandlerFunc(schemaReloadHandler(manager, securityMetrics))
-	if cfg.Server.OIDCEnabled {
+	if cfg.Server.Auth.OIDCEnabled {
 		adminAuthMiddleware, err := middleware.OIDCAuthMiddleware(oidcAuthConfig(cfg), logger, securityMetrics)
 		if err != nil {
 			return nil, err
@@ -765,12 +765,24 @@ func buildServer(cfg *config.Config, logger *logging.Logger, handler http.Handle
 	}
 
 	var tlsManager tlscert.Manager
-	if cfg.Server.TLSEnabled {
+	tlsEnabled := cfg.Server.TLSMode != "" && cfg.Server.TLSMode != "off"
+	if tlsEnabled {
+		// Map tls_mode to tlscert.CertMode
+		var certMode tlscert.CertMode
+		switch cfg.Server.TLSMode {
+		case "auto":
+			certMode = tlscert.CertModeSelfSigned
+		case "file":
+			certMode = tlscert.CertModeFile
+		default:
+			certMode = tlscert.CertMode(cfg.Server.TLSMode)
+		}
+
 		tlsConfig := tlscert.Config{
-			Mode:              tlscert.CertMode(cfg.Server.TLSCertMode),
+			Mode:              certMode,
 			CertFile:          cfg.Server.TLSCertFile,
 			KeyFile:           cfg.Server.TLSKeyFile,
-			SelfSignedCertDir: cfg.Server.TLSSelfSignedCertDir,
+			SelfSignedCertDir: cfg.Server.TLSAutoCertDir,
 			SelfSignedHosts:   []string{"localhost", "127.0.0.1", "::1"},
 		}
 
@@ -786,7 +798,7 @@ func buildServer(cfg *config.Config, logger *logging.Logger, handler http.Handle
 		}
 
 		logger.Info("TLS enabled",
-			slog.String("mode", cfg.Server.TLSCertMode),
+			slog.String("mode", cfg.Server.TLSMode),
 			slog.String("cert_source", tlsManager.Description()))
 	}
 
@@ -795,9 +807,10 @@ func buildServer(cfg *config.Config, logger *logging.Logger, handler http.Handle
 
 func startServer(cfg *config.Config, logger *logging.Logger, srv *http.Server, serverAddr string) chan error {
 	serverErrors := make(chan error, 1)
+	tlsEnabled := cfg.Server.TLSMode != "" && cfg.Server.TLSMode != "off"
 	go func() {
 		protocol := "http"
-		if cfg.Server.TLSEnabled {
+		if tlsEnabled {
 			protocol = "https"
 		}
 
@@ -822,10 +835,10 @@ func startServer(cfg *config.Config, logger *logging.Logger, srv *http.Server, s
 			)
 		}
 
-		if cfg.Server.TLSEnabled {
+		if tlsEnabled {
 			logAttrs = append(logAttrs,
 				slog.Bool("tls_enabled", true),
-				slog.String("tls_mode", cfg.Server.TLSCertMode))
+				slog.String("tls_mode", cfg.Server.TLSMode))
 		} else {
 			logAttrs = append(logAttrs, slog.Bool("tls_enabled", false))
 		}
@@ -833,7 +846,7 @@ func startServer(cfg *config.Config, logger *logging.Logger, srv *http.Server, s
 		logger.Info("server starting", logAttrs...)
 
 		var err error
-		if cfg.Server.TLSEnabled {
+		if tlsEnabled {
 			err = srv.ListenAndServeTLS("", "")
 		} else {
 			err = srv.ListenAndServe()

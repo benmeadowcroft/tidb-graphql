@@ -116,8 +116,6 @@ jwks-server:
 # Build container image locally (podman or docker)
 container-build:
 	podman build \
-		--build-arg VERSION=$$(cat VERSION 2>/dev/null || echo dev) \
-		--build-arg COMMIT=$$(git rev-parse --short HEAD 2>/dev/null || echo none) \
 		-t tidb-graphql:local .
 
 # Build and run in one command

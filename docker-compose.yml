@@ -14,17 +14,17 @@
 
 services:
   tidb:
-    image: pingcap/tidb:v8.5.5
+    image: pingcap/tidb:v8.5.5  # all-in-one TiDB image with TiKV and PD included
     command:
       - "--config=/tidb.toml"
-      - "--initialize-sql-file=/init.sql"
+      - "--initialize-sql-file=/init.sql" # Load tutorial data set on first run
     volumes:
-      - ./config/tidb/tidb.toml:/tidb.toml:ro
-      - ./docs/tutorials/sample-data.sql:/init.sql:ro
-      - tidb-data:/tmp/tidb
+      - ./config/tidb/tidb.toml:/tidb.toml:ro         # custom tidb configuration
+      - ./docs/tutorials/sample-data.sql:/init.sql:ro # tutorial data set
+      - tidb-data:/tmp/tidb                           # persistent storage for TiDB data
     ports:
-      - "4000:4000"
-      - "10080:10080"
+      - "4000:4000"   # mysql protocol
+      - "10080:10080" # status server
 
   tidb-graphql:
     build:
@@ -35,7 +35,7 @@ services:
     environment:
       - TIGQL_DATABASE_HOST=tidb
       - TIGQL_DATABASE_PORT=4000
-      - TIGQL_DATABASE_DATABASE=tidb_graphql_tutorial
+      - TIGQL_DATABASE_DATABASE=tidb_graphql_tutorial # connect to the tutorial database
     depends_on:
       - tidb
 

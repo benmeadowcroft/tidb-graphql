@@ -15,18 +15,20 @@ database:
   user: root
   database: test
   tls_mode: skip-verify
-  max_open_conns: 25
-  max_idle_conns: 5
-  conn_max_lifetime: 5m
-  connect_timeout: 60s          # Wait for DB on startup (container-friendly)
-  connect_retry_interval: 2s    # Initial retry interval (exponential backoff)
+  pool:
+    max_open: 25
+    max_idle: 5
+    max_lifetime: 5m
+  connection_timeout: 60s          # Wait for DB on startup (container-friendly)
+  connection_retry_interval: 2s    # Initial retry interval (exponential backoff)
 
 server:
+  tls_mode: auto
   port: 8080
   graphql_max_depth: 5
   graphql_max_complexity: 0
   graphql_max_rows: 0
-  graphql_list_limit_default: 100
+  graphql_default_limit: 100
   schema_refresh_min_interval: 30s
   schema_refresh_max_interval: 5m
   graphiql_enabled: false
@@ -45,7 +47,7 @@ schema_filters:
   allow_tables: ["*"]
   deny_tables: []
   deny_mutation_tables: []
-  scan_views: false
+  scan_views_enabled: false
   allow_columns:
     "*": ["*"]
   deny_columns: {}

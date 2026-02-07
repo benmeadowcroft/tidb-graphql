@@ -69,9 +69,6 @@ Configure TLS for secure database connections, including client certificate auth
 - `database.tls.key_file_env` (string, default: empty) — Environment variable containing client key path
 - `database.tls.server_name` (string, default: empty) — Override TLS server name for verification
 
-**Legacy TLS setting (deprecated):**
-- `database.tls_mode` (string, default: `skip-verify`) — Use `database.tls.mode` instead
-
 ### Connection pool
 
 - `database.pool.max_open` (int, default: `25`) — Maximum open database connections

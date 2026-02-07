@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -98,10 +97,6 @@ type DatabaseConfig struct {
 
 	// TLS holds the TLS/SSL configuration for database connections.
 	TLS DatabaseTLSConfig `mapstructure:"tls"`
-
-	// TLSMode is DEPRECATED: use TLS.Mode instead.
-	// Kept for backwards compatibility. Values: skip-verify, true, false.
-	TLSMode string `mapstructure:"tls_mode"`
 
 	// Connection pool settings
 	Pool PoolConfig `mapstructure:"pool"`
@@ -350,13 +345,6 @@ func Load() (*Config, error) {
 		v.Set("database.password", pwd)
 	}
 
-	// Normalize database.tls_mode when YAML uses boolean literals.
-	if rawTLSMode := v.Get("database.tls_mode"); rawTLSMode != nil {
-		if tlsModeBool, ok := rawTLSMode.(bool); ok {
-			v.Set("database.tls_mode", strconv.FormatBool(tlsModeBool))
-		}
-	}
-
 	// --- Unmarshal (strict) ---
 	var cfg Config
 	if err := v.UnmarshalExact(
@@ -398,6 +386,9 @@ func bindChangedFlagsToViper(v *viper.Viper) {
 		case "duration":
 			val, _ := pflag.CommandLine.GetDuration(f.Name)
 			v.Set(f.Name, val)
+		case "stringSlice":
+			val, _ := pflag.CommandLine.GetStringSlice(f.Name)
+			v.Set(f.Name, val)
 		default:
 			v.Set(f.Name, f.Value.String())
 		}
@@ -429,9 +420,6 @@ func defineFlags() {
 		pflag.String("database.tls.key_file", "", "Path to client private key for mTLS")
 		pflag.String("database.tls.key_file_env", "", "Env var containing client key path")
 		pflag.String("database.tls.server_name", "", "Override TLS server name for verification")
-
-		// Legacy TLS flag (deprecated, use database.tls.mode)
-		pflag.String("database.tls_mode", "", "DEPRECATED: use database.tls.mode instead")
 
 		// Database pool flags
 		pflag.Int("database.pool.max_open", 0, "Maximum open database connections")
@@ -551,9 +539,6 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.tls.key_file", "")
 	v.SetDefault("database.tls.key_file_env", "")
 	v.SetDefault("database.tls.server_name", "")
-
-	// Legacy TLS default (for backwards compatibility)
-	v.SetDefault("database.tls_mode", "skip-verify") // Default for TiDB Cloud compatibility
 
 	// Database pool defaults
 	v.SetDefault("database.pool.max_open", 25)
@@ -759,25 +744,6 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 	// Validate new TLS configuration
 	d.TLS.validate(result)
 
-	// Legacy TLS mode validation (for backwards compatibility)
-	validLegacyTLSModes := map[string]bool{"": true, "skip-verify": true, "true": true, "false": true}
-	if d.TLSMode != "" && !validLegacyTLSModes[d.TLSMode] {
-		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.tls_mode",
-			Message: fmt.Sprintf("invalid TLS mode %q", d.TLSMode),
-			Hint:    "valid values are: skip-verify, true, false (prefer using database.tls.mode)",
-		})
-	}
-
-	// Warn if both TLSMode and TLS.Mode are set
-	if d.TLSMode != "" && d.TLS.Mode != "" {
-		result.Warnings = append(result.Warnings, ValidationWarning{
-			Field:   "database.tls_mode",
-			Message: "both tls_mode and tls.mode are set; tls.mode takes precedence",
-			Hint:    "remove tls_mode (deprecated) and use tls.mode instead",
-		})
-	}
-
 	// Connection pool validation
 	if d.Pool.MaxOpen < 0 {
 		result.Errors = append(result.Errors, ValidationError{
@@ -811,6 +777,13 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 		result.Errors = append(result.Errors, ValidationError{
 			Field:   "database.connection_retry_interval",
 			Message: "connection_retry_interval cannot be negative",
+		})
+	}
+	if d.ConnectionTimeout > 0 && d.ConnectionRetryInterval == 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.connection_retry_interval",
+			Message: "connection_retry_interval must be greater than 0 when connection_timeout is set",
+			Hint:    "set a retry interval such as 2s, or set connection_timeout to 0 to disable retries",
 		})
 	}
 	if d.ConnectionTimeout < 0 {
@@ -1204,8 +1177,7 @@ func (d *DatabaseConfig) DSNWithoutDatabase() string {
 }
 
 // effectiveTLSParam returns the TLS parameter value for the DSN.
-// Returns the registered config name for custom TLS, the legacy TLSMode value,
-// or empty string if no TLS is configured.
+// Returns the registered config name for custom TLS, or empty string if no TLS is configured.
 func (d *DatabaseConfig) effectiveTLSParam() string {
 	// Check if we have new TLS configuration
 	mode := d.TLS.Mode
@@ -1226,14 +1198,8 @@ func (d *DatabaseConfig) effectiveTLSParam() string {
 		}
 	}
 
-	// Fall back to legacy TLSMode for backwards compatibility
-	// Empty TLSMode means no TLS parameter should be added (original behavior)
-	if d.TLSMode == "" {
-		return ""
-	}
-
-	// Legacy values pass through directly
-	return d.TLSMode
+	// Empty mode means no TLS parameter should be added.
+	return ""
 }
 
 // RegisterTLS registers a custom TLS configuration with the MySQL driver.
@@ -1241,9 +1207,6 @@ func (d *DatabaseConfig) effectiveTLSParam() string {
 // Returns nil if no custom TLS configuration is needed.
 func (d *DatabaseConfig) RegisterTLS() error {
 	mode := d.TLS.Mode
-	if mode == "" {
-		mode = d.TLSMode
-	}
 
 	// Only register custom config for modes that need it
 	if mode != "verify-ca" && mode != "verify-full" {
@@ -1269,9 +1232,6 @@ func (d *DatabaseConfig) buildTLSConfig() (*tls.Config, error) {
 	}
 
 	mode := d.TLS.Mode
-	if mode == "" {
-		mode = d.TLSMode
-	}
 
 	// Resolve file paths from env var indirection if specified
 	caFile := d.TLS.resolveCAFile()

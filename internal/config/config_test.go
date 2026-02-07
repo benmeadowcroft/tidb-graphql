@@ -94,17 +94,19 @@ func TestLoad_WithEnvVars(t *testing.T) {
 func TestConfig_Validate(t *testing.T) {
 	// Helper to create a valid base config
 	validConfig := func() *Config {
-		return &Config{
-			Database: DatabaseConfig{
-				Host:     "localhost",
-				Port:     4000,
-				User:     "root",
-				Database: "test",
-				TLSMode:  "skip-verify",
-				Pool: PoolConfig{
-					MaxOpen: 25,
-					MaxIdle: 5,
-				},
+			return &Config{
+				Database: DatabaseConfig{
+					Host:     "localhost",
+					Port:     4000,
+					User:     "root",
+					Database: "test",
+					TLS: DatabaseTLSConfig{
+						Mode: "off",
+					},
+					Pool: PoolConfig{
+						MaxOpen: 25,
+						MaxIdle: 5,
+					},
 			},
 			Server: ServerConfig{
 				Port: 8080,
@@ -155,16 +157,19 @@ func TestConfig_Validate(t *testing.T) {
 
 	t.Run("invalid TLS mode", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.Database.TLSMode = "invalid"
+		cfg.Database.TLS.Mode = "invalid"
 		result := cfg.Validate()
 		assert.True(t, result.HasErrors())
-		assert.Contains(t, result.Error(), "database.tls_mode")
+		assert.Contains(t, result.Error(), "database.tls.mode")
 	})
 
 	t.Run("valid TLS modes", func(t *testing.T) {
-		for _, mode := range []string{"", "skip-verify", "true", "false"} {
+		for _, mode := range []string{"", "off", "skip-verify", "verify-ca", "verify-full"} {
 			cfg := validConfig()
-			cfg.Database.TLSMode = mode
+			if mode == "verify-ca" || mode == "verify-full" {
+				cfg.Database.TLS.CAFile = "/path/to/ca.pem"
+			}
+			cfg.Database.TLS.Mode = mode
 			result := cfg.Validate()
 			assert.False(t, result.HasErrors(), "TLS mode %q should be valid", mode)
 		}

@@ -33,9 +33,6 @@ database:
     # key_file_env: ""     # Env var containing client key path
     # server_name: ""      # Override TLS server name for verification
 
-  # DEPRECATED: use tls.mode instead
-  tls_mode: skip-verify   # Legacy TLS mode: skip-verify, true, false
-
   # Connection pool settings
   pool:
     max_open: 25           # Maximum number of open connections
@@ -162,10 +159,10 @@ observability:
 
 # Schema filtering (allow/deny with glob patterns)
 schema_filters:
-  allow_tables: ["*"]       # Glob patterns of tables to include (empty = allow none)
+  allow_tables: ["*"]       # Glob patterns of tables to include (empty = allow all)
   deny_tables: ["*_intern"] # Glob patterns of tables to exclude
   deny_mutation_tables: []  # Glob patterns of tables to exclude from mutations
-  scan_views: false         # Include SQL views in schema introspection
+  scan_views_enabled: false # Include SQL views in schema introspection
   allow_columns:
     "*": ["*"]              # Glob patterns of columns per table (use "*" for all tables)
   deny_columns:

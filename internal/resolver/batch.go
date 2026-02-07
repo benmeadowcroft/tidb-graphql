@@ -7,11 +7,12 @@ import (
 )
 
 type batchState struct {
-	mu          sync.Mutex
-	parentRows  map[string][]map[string]interface{}
-	childRows   map[string]map[string][]map[string]interface{}
-	cacheHits   int32
-	cacheMisses int32
+	mu            sync.Mutex
+	parentRows    map[string][]map[string]interface{}
+	childRows     map[string]map[string][]map[string]interface{}
+	aggregateRows map[string]map[string]map[string]interface{}
+	cacheHits     int32
+	cacheMisses   int32
 }
 
 type batchStateKey struct{}
@@ -23,8 +24,9 @@ func NewBatchingContext(ctx context.Context) context.Context {
 	}
 
 	return context.WithValue(ctx, batchStateKey{}, &batchState{
-		parentRows: make(map[string][]map[string]interface{}),
-		childRows:  make(map[string]map[string][]map[string]interface{}),
+		parentRows:    make(map[string][]map[string]interface{}),
+		childRows:     make(map[string]map[string][]map[string]interface{}),
+		aggregateRows: make(map[string]map[string]map[string]interface{}),
 	})
 }
 
@@ -68,6 +70,20 @@ func (s *batchState) setChildRows(relKey string, rows map[string][]map[string]in
 	defer s.mu.Unlock()
 
 	s.childRows[relKey] = rows
+}
+
+func (s *batchState) getAggregateRows(relKey string) map[string]map[string]interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.aggregateRows[relKey]
+}
+
+func (s *batchState) setAggregateRows(relKey string, rows map[string]map[string]interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.aggregateRows[relKey] = rows
 }
 
 // IncrementCacheHit increments the cache hit counter.

@@ -153,7 +153,7 @@ func TestPlanManyToOneBatch(t *testing.T) {
 
 	planned, err := PlanManyToOneBatch(table, nil, "id", []interface{}{7, 9})
 	require.NoError(t, err)
-	assertSQLMatches(t, planned.SQL, "SELECT `id`, `email` FROM `accounts` WHERE `id` IN (?,?)")
+	assertSQLMatches(t, planned.SQL, "SELECT `id`, `email`, `id` AS __batch_parent_id FROM `accounts` WHERE `id` IN (?,?)")
 	assertArgsEqual(t, planned.Args, []interface{}{7, 9})
 }
 
@@ -189,7 +189,88 @@ func TestPlanOneToManyBatch(t *testing.T) {
 	planned, err := PlanOneToManyBatch(table, nil, "user_id", []interface{}{1, 2}, 10, 0, nil)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
-		"SELECT `id`, `user_id`, `title` FROM (SELECT `id`, `user_id`, `title`, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ?",
+		"SELECT `id`, `user_id`, `title`, __batch_parent_id FROM (SELECT `id`, `user_id`, `title`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY `user_id`, __rn",
+	)
+	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 10})
+}
+
+func TestPlanManyToMany_OrderBy(t *testing.T) {
+	table := introspection.Table{
+		Name: "tags",
+		Columns: []introspection.Column{
+			{Name: "id"},
+			{Name: "name"},
+		},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"name"}, Direction: "ASC"}
+	planned, err := PlanManyToMany("user_tags", table, "user_id", "tag_id", "id", nil, 42, 5, 0, orderBy)
+	require.NoError(t, err)
+	assertSQLMatches(t, planned.SQL,
+		"SELECT `id`, `name` FROM `tags` INNER JOIN `user_tags` ON `user_tags`.`tag_id` = `tags`.`id` WHERE `user_tags`.`user_id` = ? ORDER BY `name` ASC LIMIT ? OFFSET ?",
+	)
+	assertArgsEqual(t, planned.Args, []interface{}{42, 5, 0})
+}
+
+func TestPlanEdgeList_OrderBy(t *testing.T) {
+	table := introspection.Table{
+		Name: "user_tags",
+		Columns: []introspection.Column{
+			{Name: "user_id"},
+			{Name: "tag_id"},
+		},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"tag_id"}, Direction: "DESC"}
+	planned, err := PlanEdgeList(table, "user_id", nil, 7, 3, 1, orderBy)
+	require.NoError(t, err)
+	assertSQLMatches(t, planned.SQL,
+		"SELECT `user_id`, `tag_id` FROM `user_tags` WHERE `user_id` = ? ORDER BY `tag_id` DESC LIMIT ? OFFSET ?",
+		"SELECT `user_id`, `tag_id` FROM `user_tags` WHERE `user_id` = ? ORDER BY `tag_id` DESC LIMIT 3 OFFSET 1",
+	)
+	assertWhereLimitOffsetArgs(t, planned.SQL, planned.Args, []interface{}{7}, 3, 1)
+}
+
+func TestPlanManyToManyBatch(t *testing.T) {
+	table := introspection.Table{
+		Name: "tags",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+
+	planned, err := PlanManyToManyBatch(
+		"user_tags",
+		table,
+		"user_id",
+		"tag_id",
+		"id",
+		[]introspection.Column{{Name: "id"}},
+		[]interface{}{1, 2},
+		10,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	assertSQLMatches(t, planned.SQL,
+		"SELECT `id`, __batch_parent_id FROM (SELECT `id`, `user_tags`.`user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_tags`.`user_id` ORDER BY `id`) AS __rn FROM `tags` INNER JOIN `user_tags` ON `user_tags`.`tag_id` = `tags`.`id` WHERE `user_tags`.`user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY `user_tags`.`user_id`, __rn",
+	)
+	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 10})
+}
+
+func TestPlanEdgeListBatch_CompositePKOrder(t *testing.T) {
+	table := introspection.Table{
+		Name: "user_tags",
+		Columns: []introspection.Column{
+			{Name: "user_id", IsPrimaryKey: true},
+			{Name: "tag_id", IsPrimaryKey: true},
+		},
+	}
+
+	planned, err := PlanEdgeListBatch(table, "user_id", nil, []interface{}{1, 2}, 10, 0, nil)
+	require.NoError(t, err)
+	assertSQLMatches(t, planned.SQL,
+		"SELECT `user_id`, `tag_id`, __batch_parent_id FROM (SELECT `user_id`, `tag_id`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `user_id`, `tag_id`) AS __rn FROM `user_tags` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY `user_id`, __rn",
 	)
 	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 10})
 }

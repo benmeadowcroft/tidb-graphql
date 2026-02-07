@@ -17,7 +17,8 @@ func GraphQLMetricsMiddleware(metrics *observability.GraphQLMetrics) func(http.H
 				return
 			}
 
-			ctx := r.Context()
+			ctx := observability.ContextWithGraphQLMetrics(r.Context(), metrics)
+			r = r.WithContext(ctx)
 
 			// Increment active requests
 			metrics.IncrementActiveRequests(ctx)

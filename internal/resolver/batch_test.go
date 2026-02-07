@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/planner"
 )
 
 func TestNewBatchingContext(t *testing.T) {
@@ -303,4 +305,100 @@ func TestChunkValues(t *testing.T) {
 		assert.Equal(t, []interface{}{2}, chunks[1])
 		assert.Equal(t, []interface{}{3}, chunks[2])
 	})
+}
+
+func TestStableArgsKey_Deterministic(t *testing.T) {
+	args1 := map[string]interface{}{
+		"limit": 10,
+		"where": map[string]interface{}{
+			"name": map[string]interface{}{"eq": "alice"},
+			"age":  map[string]interface{}{"gte": 21},
+		},
+	}
+	args2 := map[string]interface{}{
+		"where": map[string]interface{}{
+			"age":  map[string]interface{}{"gte": 21},
+			"name": map[string]interface{}{"eq": "alice"},
+		},
+		"limit": 10,
+	}
+
+	assert.Equal(t, stableArgsKey(args1), stableArgsKey(args2))
+}
+
+func TestGroupByAlias(t *testing.T) {
+	rows := []map[string]interface{}{
+		{"id": 1, "name": "a", "alias": 10},
+		{"id": 2, "name": "b", "alias": 10},
+		{"id": 3, "name": "c", "alias": 20},
+	}
+
+	grouped := groupByAlias(rows, "alias")
+	assert.Len(t, grouped, 2)
+	assert.Len(t, grouped["10"], 2)
+	assert.Len(t, grouped["20"], 1)
+
+	for _, row := range grouped["10"] {
+		_, ok := row["alias"]
+		assert.False(t, ok)
+	}
+}
+
+func TestScanRowsWithExtras(t *testing.T) {
+	columns := []introspection.Column{
+		{Name: "id"},
+		{Name: "name"},
+	}
+	extras := []string{"__batch_parent_id"}
+
+	rows := &fakeRows{rows: [][]any{
+		{1, "alice", 10},
+		{2, "bob", 20},
+	}}
+
+	results, err := scanRowsWithExtras(rows, columns, extras)
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.EqualValues(t, 1, results[0]["id"])
+	assert.Equal(t, "alice", results[0]["name"])
+	assert.EqualValues(t, 10, results[0]["__batch_parent_id"])
+}
+
+func TestScanAggregateRows(t *testing.T) {
+	table := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "rating"},
+		},
+	}
+	columns := []planner.AggregateColumn{
+		{
+			SQLClause:  "COUNT(*) AS __count",
+			ResultKey:  "count",
+			ColumnName: "",
+			ValueType:  planner.AggregateInt,
+		},
+		{
+			SQLClause:  "AVG(`rating`) AS __avg_rating",
+			ResultKey:  "avg",
+			ColumnName: "rating",
+			ValueType:  planner.AggregateFloat,
+		},
+	}
+
+	rows := &fakeRows{rows: [][]any{
+		{int64(10), int64(5), float64(3.5)},
+		{int64(11), int64(2), float64(4.0)},
+	}}
+
+	grouped, err := scanAggregateRows(rows, columns, table)
+	require.NoError(t, err)
+	require.Len(t, grouped, 2)
+
+	result := grouped["10"]
+	require.NotNil(t, result)
+	assert.EqualValues(t, int64(5), result["count"])
+	avgValues, ok := result["avg"].(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, 3.5, avgValues["rating"])
 }

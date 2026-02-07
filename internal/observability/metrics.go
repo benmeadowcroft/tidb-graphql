@@ -19,6 +19,12 @@ type GraphQLMetrics struct {
 	activeRequests    metric.Int64UpDownCounter
 	queryDepth        metric.Int64Histogram
 	resultsCount      metric.Int64Histogram
+	batchParentCount  metric.Int64Histogram
+	batchResultRows   metric.Int64Histogram
+	batchCacheHits    metric.Int64Counter
+	batchCacheMisses  metric.Int64Counter
+	batchQueriesSaved metric.Int64Counter
+	batchSkipped      metric.Int64Counter
 }
 
 // InitGraphQLMetrics initializes GraphQL-specific metrics
@@ -74,13 +80,67 @@ func InitGraphQLMetrics() (*GraphQLMetrics, error) {
 		return nil, fmt.Errorf("failed to create results count histogram: %w", err)
 	}
 
+	batchParentCount, err := meter.Int64Histogram(
+		"graphql.batch.parent_count",
+		metric.WithDescription("Number of parent keys included in a batch query"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch parent count histogram: %w", err)
+	}
+
+	batchResultRows, err := meter.Int64Histogram(
+		"graphql.batch.result_rows",
+		metric.WithDescription("Number of rows returned by a batch query"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch result rows histogram: %w", err)
+	}
+
+	batchCacheHits, err := meter.Int64Counter(
+		"graphql.batch.cache_hits",
+		metric.WithDescription("Number of batch cache hits"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch cache hits counter: %w", err)
+	}
+
+	batchCacheMisses, err := meter.Int64Counter(
+		"graphql.batch.cache_misses",
+		metric.WithDescription("Number of batch cache misses"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch cache misses counter: %w", err)
+	}
+
+	batchQueriesSaved, err := meter.Int64Counter(
+		"graphql.batch.queries_saved",
+		metric.WithDescription("Number of queries saved by batching"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch queries saved counter: %w", err)
+	}
+
+	batchSkipped, err := meter.Int64Counter(
+		"graphql.batch.skipped",
+		metric.WithDescription("Number of times batching was skipped"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create batch skipped counter: %w", err)
+	}
+
 	return &GraphQLMetrics{
-		requestDuration: requestDuration,
-		requestCounter:  requestCounter,
-		errorCounter:    errorCounter,
-		activeRequests:  activeRequests,
-		queryDepth:      queryDepth,
-		resultsCount:    resultsCount,
+		requestDuration:   requestDuration,
+		requestCounter:    requestCounter,
+		errorCounter:      errorCounter,
+		activeRequests:    activeRequests,
+		queryDepth:        queryDepth,
+		resultsCount:      resultsCount,
+		batchParentCount:  batchParentCount,
+		batchResultRows:   batchResultRows,
+		batchCacheHits:    batchCacheHits,
+		batchCacheMisses:  batchCacheMisses,
+		batchQueriesSaved: batchQueriesSaved,
+		batchSkipped:      batchSkipped,
 	}, nil
 }
 
@@ -119,6 +179,46 @@ func (m *GraphQLMetrics) RecordResultsCount(ctx context.Context, count int64, op
 	))
 }
 
+func (m *GraphQLMetrics) RecordBatchParentCount(ctx context.Context, count int64, relationType string) {
+	m.batchParentCount.Record(ctx, count, metric.WithAttributes(
+		attribute.String("relation_type", relationType),
+	))
+}
+
+func (m *GraphQLMetrics) RecordBatchResultRows(ctx context.Context, count int64, relationType string) {
+	m.batchResultRows.Record(ctx, count, metric.WithAttributes(
+		attribute.String("relation_type", relationType),
+	))
+}
+
+func (m *GraphQLMetrics) RecordBatchCacheHit(ctx context.Context, relationType string) {
+	m.batchCacheHits.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("relation_type", relationType),
+	))
+}
+
+func (m *GraphQLMetrics) RecordBatchCacheMiss(ctx context.Context, relationType string) {
+	m.batchCacheMisses.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("relation_type", relationType),
+	))
+}
+
+func (m *GraphQLMetrics) RecordBatchQueriesSaved(ctx context.Context, count int64, relationType string) {
+	if count <= 0 {
+		return
+	}
+	m.batchQueriesSaved.Add(ctx, count, metric.WithAttributes(
+		attribute.String("relation_type", relationType),
+	))
+}
+
+func (m *GraphQLMetrics) RecordBatchSkipped(ctx context.Context, relationType, reason string) {
+	m.batchSkipped.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("relation_type", relationType),
+		attribute.String("reason", reason),
+	))
+}
+
 // IncrementActiveRequests increments the active requests counter
 func (m *GraphQLMetrics) IncrementActiveRequests(ctx context.Context) {
 	m.activeRequests.Add(ctx, 1)
@@ -138,4 +238,23 @@ func InitMetrics(logger *slog.Logger) (*GraphQLMetrics, error) {
 
 	logger.Info("custom GraphQL metrics initialized")
 	return metrics, nil
+}
+
+type graphQLMetricsContextKey struct{}
+
+// ContextWithGraphQLMetrics stores GraphQL metrics in the provided context.
+func ContextWithGraphQLMetrics(ctx context.Context, metrics *GraphQLMetrics) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, graphQLMetricsContextKey{}, metrics)
+}
+
+// GraphQLMetricsFromContext retrieves GraphQL metrics from the context.
+func GraphQLMetricsFromContext(ctx context.Context) *GraphQLMetrics {
+	if ctx == nil {
+		return nil
+	}
+	metrics, _ := ctx.Value(graphQLMetricsContextKey{}).(*GraphQLMetrics)
+	return metrics
 }

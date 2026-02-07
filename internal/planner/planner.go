@@ -4,6 +4,7 @@
 package planner
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,6 +13,12 @@ import (
 
 	sq "github.com/Masterminds/squirrel"
 )
+
+// ErrNoPrimaryKey indicates a required primary key is missing for a batch plan.
+var ErrNoPrimaryKey = errors.New("no primary key")
+
+// BatchParentAlias is the column alias used to return parent keys in batch queries.
+const BatchParentAlias = "__batch_parent_id"
 
 // SQLQuery represents a planned SQL statement with bound args.
 type SQLQuery struct {
@@ -132,6 +139,7 @@ func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspectio
 	query, args, err := sq.Select(columnNames(relatedTable, columns)...).
 		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
 		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): values}).
+		Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(remoteColumn), BatchParentAlias)).
 		PlaceholderFormat(sq.Question).
 		ToSql()
 	if err != nil {
@@ -174,14 +182,16 @@ func PlanManyToMany(
 	junctionLocalFK string,
 	junctionRemoteFK string,
 	targetPK string,
+	columns []introspection.Column,
 	localPKValue interface{},
 	limit, offset int,
+	orderBy *OrderBy,
 ) (SQLQuery, error) {
 	if err := validateLimitOffset(limit, offset); err != nil {
 		return SQLQuery{}, err
 	}
 
-	cols := columnNames(targetTable, targetTable.Columns)
+	cols := columnNames(targetTable, columns)
 	columnList := strings.Join(cols, ", ")
 
 	// Build query: SELECT target.* FROM target
@@ -194,14 +204,20 @@ func PlanManyToMany(
 	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
 	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
 
+	orderClause := ""
+	if orderBy != nil && len(orderBy.Columns) > 0 {
+		orderClause = " ORDER BY " + strings.Join(orderByClauses(orderBy), ", ")
+	}
+
 	query := fmt.Sprintf(
-		"SELECT %s FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s = ? LIMIT ? OFFSET ?",
+		"SELECT %s FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s = ?%s LIMIT ? OFFSET ?",
 		columnList,
 		quotedTarget,
 		quotedJunction,
 		quotedJunction, quotedRemoteFK,
 		quotedTarget, quotedTargetPK,
 		quotedJunction, quotedLocalFK,
+		orderClause,
 	)
 
 	return SQLQuery{SQL: query, Args: []interface{}{localPKValue, limit, offset}}, nil
@@ -213,16 +229,24 @@ func PlanManyToMany(
 func PlanEdgeList(
 	junctionTable introspection.Table,
 	junctionLocalFK string,
+	columns []introspection.Column,
 	localPKValue interface{},
 	limit, offset int,
+	orderBy *OrderBy,
 ) (SQLQuery, error) {
 	if err := validateLimitOffset(limit, offset); err != nil {
 		return SQLQuery{}, err
 	}
 
-	query, args, err := sq.Select(columnNames(junctionTable, junctionTable.Columns)...).
+	builder := sq.Select(columnNames(junctionTable, columns)...).
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): localPKValue}).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): localPKValue})
+
+	if orderBy != nil {
+		builder = builder.OrderBy(orderByClauses(orderBy)...)
+	}
+
+	query, args, err := builder.
 		Limit(uint64(limit)).
 		Offset(uint64(offset)).
 		PlaceholderFormat(sq.Question).
@@ -231,6 +255,109 @@ func PlanEdgeList(
 		return SQLQuery{}, err
 	}
 
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanManyToManyBatch builds a batched SQL query for many-to-many relationships with per-parent limits.
+func PlanManyToManyBatch(
+	junctionTable string,
+	targetTable introspection.Table,
+	junctionLocalFK string,
+	junctionRemoteFK string,
+	targetPK string,
+	columns []introspection.Column,
+	values []interface{},
+	limit, offset int,
+	orderBy *OrderBy,
+) (SQLQuery, error) {
+	if len(values) == 0 {
+		return SQLQuery{}, nil
+	}
+	if err := validateLimitOffset(limit, offset); err != nil {
+		return SQLQuery{}, err
+	}
+
+	orderClause, err := batchOrderClause(targetTable, orderBy)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	cols := columnNames(targetTable, columns)
+	columnList := strings.Join(cols, ", ")
+	placeholders := sq.Placeholders(len(values))
+
+	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
+	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
+	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
+	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
+	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
+	partitionColumn := fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK)
+
+	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
+	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, partitionColumn, BatchParentAlias)
+
+	query := fmt.Sprintf(
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		outerSelect,
+		innerSelect,
+		partitionColumn,
+		orderClause,
+		quotedTarget,
+		quotedJunction,
+		quotedJunction, quotedRemoteFK,
+		quotedTarget, quotedTargetPK,
+		quotedJunction, quotedLocalFK,
+		placeholders,
+		partitionColumn,
+	)
+
+	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// PlanEdgeListBatch builds a batched SQL query for edge list relationships with per-parent limits.
+func PlanEdgeListBatch(
+	junctionTable introspection.Table,
+	junctionLocalFK string,
+	columns []introspection.Column,
+	values []interface{},
+	limit, offset int,
+	orderBy *OrderBy,
+) (SQLQuery, error) {
+	if len(values) == 0 {
+		return SQLQuery{}, nil
+	}
+	if err := validateLimitOffset(limit, offset); err != nil {
+		return SQLQuery{}, err
+	}
+
+	orderClause, err := batchOrderClause(junctionTable, orderBy)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+
+	cols := columnNames(junctionTable, columns)
+	columnList := strings.Join(cols, ", ")
+	placeholders := sq.Placeholders(len(values))
+
+	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
+	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
+
+	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
+	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedLocalFK, BatchParentAlias)
+	query := fmt.Sprintf(
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		outerSelect,
+		innerSelect,
+		quotedLocalFK,
+		orderClause,
+		quotedTable,
+		quotedLocalFK,
+		placeholders,
+		quotedLocalFK,
+	)
+
+	args := append(append([]interface{}{}, values...), offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
@@ -245,7 +372,7 @@ func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspectio
 
 	pkCols := introspection.PrimaryKeyColumns(relatedTable)
 	if len(pkCols) == 0 {
-		return SQLQuery{}, fmt.Errorf("no primary key for table %s", relatedTable.Name)
+		return SQLQuery{}, fmt.Errorf("%w: table %s", ErrNoPrimaryKey, relatedTable.Name)
 	}
 
 	cols := columnNames(relatedTable, columns)
@@ -266,15 +393,18 @@ func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspectio
 	quotedTable := sqlutil.QuoteIdentifier(relatedTable.Name)
 	// Unfortunately as these are column lists, we can't use Squirrel to build
 	// the query so need to create it directly.
+	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
+	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedRemoteColumn, BatchParentAlias)
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ?",
-		columnList,
-		columnList,
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		outerSelect,
+		innerSelect,
 		quotedRemoteColumn,
 		orderClause,
 		quotedTable,
 		quotedRemoteColumn,
 		placeholders,
+		quotedRemoteColumn,
 	)
 
 	args := append(append([]interface{}{}, values...), offset, offset+limit)
@@ -302,6 +432,23 @@ func orderByClauses(orderBy *OrderBy) []string {
 		clauses[i] = fmt.Sprintf("%s %s", sqlutil.QuoteIdentifier(col), orderBy.Direction)
 	}
 	return clauses
+}
+
+func batchOrderClause(table introspection.Table, orderBy *OrderBy) (string, error) {
+	if orderBy != nil && len(orderBy.Columns) > 0 {
+		return strings.Join(orderByClauses(orderBy), ", "), nil
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	if len(pkCols) == 0 {
+		return "", ErrNoPrimaryKey
+	}
+
+	var pkOrderClauses []string
+	for _, pk := range pkCols {
+		pkOrderClauses = append(pkOrderClauses, sqlutil.QuoteIdentifier(pk.Name))
+	}
+	return strings.Join(pkOrderClauses, ", "), nil
 }
 
 // WhereClause represents a parsed WHERE condition

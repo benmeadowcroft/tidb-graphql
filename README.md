@@ -22,8 +22,6 @@ The goal of the project is to explore a SQL-first approach to GraphQL with pract
 
 The [Your first schema in five minutes](docs/tutorials/first-schema.md) tutorial is a quick way to get going with TiDB GraphQL
 
-The documentation provides information
-
 If you are looking for how to run it, configure it, or explore the schema, start with the docs:
 
 - [Documentation home](docs/README.md)

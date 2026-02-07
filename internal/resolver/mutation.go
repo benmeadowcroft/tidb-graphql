@@ -52,7 +52,7 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 	updatableMap := columnNameSet(updatableCols)
 	if hasPK && len(updatableCols) > 0 {
 		updateInput := r.updateSetInputType(table, updatableCols)
-		args := r.primaryKeyArgs(pkCols)
+		args := r.primaryKeyArgs(table, pkCols)
 		args["set"] = &graphql.ArgumentConfig{
 			Type: updateInput,
 		}
@@ -65,7 +65,7 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 
 	if hasPK {
 		deletePayload := r.deletePayloadType(table, pkCols)
-		args := r.primaryKeyArgs(pkCols)
+		args := r.primaryKeyArgs(table, pkCols)
 		fields["delete"+typeName] = &graphql.Field{
 			Type:    deletePayload,
 			Args:    args,
@@ -115,7 +115,7 @@ func (r *Resolver) createInputType(table introspection.Table, columns []introspe
 
 	fields := graphql.InputObjectConfigFieldMap{}
 	for _, col := range columns {
-		fieldType := r.mapColumnTypeToGraphQLInput(&col)
+		fieldType := r.mapColumnTypeToGraphQLInput(table, &col)
 		if isRequiredInsertColumn(col) {
 			fieldType = graphql.NewNonNull(fieldType)
 		}
@@ -151,7 +151,7 @@ func (r *Resolver) updateSetInputType(table introspection.Table, columns []intro
 
 	fields := graphql.InputObjectConfigFieldMap{}
 	for _, col := range columns {
-		fieldType := r.mapColumnTypeToGraphQLInput(&col)
+		fieldType := r.mapColumnTypeToGraphQLInput(table, &col)
 		fields[introspection.GraphQLFieldName(col)] = &graphql.InputObjectFieldConfig{
 			Type: fieldType,
 		}
@@ -184,7 +184,7 @@ func (r *Resolver) deletePayloadType(table introspection.Table, pkCols []introsp
 
 	fields := graphql.Fields{}
 	for _, col := range pkCols {
-		fieldType := r.mapColumnTypeToGraphQL(&col)
+		fieldType := r.mapColumnTypeToGraphQL(table, &col)
 		if !col.IsNullable {
 			fieldType = graphql.NewNonNull(fieldType)
 		}
@@ -209,11 +209,11 @@ func (r *Resolver) deletePayloadType(table introspection.Table, pkCols []introsp
 	return objType
 }
 
-func (r *Resolver) primaryKeyArgs(pkCols []introspection.Column) graphql.FieldConfigArgument {
+func (r *Resolver) primaryKeyArgs(table introspection.Table, pkCols []introspection.Column) graphql.FieldConfigArgument {
 	args := graphql.FieldConfigArgument{}
 	for i := range pkCols {
 		col := &pkCols[i]
-		argType := r.mapColumnTypeToGraphQLInput(col)
+		argType := r.mapColumnTypeToGraphQLInput(table, col)
 		args[introspection.GraphQLFieldName(*col)] = &graphql.ArgumentConfig{
 			Type: graphql.NewNonNull(argType),
 		}

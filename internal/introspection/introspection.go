@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -28,6 +29,7 @@ type Column struct {
 	IsAutoRandom    bool
 	HasDefault      bool
 	ColumnDefault   string
+	EnumValues      []string
 	// GraphQLFieldName is the resolved GraphQL field name for this column.
 	GraphQLFieldName string
 }
@@ -293,6 +295,7 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		SELECT
 			COLUMN_NAME,
 			DATA_TYPE,
+			COLUMN_TYPE,
 			IS_NULLABLE,
 			COLUMN_DEFAULT,
 			EXTRA
@@ -316,7 +319,8 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		var isNullable string
 		var columnDefault sql.NullString
 		var extra string
-		if err := rows.Scan(&col.Name, &col.DataType, &isNullable, &columnDefault, &extra); err != nil {
+		var columnType string
+		if err := rows.Scan(&col.Name, &col.DataType, &columnType, &isNullable, &columnDefault, &extra); err != nil {
 			recordSpanError(span, err)
 			return nil, err
 		}
@@ -329,6 +333,14 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		col.IsAutoIncrement = strings.Contains(extraLower, "auto_increment")
 		col.IsAutoRandom = strings.Contains(extraLower, "auto_random")
 		col.IsGenerated = strings.Contains(extraLower, "generated")
+		if strings.EqualFold(col.DataType, "enum") {
+			values, err := parseEnumValues(columnType)
+			if err != nil {
+				slog.Default().Warn("failed to parse enum values", slog.String("column", col.Name), slog.String("type", columnType), slog.String("error", err.Error()))
+			} else {
+				col.EnumValues = values
+			}
+		}
 		columns = append(columns, col)
 	}
 

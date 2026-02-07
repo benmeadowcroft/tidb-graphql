@@ -16,7 +16,7 @@ CREATE TABLE users (
   email VARCHAR(255) NOT NULL,
   email_domain VARCHAR(255) AS (SUBSTRING_INDEX(email, '@', -1)) VIRTUAL,
   full_name VARCHAR(255) NOT NULL,
-  status VARCHAR(32) NOT NULL,
+  status ENUM('active','inactive','pending') NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_users_email (email),
@@ -59,7 +59,7 @@ CREATE TABLE product_categories (
 CREATE TABLE orders (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   user_id BIGINT NOT NULL,
-  status VARCHAR(32) NOT NULL,
+  status ENUM('paid','shipped','processing','canceled') NOT NULL,
   total_cents INT NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

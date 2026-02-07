@@ -41,6 +41,8 @@ type Resolver struct {
 	createInputCache   map[string]*graphql.InputObject
 	updateInputCache   map[string]*graphql.InputObject
 	deletePayloadCache map[string]*graphql.Object
+	enumCache          map[string]*graphql.Enum
+	enumFilterCache    map[string]*graphql.InputObject
 	singularQueryCache map[string]string
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
@@ -71,6 +73,8 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		createInputCache:   make(map[string]*graphql.InputObject),
 		updateInputCache:   make(map[string]*graphql.InputObject),
 		deletePayloadCache: make(map[string]*graphql.Object),
+		enumCache:          make(map[string]*graphql.Enum),
+		enumFilterCache:    make(map[string]*graphql.InputObject),
 		singularQueryCache: make(map[string]string),
 		singularTypeCache:  make(map[string]string),
 		singularNamer:      naming.New(namingConfig, nil),
@@ -237,7 +241,7 @@ func (r *Resolver) addSingleRowQuery(fields graphql.Fields, table introspection.
 	for i := range cols {
 		col := &cols[i]
 		argName := introspection.GraphQLFieldName(*col)
-		argType := r.mapColumnTypeToGraphQL(col)
+		argType := r.mapColumnTypeToGraphQL(table, col)
 		args[argName] = &graphql.ArgumentConfig{
 			Type: graphql.NewNonNull(argType),
 		}
@@ -320,7 +324,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 
 	// Add scalar fields from columns
 	for _, col := range table.Columns {
-		fieldType := r.mapColumnTypeToGraphQL(&col)
+		fieldType := r.mapColumnTypeToGraphQL(table, &col)
 		if !col.IsNullable {
 			fieldType = graphql.NewNonNull(fieldType)
 		}
@@ -566,7 +570,7 @@ func (r *Resolver) buildComparableAggregateFieldsType(table introspection.Table,
 		fieldName := introspection.GraphQLFieldName(col)
 		// MIN/MAX preserve the original column type
 		fields[fieldName] = &graphql.Field{
-			Type: r.mapColumnTypeToGraphQL(&col),
+			Type: r.mapColumnTypeToGraphQL(table, &col),
 		}
 	}
 
@@ -1042,7 +1046,7 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 		}
 
 		fieldName := introspection.GraphQLFieldName(col)
-		filterType := r.getFilterInputType(col.DataType)
+		filterType := r.getFilterInputType(table, col)
 		if filterType != nil {
 			fields[fieldName] = &graphql.InputObjectFieldConfig{
 				Type: filterType,
@@ -1076,8 +1080,130 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 	return inputObj
 }
 
-func (r *Resolver) getFilterInputType(dataType string) *graphql.InputObject {
-	filterName := sqltype.MapToGraphQL(dataType).FilterTypeName()
+func (r *Resolver) enumTypeName(table introspection.Table, col introspection.Column) string {
+	singularTable := r.singularNamer.Singularize(table.Name)
+	return r.singularNamer.ToGraphQLTypeName(singularTable) + r.singularNamer.ToGraphQLTypeName(col.Name)
+}
+
+// normalizeEnumValueName gives a stable GraphQL-safe name for arbitrary SQL enum values.
+func normalizeEnumValueName(value string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		isLetter := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+		isDigit := ch >= '0' && ch <= '9'
+		if isLetter || isDigit {
+			if ch >= 'a' && ch <= 'z' {
+				ch = ch - 'a' + 'A'
+			}
+			b.WriteByte(ch)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore && b.Len() > 0 {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	name := strings.Trim(b.String(), "_")
+	if name == "" {
+		name = "VALUE"
+	}
+	if name[0] >= '0' && name[0] <= '9' {
+		name = "VALUE_" + name
+	}
+	return name
+}
+
+func uniqueEnumValueName(base string, used map[string]int) string {
+	if count, ok := used[base]; ok {
+		count++
+		used[base] = count
+		return fmt.Sprintf("%s_%d", base, count)
+	}
+	used[base] = 1
+	return base
+}
+
+// enumTypeForColumn preserves DB enum values while exposing GraphQL enums consistently.
+func (r *Resolver) enumTypeForColumn(table introspection.Table, col *introspection.Column) *graphql.Enum {
+	if col == nil || len(col.EnumValues) == 0 {
+		return nil
+	}
+	enumName := r.enumTypeName(table, *col)
+	r.mu.RLock()
+	cached := r.enumCache[enumName]
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	used := make(map[string]int)
+	values := graphql.EnumValueConfigMap{}
+	for _, value := range col.EnumValues {
+		enumValueName := normalizeEnumValueName(value)
+		enumValueName = uniqueEnumValueName(enumValueName, used)
+		values[enumValueName] = &graphql.EnumValueConfig{Value: value}
+	}
+
+	enumType := graphql.NewEnum(graphql.EnumConfig{
+		Name:   enumName,
+		Values: values,
+	})
+
+	r.mu.Lock()
+	if cached := r.enumCache[enumName]; cached != nil {
+		r.mu.Unlock()
+		return cached
+	}
+	r.enumCache[enumName] = enumType
+	r.mu.Unlock()
+
+	return enumType
+}
+
+func (r *Resolver) enumFilterType(enumType *graphql.Enum) *graphql.InputObject {
+	if enumType == nil {
+		return nil
+	}
+	filterName := enumType.Name() + "Filter"
+
+	r.mu.RLock()
+	cached := r.enumFilterCache[filterName]
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	filterType := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: filterName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"eq":     &graphql.InputObjectFieldConfig{Type: enumType},
+			"ne":     &graphql.InputObjectFieldConfig{Type: enumType},
+			"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(enumType))},
+			"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(enumType))},
+			"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+		},
+	})
+
+	r.mu.Lock()
+	if cached := r.enumFilterCache[filterName]; cached != nil {
+		r.mu.Unlock()
+		return cached
+	}
+	r.enumFilterCache[filterName] = filterType
+	r.mu.Unlock()
+
+	return filterType
+}
+
+func (r *Resolver) getFilterInputType(table introspection.Table, col introspection.Column) *graphql.InputObject {
+	if enumType := r.enumTypeForColumn(table, &col); enumType != nil {
+		return r.enumFilterType(enumType)
+	}
+
+	filterName := sqltype.MapToGraphQL(col.DataType).FilterTypeName()
 
 	// Check cache
 	r.mu.RLock()
@@ -2149,7 +2275,10 @@ func convertValue(val interface{}) interface{} {
 	return val
 }
 
-func (r *Resolver) mapColumnTypeToGraphQL(col *introspection.Column) graphql.Output {
+func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *introspection.Column) graphql.Output {
+	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+		return enumType
+	}
 	switch sqltype.MapToGraphQL(col.DataType) {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()
@@ -2164,7 +2293,10 @@ func (r *Resolver) mapColumnTypeToGraphQL(col *introspection.Column) graphql.Out
 	}
 }
 
-func (r *Resolver) mapColumnTypeToGraphQLInput(col *introspection.Column) graphql.Input {
+func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *introspection.Column) graphql.Input {
+	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+		return enumType
+	}
 	switch sqltype.MapToGraphQL(col.DataType) {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()

@@ -26,12 +26,13 @@ Supported operators depend on the column type:
 - Numeric: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
 - String: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `like`, `notLike`, `isNull`
 - Boolean: `eq`, `ne`, `isNull`
+- Enum: `eq`, `ne`, `in`, `notIn`, `isNull`
 
 Example:
 
 ```graphql
 {
-  users(where: { email: { like: "%@example.com" }, status: { ne: "inactive" } }) {
+  users(where: { email: { like: "%@example.com" }, status: { ne: INACTIVE } }) {
     id
     email
   }

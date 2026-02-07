@@ -60,7 +60,8 @@ SQL types are mapped to GraphQL scalars:
 - `float`, `double`, `decimal` -> `Float`
 - `bool` -> `Boolean`
 - `json` -> `JSON` (custom scalar)
-- `char`, `text`, `blob`, `binary`, `date`, `time`, `enum`, `set` -> `String`
+- `enum` -> GraphQL enum named `<SingularTable><Column>` (e.g., `users.status` -> `UserStatus`)
+- `char`, `text`, `blob`, `binary`, `date`, `time`, `set` -> `String`
 
 ## Filter inputs
 

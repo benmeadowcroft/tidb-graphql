@@ -189,9 +189,32 @@ func TestPlanOneToManyBatch(t *testing.T) {
 	planned, err := PlanOneToManyBatch(table, nil, "user_id", []interface{}{1, 2}, 10, 0, nil)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
-		"SELECT `id`, `user_id`, `title`, __batch_parent_id FROM (SELECT `id`, `user_id`, `title`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY `user_id`, __rn",
+		"SELECT `id`, `user_id`, `title`, __batch_parent_id FROM (SELECT `id`, `user_id`, `title`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
 	)
 	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 10})
+}
+
+func TestPlanOneToManyBatch_OrdersByBatchAliasWhenFKNotSelected(t *testing.T) {
+	table := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+	}
+
+	selection := []introspection.Column{
+		{Name: "id"},
+		{Name: "title"},
+	}
+
+	planned, err := PlanOneToManyBatch(table, selection, "user_id", []interface{}{1, 2}, 5, 0, nil)
+	require.NoError(t, err)
+	assertSQLMatches(t, planned.SQL,
+		"SELECT `id`, `title`, __batch_parent_id FROM (SELECT `id`, `title`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
+	)
+	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 5})
 }
 
 func TestPlanManyToMany_OrderBy(t *testing.T) {
@@ -253,7 +276,7 @@ func TestPlanManyToManyBatch(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
-		"SELECT `id`, __batch_parent_id FROM (SELECT `id`, `user_tags`.`user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_tags`.`user_id` ORDER BY `id`) AS __rn FROM `tags` INNER JOIN `user_tags` ON `user_tags`.`tag_id` = `tags`.`id` WHERE `user_tags`.`user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY `user_tags`.`user_id`, __rn",
+		"SELECT `id`, __batch_parent_id FROM (SELECT `id`, `user_tags`.`user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_tags`.`user_id` ORDER BY `id`) AS __rn FROM `tags` INNER JOIN `user_tags` ON `user_tags`.`tag_id` = `tags`.`id` WHERE `user_tags`.`user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
 	)
 	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 10})
 }
@@ -270,7 +293,7 @@ func TestPlanEdgeListBatch_CompositePKOrder(t *testing.T) {
 	planned, err := PlanEdgeListBatch(table, "user_id", nil, []interface{}{1, 2}, 10, 0, nil)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
-		"SELECT `user_id`, `tag_id`, __batch_parent_id FROM (SELECT `user_id`, `tag_id`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `user_id`, `tag_id`) AS __rn FROM `user_tags` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY `user_id`, __rn",
+		"SELECT `user_id`, `tag_id`, __batch_parent_id FROM (SELECT `user_id`, `tag_id`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `user_id`, `tag_id`) AS __rn FROM `user_tags` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
 	)
 	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 10})
 }

@@ -308,7 +308,7 @@ func PlanManyToManyBatch(
 		quotedTarget, quotedTargetPK,
 		quotedJunction, quotedLocalFK,
 		placeholders,
-		partitionColumn,
+		BatchParentAlias,
 	)
 
 	args := append(append([]interface{}{}, values...), offset, offset+limit)
@@ -354,7 +354,7 @@ func PlanEdgeListBatch(
 		quotedTable,
 		quotedLocalFK,
 		placeholders,
-		quotedLocalFK,
+		BatchParentAlias,
 	)
 
 	args := append(append([]interface{}{}, values...), offset, offset+limit)
@@ -404,7 +404,7 @@ func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspectio
 		quotedTable,
 		quotedRemoteColumn,
 		placeholders,
-		quotedRemoteColumn,
+		BatchParentAlias,
 	)
 
 	args := append(append([]interface{}{}, values...), offset, offset+limit)

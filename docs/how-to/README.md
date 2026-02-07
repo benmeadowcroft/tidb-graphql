@@ -10,6 +10,7 @@ Task-focused steps for common operations.
 - [Configure CORS for browser clients](cors.md)
 - [Run integration tests locally](integration-tests.md)
 - [Use config precedence correctly](config-precedence.md)
+- [Build from source](build-from-source.md)
 
 ---
 # Related Docs

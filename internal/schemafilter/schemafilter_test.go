@@ -165,7 +165,7 @@ func TestApply_FiltersOrderByOptionsWithIndexes(t *testing.T) {
 	}
 }
 
-func TestApply_ScanViews(t *testing.T) {
+func TestApply_ScanViewsEnabled(t *testing.T) {
 	schema := &introspection.Schema{
 		Tables: []introspection.Table{
 			{Name: "users", Columns: []introspection.Column{{Name: "id"}}},
@@ -185,9 +185,9 @@ func TestApply_ScanViews(t *testing.T) {
 		},
 	}
 
-	Apply(schema, Config{ScanViews: true, AllowTables: []string{"*"}})
+	Apply(schema, Config{ScanViewsEnabled: true, AllowTables: []string{"*"}})
 	if len(schema.Tables) != 2 {
-		t.Fatalf("expected views to be included when scan_views is enabled, got %+v", schema.Tables)
+		t.Fatalf("expected views to be included when scan_views_enabled is true, got %+v", schema.Tables)
 	}
 }
 

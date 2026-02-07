@@ -11,11 +11,11 @@ import (
 
 // Config controls allow/deny filters for tables and columns.
 type Config struct {
-	AllowTables  []string            `mapstructure:"allow_tables"`
-	DenyTables   []string            `mapstructure:"deny_tables"`
-	ScanViews    bool                `mapstructure:"scan_views"`
-	AllowColumns map[string][]string `mapstructure:"allow_columns"`
-	DenyColumns  map[string][]string `mapstructure:"deny_columns"`
+	AllowTables      []string            `mapstructure:"allow_tables"`
+	DenyTables       []string            `mapstructure:"deny_tables"`
+	ScanViewsEnabled bool                `mapstructure:"scan_views_enabled"`
+	AllowColumns     map[string][]string `mapstructure:"allow_columns"`
+	DenyColumns      map[string][]string `mapstructure:"deny_columns"`
 	// DenyMutationTables and DenyMutationColumns apply additional restrictions to writes.
 	// They do not affect query visibility and are evaluated during mutation schema generation.
 	DenyMutationTables  []string            `mapstructure:"deny_mutation_tables"`
@@ -32,7 +32,7 @@ func Apply(schema *introspection.Schema, cfg Config) {
 	allowedTableNames := make(map[string]bool)
 	filteredTables := make([]introspection.Table, 0, len(schema.Tables))
 	for _, table := range schema.Tables {
-		if table.IsView && !cfg.ScanViews {
+		if table.IsView && !cfg.ScanViewsEnabled {
 			continue
 		}
 		if !tableAllowed(table.Name, cfg.AllowTables, cfg.DenyTables) {

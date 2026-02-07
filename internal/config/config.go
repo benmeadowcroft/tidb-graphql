@@ -3,18 +3,20 @@
 package config
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -33,19 +35,89 @@ type Config struct {
 	Naming        naming.Config       `mapstructure:"naming"`
 }
 
+// PoolConfig holds connection pool parameters.
+type PoolConfig struct {
+	MaxOpen     int           `mapstructure:"max_open"`
+	MaxIdle     int           `mapstructure:"max_idle"`
+	MaxLifetime time.Duration `mapstructure:"max_lifetime"`
+}
+
+// DatabaseTLSConfig holds TLS/SSL configuration for database connections.
+// Supports both server verification and client certificate authentication (mTLS).
+type DatabaseTLSConfig struct {
+	// Mode controls TLS behavior:
+	//   - "off": No TLS (plaintext connection)
+	//   - "skip-verify": TLS without server certificate verification (insecure)
+	//   - "verify-ca": TLS with CA verification but no hostname check
+	//   - "verify-full": TLS with full verification including hostname
+	Mode string `mapstructure:"mode"`
+
+	// CAFile is the path to the CA certificate for server verification.
+	// Required for verify-ca and verify-full modes.
+	CAFile string `mapstructure:"ca_file"`
+	// CAFileEnv is an environment variable name containing the CA file path.
+	// Useful for Kubernetes ConfigMap/Secret separation.
+	CAFileEnv string `mapstructure:"ca_file_env"`
+
+	// CertFile is the path to the client certificate for mTLS authentication.
+	CertFile string `mapstructure:"cert_file"`
+	// CertFileEnv is an environment variable name containing the client cert path.
+	CertFileEnv string `mapstructure:"cert_file_env"`
+
+	// KeyFile is the path to the client private key for mTLS authentication.
+	KeyFile string `mapstructure:"key_file"`
+	// KeyFileEnv is an environment variable name containing the client key path.
+	KeyFileEnv string `mapstructure:"key_file_env"`
+
+	// ServerName overrides the server name used for TLS verification.
+	// If empty, the database host is used.
+	ServerName string `mapstructure:"server_name"`
+}
+
 // DatabaseConfig holds database connection parameters.
 type DatabaseConfig struct {
-	Host            string        `mapstructure:"host"`
-	Port            int           `mapstructure:"port"`
-	User            string        `mapstructure:"user"`
-	Password        string        `mapstructure:"password"`
-	PasswordFile    string        `mapstructure:"password_file"`
-	PasswordPrompt  bool          `mapstructure:"password_prompt"`
-	Database        string        `mapstructure:"database"`
-	TLSMode         string        `mapstructure:"tls_mode"` // TLS mode: skip-verify, true, or false
-	MaxOpenConns    int           `mapstructure:"max_open_conns"`
-	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
-	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
+	// ConnectionString is a complete go-sql-driver/mysql Data Source Name.
+	// Format: user:password@tcp(host:port)/database?params
+	// When set, overrides Host/Port/User/Password/Database fields.
+	// Configured via "dsn" in YAML or TIGQL_DATABASE_DSN env var.
+	ConnectionString string `mapstructure:"dsn"`
+	// ConnectionStringFile is a path to a file containing the DSN (for secrets management).
+	// Supports "@-" to read from stdin.
+	// Configured via "dsn_file" in YAML or TIGQL_DATABASE_DSN_FILE env var.
+	ConnectionStringFile string `mapstructure:"dsn_file"`
+
+	// Discrete connection fields (used when DSN is not set)
+	Host                    string `mapstructure:"host"`
+	Port                    int    `mapstructure:"port"`
+	User                    string `mapstructure:"user"`
+	Password                string `mapstructure:"password"`
+	PasswordFile            string `mapstructure:"password_file"`
+	PasswordPrompt          bool   `mapstructure:"password_prompt"`
+	Database                string `mapstructure:"database"`
+
+	// TLS holds the TLS/SSL configuration for database connections.
+	TLS DatabaseTLSConfig `mapstructure:"tls"`
+
+	// Connection pool settings
+	Pool PoolConfig `mapstructure:"pool"`
+
+	// ConnectionTimeout is the max time to wait for DB on startup.
+	ConnectionTimeout time.Duration `mapstructure:"connection_timeout"`
+	// ConnectionRetryInterval is the initial interval between connection retries.
+	ConnectionRetryInterval time.Duration `mapstructure:"connection_retry_interval"`
+}
+
+// AuthConfig holds authentication and authorization parameters.
+type AuthConfig struct {
+	OIDCEnabled              bool          `mapstructure:"oidc_enabled"`
+	OIDCIssuerURL            string        `mapstructure:"oidc_issuer_url"`
+	OIDCAudience             string        `mapstructure:"oidc_audience"`
+	OIDCClockSkew            time.Duration `mapstructure:"oidc_clock_skew"`
+	OIDCSkipTLSVerify        bool          `mapstructure:"oidc_skip_tls_verify"`
+	DBRoleEnabled            bool          `mapstructure:"db_role_enabled"`
+	DBRoleClaimName          string        `mapstructure:"db_role_claim_name"`
+	DBRoleValidationEnabled  bool          `mapstructure:"db_role_validation_enabled"`
+	DBRoleIntrospectionRole  string        `mapstructure:"db_role_introspection_role"`
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -54,19 +126,11 @@ type ServerConfig struct {
 	GraphQLMaxDepth          int           `mapstructure:"graphql_max_depth"`
 	GraphQLMaxComplexity     int           `mapstructure:"graphql_max_complexity"`
 	GraphQLMaxRows           int           `mapstructure:"graphql_max_rows"`
-	GraphQLDefaultListLimit  int           `mapstructure:"graphql_list_limit_default"`
+	GraphQLDefaultLimit      int           `mapstructure:"graphql_default_limit"`
 	SchemaRefreshMinInterval time.Duration `mapstructure:"schema_refresh_min_interval"`
 	SchemaRefreshMaxInterval time.Duration `mapstructure:"schema_refresh_max_interval"`
 	GraphiQLEnabled          bool          `mapstructure:"graphiql_enabled"`
-	OIDCEnabled              bool          `mapstructure:"oidc_enabled"`
-	OIDCIssuerURL            string        `mapstructure:"oidc_issuer_url"`
-	OIDCAudience             string        `mapstructure:"oidc_audience"`
-	OIDCClockSkew            time.Duration `mapstructure:"oidc_clock_skew"`
-	OIDCSkipTLSVerify        bool          `mapstructure:"oidc_skip_tls_verify"`
-	DBRoleEnabled            bool          `mapstructure:"db_role_enabled"`
-	DBRoleClaimName          string        `mapstructure:"db_role_claim_name"`
-	DBRoleValidation         bool          `mapstructure:"db_role_validation"`
-	DBRoleIntrospectionRole  string        `mapstructure:"db_role_introspection_role"`
+	Auth                     AuthConfig    `mapstructure:"auth"`
 	RateLimitEnabled         bool          `mapstructure:"rate_limit_enabled"`
 	RateLimitRPS             float64       `mapstructure:"rate_limit_rps"`
 	RateLimitBurst           int           `mapstructure:"rate_limit_burst"`
@@ -84,11 +148,10 @@ type ServerConfig struct {
 	HealthCheckTimeout       time.Duration `mapstructure:"health_check_timeout"`
 
 	// TLS Configuration
-	TLSEnabled           bool   `mapstructure:"tls_enabled"`             // Enable HTTPS (default: false for backward compat)
-	TLSCertMode          string `mapstructure:"tls_cert_mode"`           // "file" or "selfsigned" (default: "file")
-	TLSCertFile          string `mapstructure:"tls_cert_file"`           // Path to certificate file (for "file" mode)
-	TLSKeyFile           string `mapstructure:"tls_key_file"`            // Path to private key file (for "file" mode)
-	TLSSelfSignedCertDir string `mapstructure:"tls_selfsigned_cert_dir"` // Directory for self-signed certs (default: ".tls")
+	TLSMode       string `mapstructure:"tls_mode"`         // "off", "auto", or "file" (default: "off")
+	TLSCertFile   string `mapstructure:"tls_cert_file"`    // Path to certificate file (for "file" mode)
+	TLSKeyFile    string `mapstructure:"tls_key_file"`     // Path to private key file (for "file" mode)
+	TLSAutoCertDir string `mapstructure:"tls_auto_cert_dir"` // Directory for auto-generated certs (default: ".tls")
 }
 
 // LoggingConfig holds logging parameters.
@@ -257,6 +320,15 @@ func Load() (*Config, error) {
 	// --- Flags binding (highest normal priority) ---
 	bindChangedFlagsToViper(v)
 
+	// --- DSN from file (explicit override) ---
+	if v.GetString("database.dsn") == "" && v.GetString("database.dsn_file") != "" {
+		if dsn, err := readPasswordFile(v.GetString("database.dsn_file")); err != nil {
+			return nil, fmt.Errorf("failed to read database DSN file: %w", err)
+		} else {
+			v.Set("database.dsn", dsn)
+		}
+	}
+
 	// --- Secure password input (explicit override) ---
 	if v.GetString("database.password") == "" && v.GetString("database.password_file") != "" {
 		if pwd, err := readPasswordFile(v.GetString("database.password_file")); err != nil {
@@ -271,13 +343,6 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("failed to read password: %w", err)
 		}
 		v.Set("database.password", pwd)
-	}
-
-	// Normalize database.tls_mode when YAML uses boolean literals.
-	if rawTLSMode := v.Get("database.tls_mode"); rawTLSMode != nil {
-		if tlsModeBool, ok := rawTLSMode.(bool); ok {
-			v.Set("database.tls_mode", strconv.FormatBool(tlsModeBool))
-		}
 	}
 
 	// --- Unmarshal (strict) ---
@@ -321,6 +386,9 @@ func bindChangedFlagsToViper(v *viper.Viper) {
 		case "duration":
 			val, _ := pflag.CommandLine.GetDuration(f.Name)
 			v.Set(f.Name, val)
+		case "stringSlice":
+			val, _ := pflag.CommandLine.GetStringSlice(f.Name)
+			v.Set(f.Name, val)
 		default:
 			v.Set(f.Name, f.Value.String())
 		}
@@ -330,7 +398,11 @@ func bindChangedFlagsToViper(v *viper.Viper) {
 // defineFlags defines all command line flags using canonical snake_case keys.
 func defineFlags() {
 	defineFlagsOnce.Do(func() {
-		// Database flags
+		// Database connection flags
+		pflag.String("database.dsn", "", "Complete MySQL DSN (user:pass@tcp(host:port)/db)")
+		pflag.String("database.dsn_file", "", "Path to file containing database DSN (use @- for stdin)")
+
+		// Database discrete connection flags (used when DSN is not set)
 		pflag.String("database.host", "", "Database host")
 		pflag.Int("database.port", 0, "Database port")
 		pflag.String("database.user", "", "Database user")
@@ -338,29 +410,42 @@ func defineFlags() {
 		pflag.String("database.password_file", "", "Path to file containing database password (use @- for stdin)")
 		pflag.Bool("database.password_prompt", false, "Prompt for database password securely")
 		pflag.String("database.database", "", "Database name")
-		pflag.String("database.tls_mode", "", "TLS mode (skip-verify, true, false)")
-		pflag.Int("database.max_open_conns", 0, "Maximum open database connections")
-		pflag.Int("database.max_idle_conns", 0, "Maximum idle connections in pool")
-		pflag.Duration("database.conn_max_lifetime", 0, "Connection max lifetime (e.g. 5m, 30s)")
+
+		// Database TLS flags
+		pflag.String("database.tls.mode", "", "TLS mode (off, skip-verify, verify-ca, verify-full)")
+		pflag.String("database.tls.ca_file", "", "Path to CA certificate for server verification")
+		pflag.String("database.tls.ca_file_env", "", "Env var containing CA certificate path")
+		pflag.String("database.tls.cert_file", "", "Path to client certificate for mTLS")
+		pflag.String("database.tls.cert_file_env", "", "Env var containing client certificate path")
+		pflag.String("database.tls.key_file", "", "Path to client private key for mTLS")
+		pflag.String("database.tls.key_file_env", "", "Env var containing client key path")
+		pflag.String("database.tls.server_name", "", "Override TLS server name for verification")
+
+		// Database pool flags
+		pflag.Int("database.pool.max_open", 0, "Maximum open database connections")
+		pflag.Int("database.pool.max_idle", 0, "Maximum idle connections in pool")
+		pflag.Duration("database.pool.max_lifetime", 0, "Connection max lifetime (e.g. 5m, 30s)")
+		pflag.Duration("database.connection_timeout", 0, "Max time to wait for database on startup (0 = fail immediately)")
+		pflag.Duration("database.connection_retry_interval", 0, "Initial interval between connection retries")
 
 		// Server flags
 		pflag.Int("server.port", 0, "HTTP server port")
 		pflag.Int("server.graphql_max_depth", 0, "Maximum GraphQL query depth limit")
 		pflag.Int("server.graphql_max_complexity", 0, "Maximum GraphQL query complexity limit")
 		pflag.Int("server.graphql_max_rows", 0, "Maximum estimated GraphQL rows per request")
-		pflag.Int("server.graphql_list_limit_default", 0, "Default list limit for GraphQL list queries")
+		pflag.Int("server.graphql_default_limit", 0, "Default list limit for GraphQL list queries")
 		pflag.Duration("server.schema_refresh_min_interval", 0, "Minimum interval between schema refresh checks")
 		pflag.Duration("server.schema_refresh_max_interval", 0, "Maximum interval between schema refresh checks")
 		pflag.Bool("server.graphiql_enabled", false, "Enable GraphiQL UI for /graphql (dev only)")
-		pflag.Bool("server.oidc_enabled", false, "Enable OIDC/JWKS authentication middleware")
-		pflag.String("server.oidc_issuer_url", "", "OIDC issuer URL (for discovery and JWKS)")
-		pflag.String("server.oidc_audience", "", "Expected JWT audience (client ID)")
-		pflag.Duration("server.oidc_clock_skew", 0, "Allowed JWT clock skew (e.g. 2m)")
-		pflag.Bool("server.oidc_skip_tls_verify", false, "Skip TLS verification for OIDC provider (dev only)")
-		pflag.Bool("server.db_role_enabled", false, "Enable database role-based authorization (SET ROLE)")
-		pflag.String("server.db_role_claim_name", "", "JWT claim name containing database role (default: db_role)")
-		pflag.Bool("server.db_role_validation", false, "Validate db_role against discovered database roles")
-		pflag.String("server.db_role_introspection_role", "", "Database role used for schema introspection when role auth is enabled")
+		pflag.Bool("server.auth.oidc_enabled", false, "Enable OIDC/JWKS authentication middleware")
+		pflag.String("server.auth.oidc_issuer_url", "", "OIDC issuer URL (for discovery and JWKS)")
+		pflag.String("server.auth.oidc_audience", "", "Expected JWT audience (client ID)")
+		pflag.Duration("server.auth.oidc_clock_skew", 0, "Allowed JWT clock skew (e.g. 2m)")
+		pflag.Bool("server.auth.oidc_skip_tls_verify", false, "Skip TLS verification for OIDC provider (dev only)")
+		pflag.Bool("server.auth.db_role_enabled", false, "Enable database role-based authorization (SET ROLE)")
+		pflag.String("server.auth.db_role_claim_name", "", "JWT claim name containing database role (default: db_role)")
+		pflag.Bool("server.auth.db_role_validation_enabled", false, "Validate db_role against discovered database roles")
+		pflag.String("server.auth.db_role_introspection_role", "", "Database role used for schema introspection when role auth is enabled")
 		pflag.Bool("server.rate_limit_enabled", false, "Enable global rate limiting for all HTTP endpoints")
 		pflag.Float64("server.rate_limit_rps", 0, "Global rate limit requests per second")
 		pflag.Int("server.rate_limit_burst", 0, "Global rate limit burst size")
@@ -378,11 +463,10 @@ func defineFlags() {
 		pflag.Duration("server.health_check_timeout", 0, "Health check timeout")
 
 		// TLS flags
-		pflag.Bool("server.tls_enabled", false, "Enable HTTPS server")
-		pflag.String("server.tls_cert_mode", "", "TLS certificate mode: file, selfsigned (default: file)")
+		pflag.String("server.tls_mode", "", "TLS mode: off, auto (self-signed), file (default: off)")
 		pflag.String("server.tls_cert_file", "", "Path to TLS certificate file (for file mode)")
 		pflag.String("server.tls_key_file", "", "Path to TLS private key file (for file mode)")
-		pflag.String("server.tls_selfsigned_cert_dir", "", "Directory for self-signed certificates (default: .tls)")
+		pflag.String("server.tls_auto_cert_dir", "", "Directory for auto-generated certificates (default: .tls)")
 
 		// Observability flags
 		pflag.String("observability.service_name", "", "Service name for observability")
@@ -433,7 +517,11 @@ func defineFlags() {
 
 // setDefaults sets default values (lowest precedence).
 func setDefaults(v *viper.Viper) {
-	// Database defaults
+	// Database connection defaults
+	v.SetDefault("database.dsn", "")
+	v.SetDefault("database.dsn_file", "")
+
+	// Database discrete connection defaults
 	v.SetDefault("database.host", "localhost")
 	v.SetDefault("database.port", 4000)
 	v.SetDefault("database.user", "tidb_graphql")
@@ -441,29 +529,42 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.password_file", "")
 	v.SetDefault("database.password_prompt", false)
 	v.SetDefault("database.database", "test")
-	v.SetDefault("database.tls_mode", "skip-verify") // Default for TiDB Cloud compatibility
-	v.SetDefault("database.max_open_conns", 25)
-	v.SetDefault("database.max_idle_conns", 5)
-	v.SetDefault("database.conn_max_lifetime", 5*time.Minute)
+
+	// Database TLS defaults
+	v.SetDefault("database.tls.mode", "")
+	v.SetDefault("database.tls.ca_file", "")
+	v.SetDefault("database.tls.ca_file_env", "")
+	v.SetDefault("database.tls.cert_file", "")
+	v.SetDefault("database.tls.cert_file_env", "")
+	v.SetDefault("database.tls.key_file", "")
+	v.SetDefault("database.tls.key_file_env", "")
+	v.SetDefault("database.tls.server_name", "")
+
+	// Database pool defaults
+	v.SetDefault("database.pool.max_open", 25)
+	v.SetDefault("database.pool.max_idle", 5)
+	v.SetDefault("database.pool.max_lifetime", 5*time.Minute)
+	v.SetDefault("database.connection_timeout", 60*time.Second)
+	v.SetDefault("database.connection_retry_interval", 2*time.Second)
 
 	// Server defaults
 	v.SetDefault("server.port", 8080)
 	v.SetDefault("server.graphql_max_depth", 5)
 	v.SetDefault("server.graphql_max_complexity", 0)
 	v.SetDefault("server.graphql_max_rows", 0)
-	v.SetDefault("server.graphql_list_limit_default", 100)
+	v.SetDefault("server.graphql_default_limit", 100)
 	v.SetDefault("server.schema_refresh_min_interval", 30*time.Second)
 	v.SetDefault("server.schema_refresh_max_interval", 5*time.Minute)
 	v.SetDefault("server.graphiql_enabled", false)
-	v.SetDefault("server.oidc_enabled", false)
-	v.SetDefault("server.oidc_issuer_url", "")
-	v.SetDefault("server.oidc_audience", "")
-	v.SetDefault("server.oidc_clock_skew", 2*time.Minute)
-	v.SetDefault("server.oidc_skip_tls_verify", false)
-	v.SetDefault("server.db_role_enabled", false)
-	v.SetDefault("server.db_role_claim_name", "db_role")
-	v.SetDefault("server.db_role_validation", true)
-	v.SetDefault("server.db_role_introspection_role", "")
+	v.SetDefault("server.auth.oidc_enabled", false)
+	v.SetDefault("server.auth.oidc_issuer_url", "")
+	v.SetDefault("server.auth.oidc_audience", "")
+	v.SetDefault("server.auth.oidc_clock_skew", 2*time.Minute)
+	v.SetDefault("server.auth.oidc_skip_tls_verify", false)
+	v.SetDefault("server.auth.db_role_enabled", false)
+	v.SetDefault("server.auth.db_role_claim_name", "db_role")
+	v.SetDefault("server.auth.db_role_validation_enabled", true)
+	v.SetDefault("server.auth.db_role_introspection_role", "")
 	v.SetDefault("server.rate_limit_enabled", false)
 	v.SetDefault("server.rate_limit_rps", 0.0)
 	v.SetDefault("server.rate_limit_burst", 0)
@@ -481,11 +582,10 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.health_check_timeout", 2*time.Second)
 
 	// TLS defaults
-	v.SetDefault("server.tls_enabled", false)
-	v.SetDefault("server.tls_cert_mode", "file")
+	v.SetDefault("server.tls_mode", "off")
 	v.SetDefault("server.tls_cert_file", "")
 	v.SetDefault("server.tls_key_file", "")
-	v.SetDefault("server.tls_selfsigned_cert_dir", ".tls")
+	v.SetDefault("server.tls_auto_cert_dir", ".tls")
 
 	// Observability defaults
 	v.SetDefault("observability.service_name", "tidb-graphql")
@@ -517,7 +617,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("schema_filters.allow_columns", map[string][]string{
 		"*": {"*"},
 	})
-	v.SetDefault("schema_filters.scan_views", false)
+	v.SetDefault("schema_filters.scan_views_enabled", false)
 	v.SetDefault("schema_filters.deny_mutation_tables", []string{})
 	v.SetDefault("schema_filters.deny_mutation_columns", map[string][]string{})
 
@@ -633,42 +733,105 @@ func (c *Config) Validate() *ValidationResult {
 }
 
 func (d *DatabaseConfig) validate(result *ValidationResult) {
-	// Port range validation
-	if d.Port < 1 || d.Port > 65535 {
+	// Port range validation (only if not using connection string)
+	if d.ConnectionString == "" && (d.Port < 1 || d.Port > 65535) {
 		result.Errors = append(result.Errors, ValidationError{
 			Field:   "database.port",
 			Message: fmt.Sprintf("port %d is out of valid range (1-65535)", d.Port),
 		})
 	}
 
-	// TLS mode validation
-	validTLSModes := map[string]bool{"": true, "skip-verify": true, "true": true, "false": true}
-	if !validTLSModes[d.TLSMode] {
+	// Validate new TLS configuration
+	d.TLS.validate(result)
+
+	// Connection pool validation
+	if d.Pool.MaxOpen < 0 {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.tls_mode",
-			Message: fmt.Sprintf("invalid TLS mode %q", d.TLSMode),
-			Hint:    "valid values are: skip-verify, true, false",
+			Field:   "database.pool.max_open",
+			Message: "max_open cannot be negative",
+		})
+	}
+	if d.Pool.MaxIdle < 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.pool.max_idle",
+			Message: "max_idle cannot be negative",
+		})
+	}
+	if d.Pool.MaxIdle > d.Pool.MaxOpen && d.Pool.MaxOpen > 0 {
+		result.Warnings = append(result.Warnings, ValidationWarning{
+			Field:   "database.pool.max_idle",
+			Message: "max_idle is greater than max_open",
+			Hint:    "idle connections will be limited to max_open",
 		})
 	}
 
-	// Connection pool validation
-	if d.MaxOpenConns < 0 {
-		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.max_open_conns",
-			Message: "max_open_conns cannot be negative",
-		})
-	}
-	if d.MaxIdleConns < 0 {
-		result.Errors = append(result.Errors, ValidationError{
-			Field:   "database.max_idle_conns",
-			Message: "max_idle_conns cannot be negative",
-		})
-	}
-	if d.MaxIdleConns > d.MaxOpenConns && d.MaxOpenConns > 0 {
+	// Connection retry validation
+	if d.ConnectionTimeout > 0 && d.ConnectionRetryInterval > d.ConnectionTimeout {
 		result.Warnings = append(result.Warnings, ValidationWarning{
-			Field:   "database.max_idle_conns",
-			Message: "max_idle_conns is greater than max_open_conns",
-			Hint:    "idle connections will be limited to max_open_conns",
+			Field:   "database.connection_retry_interval",
+			Message: "connection_retry_interval is greater than connection_timeout",
+			Hint:    "only one connection attempt will be made",
+		})
+	}
+	if d.ConnectionRetryInterval < 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.connection_retry_interval",
+			Message: "connection_retry_interval cannot be negative",
+		})
+	}
+	if d.ConnectionTimeout > 0 && d.ConnectionRetryInterval == 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.connection_retry_interval",
+			Message: "connection_retry_interval must be greater than 0 when connection_timeout is set",
+			Hint:    "set a retry interval such as 2s, or set connection_timeout to 0 to disable retries",
+		})
+	}
+	if d.ConnectionTimeout < 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.connection_timeout",
+			Message: "connection_timeout cannot be negative",
+		})
+	}
+}
+
+func (t *DatabaseTLSConfig) validate(result *ValidationResult) {
+	// Mode validation
+	validModes := map[string]bool{"": true, "off": true, "skip-verify": true, "verify-ca": true, "verify-full": true}
+	if !validModes[t.Mode] {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.tls.mode",
+			Message: fmt.Sprintf("invalid TLS mode %q", t.Mode),
+			Hint:    "valid values are: off, skip-verify, verify-ca, verify-full",
+		})
+	}
+
+	// CA file is required for verify-ca and verify-full
+	caFile := t.resolveCAFile()
+	if (t.Mode == "verify-ca" || t.Mode == "verify-full") && caFile == "" {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.tls.ca_file",
+			Message: "CA file is required for verify-ca and verify-full modes",
+			Hint:    "set ca_file or ca_file_env to specify the CA certificate",
+		})
+	}
+
+	// Client cert and key must both be specified or neither
+	certFile := t.resolveCertFile()
+	keyFile := t.resolveKeyFile()
+	if (certFile != "" && keyFile == "") || (certFile == "" && keyFile != "") {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.tls.cert_file",
+			Message: "both cert_file and key_file must be specified for client certificate authentication",
+			Hint:    "provide both cert_file and key_file, or neither",
+		})
+	}
+
+	// Warn about skip-verify in non-empty mode
+	if t.Mode == "skip-verify" {
+		result.Warnings = append(result.Warnings, ValidationWarning{
+			Field:   "database.tls.mode",
+			Message: "skip-verify mode does not verify server certificates",
+			Hint:    "use verify-ca or verify-full in production",
 		})
 	}
 }
@@ -724,10 +887,10 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 			Message: "graphql_max_rows cannot be negative",
 		})
 	}
-	if s.GraphQLDefaultListLimit < 0 {
+	if s.GraphQLDefaultLimit < 0 {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "server.graphql_list_limit_default",
-			Message: "graphql_list_limit_default cannot be negative",
+			Field:   "server.graphql_default_limit",
+			Message: "graphql_default_limit cannot be negative",
 		})
 	}
 
@@ -766,7 +929,8 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 		}
 	}
 
-	if s.CORSEnabled && s.TLSEnabled && len(s.CORSAllowedOrigins) > 0 {
+	tlsEnabled := s.TLSMode != "" && s.TLSMode != "off"
+	if s.CORSEnabled && tlsEnabled && len(s.CORSAllowedOrigins) > 0 {
 		onlyHTTP := true
 		for _, origin := range s.CORSAllowedOrigins {
 			origin = strings.TrimSpace(origin)
@@ -792,61 +956,59 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 		}
 	}
 
-	if s.DBRoleEnabled && !s.OIDCEnabled {
+	if s.Auth.DBRoleEnabled && !s.Auth.OIDCEnabled {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "server.db_role_enabled",
+			Field:   "server.auth.db_role_enabled",
 			Message: "db_role_enabled requires OIDC to be enabled",
-			Hint:    "set server.oidc_enabled=true or disable db_role_enabled",
+			Hint:    "set server.auth.oidc_enabled=true or disable db_role_enabled",
 		})
 	}
 
-	if s.DBRoleEnabled && s.DBRoleIntrospectionRole == "" {
+	if s.Auth.DBRoleEnabled && s.Auth.DBRoleIntrospectionRole == "" {
 		result.Errors = append(result.Errors, ValidationError{
-			Field:   "server.db_role_introspection_role",
+			Field:   "server.auth.db_role_introspection_role",
 			Message: "introspection role is required when db_role_enabled is true",
-			Hint:    "set server.db_role_introspection_role to a role with necessary schema read access",
+			Hint:    "set server.auth.db_role_introspection_role to a role with necessary schema read access",
 		})
 	}
 
-	if s.OIDCEnabled {
-		if s.OIDCIssuerURL == "" {
+	if s.Auth.OIDCEnabled {
+		if s.Auth.OIDCIssuerURL == "" {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "server.oidc_issuer_url",
+				Field:   "server.auth.oidc_issuer_url",
 				Message: "issuer URL is required when OIDC is enabled",
 			})
 		}
-		if s.OIDCAudience == "" {
+		if s.Auth.OIDCAudience == "" {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "server.oidc_audience",
+				Field:   "server.auth.oidc_audience",
 				Message: "audience is required when OIDC is enabled",
 			})
 		}
 	}
 
 	// TLS validation
-	if s.TLSEnabled {
-		validCertModes := map[string]bool{"file": true, "selfsigned": true}
-		if !validCertModes[s.TLSCertMode] {
+	validTLSModes := map[string]bool{"": true, "off": true, "auto": true, "file": true}
+	if !validTLSModes[s.TLSMode] {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "server.tls_mode",
+			Message: fmt.Sprintf("invalid TLS mode %q", s.TLSMode),
+			Hint:    "valid values are: off, auto, file",
+		})
+	}
+
+	if s.TLSMode == "file" {
+		if s.TLSCertFile == "" {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "server.tls_cert_mode",
-				Message: fmt.Sprintf("invalid TLS cert mode %q", s.TLSCertMode),
-				Hint:    "valid values are: file, selfsigned",
+				Field:   "server.tls_cert_file",
+				Message: "TLS cert file required when tls_mode is 'file'",
 			})
 		}
-
-		if s.TLSCertMode == "file" {
-			if s.TLSCertFile == "" {
-				result.Errors = append(result.Errors, ValidationError{
-					Field:   "server.tls_cert_file",
-					Message: "TLS cert file required when tls_cert_mode is 'file'",
-				})
-			}
-			if s.TLSKeyFile == "" {
-				result.Errors = append(result.Errors, ValidationError{
-					Field:   "server.tls_key_file",
-					Message: "TLS key file required when tls_cert_mode is 'file'",
-				})
-			}
+		if s.TLSKeyFile == "" {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "server.tls_key_file",
+				Message: "TLS key file required when tls_mode is 'file'",
+			})
 		}
 	}
 }
@@ -939,20 +1101,40 @@ func validOTLPEndpoint(endpoint string) bool {
 	return err == nil
 }
 
-// DSN returns a MySQL-compatible data source name.
-func (d *DatabaseConfig) DSN() string {
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?parseTime=true",
-		d.User,
-		d.Password,
-		d.Host,
-		d.Port,
-		d.Database,
-	)
+// tlsConfigName is the name used to register custom TLS configs with the MySQL driver.
+const tlsConfigName = "tidb-graphql-custom"
 
-	// Add TLS parameter if configured
-	if d.TLSMode != "" {
-		dsn += fmt.Sprintf("&tls=%s", d.TLSMode)
+// DSN returns a MySQL-compatible data source name.
+// If ConnectionString is set, it is used directly (with TLS config applied).
+// Otherwise, builds DSN from discrete fields.
+func (d *DatabaseConfig) DSN() string {
+	var dsn string
+
+	if d.ConnectionString != "" {
+		dsn = d.ConnectionString
+		// Ensure parseTime is set
+		if !strings.Contains(dsn, "parseTime") {
+			if strings.Contains(dsn, "?") {
+				dsn += "&parseTime=true"
+			} else {
+				dsn += "?parseTime=true"
+			}
+		}
+	} else {
+		dsn = fmt.Sprintf(
+			"%s:%s@tcp(%s:%d)/%s?parseTime=true",
+			d.User,
+			d.Password,
+			d.Host,
+			d.Port,
+			d.Database,
+		)
+	}
+
+	// Add TLS parameter
+	tlsParam := d.effectiveTLSParam()
+	if tlsParam != "" && !strings.Contains(dsn, "tls=") {
+		dsn += fmt.Sprintf("&tls=%s", tlsParam)
 	}
 
 	return dsn
@@ -961,18 +1143,168 @@ func (d *DatabaseConfig) DSN() string {
 // DSNWithoutDatabase returns a DSN that omits the default database.
 // Useful for role-based auth where database access is granted via SET ROLE.
 func (d *DatabaseConfig) DSNWithoutDatabase() string {
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/?parseTime=true",
-		d.User,
-		d.Password,
-		d.Host,
-		d.Port,
-	)
+	var dsn string
 
-	// Add TLS parameter if configured
-	if d.TLSMode != "" {
-		dsn += fmt.Sprintf("&tls=%s", d.TLSMode)
+	if d.ConnectionString != "" {
+		// Parse the connection string and remove the database part
+		// This is a simplification; the ConnectionString may not have a database
+		dsn = d.ConnectionString
+		// Ensure parseTime is set
+		if !strings.Contains(dsn, "parseTime") {
+			if strings.Contains(dsn, "?") {
+				dsn += "&parseTime=true"
+			} else {
+				dsn += "?parseTime=true"
+			}
+		}
+	} else {
+		dsn = fmt.Sprintf(
+			"%s:%s@tcp(%s:%d)/?parseTime=true",
+			d.User,
+			d.Password,
+			d.Host,
+			d.Port,
+		)
+	}
+
+	// Add TLS parameter
+	tlsParam := d.effectiveTLSParam()
+	if tlsParam != "" && !strings.Contains(dsn, "tls=") {
+		dsn += fmt.Sprintf("&tls=%s", tlsParam)
 	}
 
 	return dsn
+}
+
+// effectiveTLSParam returns the TLS parameter value for the DSN.
+// Returns the registered config name for custom TLS, or empty string if no TLS is configured.
+func (d *DatabaseConfig) effectiveTLSParam() string {
+	// Check if we have new TLS configuration
+	mode := d.TLS.Mode
+
+	// If new TLS mode is set, use it
+	if mode != "" {
+		switch mode {
+		case "off":
+			return "false"
+		case "skip-verify":
+			return "skip-verify"
+		case "verify-ca", "verify-full":
+			// Custom TLS config required
+			return tlsConfigName
+		default:
+			// Unknown mode, let the driver handle it
+			return mode
+		}
+	}
+
+	// Empty mode means no TLS parameter should be added.
+	return ""
+}
+
+// RegisterTLS registers a custom TLS configuration with the MySQL driver.
+// Must be called before opening the database connection when using verify-ca or verify-full modes.
+// Returns nil if no custom TLS configuration is needed.
+func (d *DatabaseConfig) RegisterTLS() error {
+	mode := d.TLS.Mode
+
+	// Only register custom config for modes that need it
+	if mode != "verify-ca" && mode != "verify-full" {
+		return nil
+	}
+
+	tlsCfg, err := d.buildTLSConfig()
+	if err != nil {
+		return fmt.Errorf("failed to build TLS config: %w", err)
+	}
+
+	if err := mysql.RegisterTLSConfig(tlsConfigName, tlsCfg); err != nil {
+		return fmt.Errorf("failed to register TLS config: %w", err)
+	}
+
+	return nil
+}
+
+// buildTLSConfig creates a tls.Config based on the DatabaseTLSConfig settings.
+func (d *DatabaseConfig) buildTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	mode := d.TLS.Mode
+
+	// Resolve file paths from env var indirection if specified
+	caFile := d.TLS.resolveCAFile()
+	certFile := d.TLS.resolveCertFile()
+	keyFile := d.TLS.resolveKeyFile()
+
+	// Load CA certificate for server verification
+	if caFile != "" {
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA file %q: %w", caFile, err)
+		}
+
+		certPool := x509.NewCertPool()
+		if !certPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate from %q", caFile)
+		}
+		tlsCfg.RootCAs = certPool
+	}
+
+	// Load client certificate for mTLS
+	if certFile != "" && keyFile != "" {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	} else if certFile != "" || keyFile != "" {
+		return nil, fmt.Errorf("both cert_file and key_file must be specified for client certificate authentication")
+	}
+
+	// Configure verification mode
+	switch mode {
+	case "verify-ca":
+		// Verify the server certificate against CA, but don't check hostname
+		tlsCfg.InsecureSkipVerify = false
+		// Note: go-sql-driver/mysql handles the CA verification
+	case "verify-full":
+		tlsCfg.InsecureSkipVerify = false
+		if d.TLS.ServerName != "" {
+			tlsCfg.ServerName = d.TLS.ServerName
+		}
+	}
+
+	return tlsCfg, nil
+}
+
+// resolveCAFile returns the effective CA file path, checking env var indirection.
+func (t *DatabaseTLSConfig) resolveCAFile() string {
+	if t.CAFileEnv != "" {
+		if path := os.Getenv(t.CAFileEnv); path != "" {
+			return path
+		}
+	}
+	return t.CAFile
+}
+
+// resolveCertFile returns the effective client cert file path, checking env var indirection.
+func (t *DatabaseTLSConfig) resolveCertFile() string {
+	if t.CertFileEnv != "" {
+		if path := os.Getenv(t.CertFileEnv); path != "" {
+			return path
+		}
+	}
+	return t.CertFile
+}
+
+// resolveKeyFile returns the effective client key file path, checking env var indirection.
+func (t *DatabaseTLSConfig) resolveKeyFile() string {
+	if t.KeyFileEnv != "" {
+		if path := os.Getenv(t.KeyFileEnv); path != "" {
+			return path
+		}
+	}
+	return t.KeyFile
 }

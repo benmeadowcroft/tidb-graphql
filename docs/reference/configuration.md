@@ -31,6 +31,19 @@ See `docs/how-to/config-precedence.md` for precedence rules.
 
 ## database
 
+You can configure the database connection using either:
+1. **DSN (Data Source Name)**: A single connection string
+2. **Discrete fields**: Individual settings for host, port, user, etc.
+
+### Connection string (DSN)
+
+- `database.dsn` (string, default: empty) — Complete MySQL DSN in go-sql-driver format: `user:password@tcp(host:port)/database?params`
+- `database.dsn_file` (string, default: empty) — Path to file containing DSN (use `@-` for stdin)
+
+When `dsn` is set, it overrides the discrete connection fields below.
+
+### Discrete connection fields
+
 - `database.host` (string, default: `localhost`)
 - `database.port` (int, default: `4000`)
 - `database.user` (string, default: `tidb_graphql`)
@@ -38,17 +51,82 @@ See `docs/how-to/config-precedence.md` for precedence rules.
 - `database.password_file` (string, default: empty; use `@-` to read from stdin)
 - `database.password_prompt` (bool, default: `false`)
 - `database.database` (string, default: `test`)
-- `database.tls_mode` (string, default: `skip-verify`; values: `skip-verify`, `true`, `false`)
-  - YAML booleans (`true`/`false`) are accepted and mapped to the string values.
 
-Connection pool:
+### TLS/SSL configuration
+
+Configure TLS for secure database connections, including client certificate authentication (mTLS).
+
+- `database.tls.mode` (string, default: empty) — TLS verification mode:
+  - `off` — No TLS (plaintext connection)
+  - `skip-verify` — TLS without server certificate verification (insecure)
+  - `verify-ca` — TLS with CA verification (requires `ca_file`)
+  - `verify-full` — TLS with full verification including hostname (requires `ca_file`)
+- `database.tls.ca_file` (string, default: empty) — Path to CA certificate for server verification
+- `database.tls.ca_file_env` (string, default: empty) — Environment variable containing CA file path
+- `database.tls.cert_file` (string, default: empty) — Path to client certificate for mTLS
+- `database.tls.cert_file_env` (string, default: empty) — Environment variable containing client cert path
+- `database.tls.key_file` (string, default: empty) — Path to client private key for mTLS
+- `database.tls.key_file_env` (string, default: empty) — Environment variable containing client key path
+- `database.tls.server_name` (string, default: empty) — Override TLS server name for verification
+
+**Legacy TLS setting (deprecated):**
+- `database.tls_mode` (string, default: `skip-verify`) — Use `database.tls.mode` instead
+
+### Connection pool
+
 - `database.pool.max_open` (int, default: `25`) — Maximum open database connections
 - `database.pool.max_idle` (int, default: `5`) — Maximum idle connections in pool
 - `database.pool.max_lifetime` (duration, default: `5m`) — Connection max lifetime
 
-Connection behavior:
+### Connection behavior
+
 - `database.connection_timeout` (duration, default: `60s`) — Maximum time to wait for database on startup. Set to `0` to fail immediately.
 - `database.connection_retry_interval` (duration, default: `2s`) — Initial interval between connection retry attempts. Uses exponential backoff capped at 30s.
+
+### Examples
+
+**Simple DSN:**
+```yaml
+database:
+  dsn: "user:password@tcp(tidb.example.com:4000)/mydb?parseTime=true"
+```
+
+**DSN with mTLS (TiDB Cloud):**
+```yaml
+database:
+  dsn: "user:password@tcp(gateway.tidbcloud.com:4000)/mydb"
+  tls:
+    mode: verify-full
+    ca_file: /etc/ssl/tidb/ca-cert.pem
+    cert_file: /etc/ssl/tidb/client-cert.pem
+    key_file: /etc/ssl/tidb/client-key.pem
+```
+
+**Discrete fields with TLS:**
+```yaml
+database:
+  host: gateway.tidbcloud.com
+  port: 4000
+  user: graphql_app
+  password_file: /run/secrets/db_password
+  database: production
+  tls:
+    mode: verify-full
+    ca_file: /etc/ssl/tidb/ca-cert.pem
+    cert_file: /etc/ssl/tidb/client-cert.pem
+    key_file: /etc/ssl/tidb/client-key.pem
+```
+
+**Container-friendly with env var indirection:**
+```yaml
+database:
+  dsn_file: /run/secrets/database_dsn
+  tls:
+    mode: verify-full
+    ca_file_env: TIDB_CA_CERT_PATH
+    cert_file_env: TIDB_CLIENT_CERT_PATH
+    key_file_env: TIDB_CLIENT_KEY_PATH
+```
 
 ## server
 

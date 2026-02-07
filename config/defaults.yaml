@@ -1,6 +1,12 @@
 # Default configuration for containerized tidb-graphql
 #
 # This file is baked into the container image at /etc/tidb-graphql/tidb-graphql.yaml.
+# It provides PRODUCTION-oriented defaults for container deployments.
+#
+# For local development with docker-compose, several values are overridden by
+# TIGQL_* environment variables in docker-compose.yml (e.g., GraphiQL is
+# enabled, server TLS is disabled, and logging uses human-readable text format).
+#
 # Override individual values with TIGQL_* environment variables, or replace the
 # entire file by mounting your own config:
 #
@@ -10,11 +16,23 @@
 # See docs/reference/configuration.md for the full reference.
 
 database:
+  # Connection: Set TIGQL_DATABASE_DSN or TIGQL_DATABASE_DSN_FILE for connection string,
+  # or use discrete fields below. DSN takes precedence if both are set.
+  # dsn_file: /run/secrets/database_dsn  # Read DSN from mounted secret
+
   host: tidb              # Service name — resolves via Docker Compose / K8s DNS
   port: 4000
   user: root
   database: test
-  tls_mode: skip-verify
+
+  # TLS configuration (for TiDB Cloud or secure connections)
+  tls:
+    mode: skip-verify # off, skip-verify, verify-ca, verify-full
+    # ca_file: /etc/ssl/tidb/ca-cert.pem
+    # cert_file: /etc/ssl/tidb/client-cert.pem
+    # key_file: /etc/ssl/tidb/client-key.pem
+    # For K8s: use *_file_env to reference env vars containing paths
+
   pool:
     max_open: 25
     max_idle: 5

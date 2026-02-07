@@ -396,6 +396,12 @@ func initTracing(cfg *config.Config, logger *logging.Logger) (*observability.Tra
 func connectDB(cfg *config.Config, logger *logging.Logger) (*sql.DB, interface{ Unregister() error }, error) {
 	var db *sql.DB
 	var dbStatsReg interface{ Unregister() error }
+
+	// Register custom TLS configuration if needed (for verify-ca/verify-full modes)
+	if err := cfg.Database.RegisterTLS(); err != nil {
+		return nil, nil, fmt.Errorf("failed to register database TLS config: %w", err)
+	}
+
 	dsn := cfg.Database.DSN()
 	if cfg.Server.Auth.DBRoleEnabled {
 		dsn = cfg.Database.DSNWithoutDatabase()

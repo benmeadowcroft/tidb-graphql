@@ -1,16 +1,19 @@
 # Development environment: TiDB + tidb-graphql
 #
 # Usage:
-#   podman compose up        (or docker compose up)
-#   podman compose up -d     (detached)
-#   podman compose down      (stop and remove)
-#   podman compose down -v   (stop and remove, including data volume)
+#   docker compose up          (or podman compose up)
+#   docker compose up -d       (detached mode)
+#   docker compose up --build  (rebuild after code changes)
+#   docker compose down        (stop and remove)
+#   docker compose down -v     (stop and remove, including data volume)
 #
-# The GraphQL API will be available at http://localhost:8080/graphql
-# TiDB MySQL protocol is exposed at localhost:4000
+# GraphiQL interactive explorer: http://localhost:8080/graphql
+# TiDB MySQL protocol: localhost:4000
 #
 # On first run, sample data is loaded from docs/tutorials/sample-data.sql.
 # Data persists across restarts in the 'tidb-data' volume.
+#
+# Customize settings by creating a .env file (see .env.example).
 
 services:
   tidb:
@@ -20,13 +23,20 @@ services:
       - "--initialize-sql-file=/init.sql" # Load tutorial data set on first run
     volumes:
       - ./config/tidb/tidb.toml:/tidb.toml:ro         # custom tidb configuration
-      - ./docs/tutorials/sample-data.sql:/init.sql:ro # tutorial data set
-      - tidb-data:/tmp/tidb                           # persistent storage for TiDB data
+      - ./docs/tutorials/sample-data.sql:/init.sql:ro  # tutorial data set
+      - tidb-data:/tmp/tidb                            # persistent storage for TiDB data
     ports:
       - "4000:4000"   # mysql protocol
       - "10080:10080" # status server
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:10080/status"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   tidb-graphql:
+    image: ${TIGQL_IMAGE:-ghcr.io/benmeadowcroft/tidb-graphql:main}
     build:
       context: .
       dockerfile: Containerfile
@@ -35,9 +45,14 @@ services:
     environment:
       - TIGQL_DATABASE_HOST=tidb
       - TIGQL_DATABASE_PORT=4000
-      - TIGQL_DATABASE_DATABASE=tidb_graphql_tutorial # connect to the tutorial database
+      - TIGQL_DATABASE_DATABASE=tidb_graphql_tutorial
+      - TIGQL_SERVER_GRAPHIQL_ENABLED=true
+      - TIGQL_SERVER_TLS_MODE=off
+      - TIGQL_OBSERVABILITY_LOGGING_FORMAT=text
+      - TIGQL_OBSERVABILITY_ENVIRONMENT=development
     depends_on:
-      - tidb
+      tidb:
+        condition: service_healthy
 
 volumes:
   tidb-data:

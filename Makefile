@@ -1,4 +1,4 @@
-.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server container-build
+.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server container-build compose-up compose-down compose-reset
 
 # Default target
 help:
@@ -18,6 +18,9 @@ help:
 	@echo "  jwt-token          - Mint a JWT token from local keypair"
 	@echo "  jwks-server        - Run a local JWKS server for dev auth testing"
 	@echo "  container-build    - Build container image locally (podman/docker)"
+	@echo "  compose-up         - Start development environment (TiDB + tidb-graphql)"
+	@echo "  compose-down       - Stop development environment"
+	@echo "  compose-reset      - Stop and remove all data (fresh start)"
 
 # Load test environment variables from .env.test if it exists
 -include .env.test
@@ -113,10 +116,24 @@ jwt-token:
 jwks-server:
 	go run ./scripts/jwks-server
 
+# Auto-detect container tool (podman preferred, docker fallback)
+CONTAINER_TOOL ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
+
 # Build container image locally (podman or docker)
 container-build:
-	podman build \
-		-t tidb-graphql:local .
+	$(CONTAINER_TOOL) build -t tidb-graphql:local .
+
+# Start development environment (TiDB + tidb-graphql)
+compose-up:
+	$(CONTAINER_TOOL) compose up --build
+
+# Stop development environment
+compose-down:
+	$(CONTAINER_TOOL) compose down
+
+# Stop and remove all data (fresh start)
+compose-reset:
+	$(CONTAINER_TOOL) compose down -v
 
 # Build and run in one command
 dev: build run

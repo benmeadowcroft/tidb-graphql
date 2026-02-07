@@ -29,6 +29,10 @@ help:
 export GOCACHE := $(CURDIR)/.cache/go-build
 export GOMODCACHE := $(CURDIR)/.cache/go-mod
 
+# Build metadata (can be overridden by env)
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo dev)
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+
 # Export variables loaded from .env.test to shell commands.
 export
 
@@ -36,8 +40,6 @@ export
 build:
 	@echo "Building tidb-graphql..."
 	@mkdir -p bin
-	$(eval VERSION := $(shell cat VERSION 2>/dev/null || echo dev))
-	$(eval COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo none))
 	go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT)" -o bin/tidb-graphql ./cmd/server
 
 # Run the server (requires database configuration)
@@ -121,7 +123,10 @@ CONTAINER_TOOL ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/
 
 # Build container image locally (podman or docker)
 container-build:
-	$(CONTAINER_TOOL) build -t tidb-graphql:local .
+	$(CONTAINER_TOOL) build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(COMMIT) \
+		-t tidb-graphql:local .
 
 # Start development environment (TiDB + tidb-graphql)
 compose-up:

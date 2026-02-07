@@ -16,9 +16,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/go-sql-driver/mysql"
-	"github.com/graphql-go/graphql"
-	"github.com/graphql-go/graphql/language/ast"
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
@@ -26,6 +23,10 @@ import (
 	"tidb-graphql/internal/planner"
 	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/sqltype"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/graphql-go/graphql"
+	"github.com/graphql-go/graphql/language/ast"
 )
 
 // Resolver handles GraphQL query execution against a database.
@@ -1089,29 +1090,44 @@ func (r *Resolver) enumTypeName(table introspection.Table, col introspection.Col
 func normalizeEnumValueName(value string) string {
 	var b strings.Builder
 	lastUnderscore := false
-	for i := 0; i < len(value); i++ {
-		ch := value[i]
-		isLetter := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
-		isDigit := ch >= '0' && ch <= '9'
-		if isLetter || isDigit {
-			if ch >= 'a' && ch <= 'z' {
-				ch = ch - 'a' + 'A'
+	for _, r := range value {
+		if r <= 0x7F {
+			ch := byte(r)
+			isLetter := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+			isDigit := ch >= '0' && ch <= '9'
+			if isLetter || isDigit {
+				if ch >= 'a' && ch <= 'z' {
+					ch = ch - 'a' + 'A'
+				}
+				b.WriteByte(ch)
+				lastUnderscore = false
+				continue
 			}
-			b.WriteByte(ch)
-			lastUnderscore = false
+			if !lastUnderscore && b.Len() > 0 {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
 			continue
 		}
-		if !lastUnderscore && b.Len() > 0 {
+		if b.Len() > 0 && !lastUnderscore {
 			b.WriteByte('_')
-			lastUnderscore = true
 		}
+		// escape non-ascii characters. GraphQL (unlike TiDB) doesn't support non-ascii characters
+		// in enum value names, so we need to escape them to ensure we can represent all possible
+		// enum values.
+		if r <= 0xFFFF {
+			fmt.Fprintf(&b, "U%04X", r)
+		} else {
+			fmt.Fprintf(&b, "U%06X", r)
+		}
+		lastUnderscore = false
 	}
 	name := strings.Trim(b.String(), "_")
 	if name == "" {
-		name = "VALUE"
+		name = "VALUE" // fallback for empty enum values
 	}
 	if name[0] >= '0' && name[0] <= '9' {
-		name = "VALUE_" + name
+		name = "VALUE_" + name // GraphQL enum values can't start with a digit, so prefix with "VALUE_"
 	}
 	return name
 }

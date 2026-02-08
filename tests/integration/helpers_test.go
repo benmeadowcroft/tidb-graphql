@@ -4,15 +4,26 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
+	"tidb-graphql/internal/dbexec"
+	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/naming"
+	"tidb-graphql/internal/nodeid"
+	"tidb-graphql/internal/resolver"
+	"tidb-graphql/internal/schemafilter"
+	"tidb-graphql/internal/testutil/tidbcloud"
+
+	"github.com/graphql-go/graphql"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,9 +56,13 @@ func startTestServer(t *testing.T, binaryName string, port int, extraEnv ...stri
 	require.NoError(t, err, "Failed to build server")
 
 	cmd := exec.Command(binaryName)
-	cmd.Env = append(os.Environ(), baseServerEnv()...)
-	cmd.Env = append(cmd.Env, fmt.Sprintf("TIGQL_SERVER_PORT=%d", port))
-	cmd.Env = append(cmd.Env, extraEnv...)
+	baseEnv := append(os.Environ(), baseServerEnv()...)
+	baseEnv = append(baseEnv, fmt.Sprintf("TIGQL_SERVER_PORT=%d", port))
+	cmd.Env = mergeEnv(baseEnv, extraEnv...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	err = cmd.Start()
 	require.NoError(t, err)
@@ -60,12 +75,12 @@ func startTestServer(t *testing.T, binaryName string, port int, extraEnv ...stri
 	}
 	t.Cleanup(cleanup)
 
-	waitForHealthy(t, port)
+	waitForHealthyWithLogs(t, port, &stdout, &stderr, cmd.Env)
 
 	return cmd, cleanup
 }
 
-func waitForHealthy(t *testing.T, port int) {
+func waitForHealthyWithLogs(t *testing.T, port int, stdout, stderr *bytes.Buffer, env []string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -78,7 +93,7 @@ func waitForHealthy(t *testing.T, port int) {
 			}
 		}
 	}
-	t.Fatalf("Server did not become ready within 10 seconds")
+	t.Fatalf("Server did not become ready within 10 seconds.\n%s", formatServerDebugInfo(stdout, stderr, env))
 }
 
 func openCloudDB(t *testing.T) *sql.DB {
@@ -90,4 +105,80 @@ func openCloudDB(t *testing.T) *sql.DB {
 	defer cancel()
 	require.NoError(t, db.PingContext(ctx), "Database should be accessible for health check test")
 	return db
+}
+
+func nodeIDForTable(tableName string, pkValues ...interface{}) string {
+	return nodeid.Encode(introspection.ToGraphQLTypeName(tableName), pkValues...)
+}
+
+func buildGraphQLSchema(t *testing.T, testDB *tidbcloud.TestDB) graphql.Schema {
+	t.Helper()
+
+	dbSchema, err := introspection.IntrospectDatabase(testDB.DB, testDB.DatabaseName)
+	require.NoError(t, err)
+
+	res := resolver.NewResolver(dbexec.NewStandardExecutor(testDB.DB), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	schema, err := res.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	return schema
+}
+
+func mergeEnv(base []string, overrides ...string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+
+	overrideKeys := make(map[string]struct{}, len(overrides))
+	for _, kv := range overrides {
+		key := strings.SplitN(kv, "=", 2)[0]
+		overrideKeys[key] = struct{}{}
+	}
+
+	merged := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		key := strings.SplitN(kv, "=", 2)[0]
+		if _, exists := overrideKeys[key]; exists {
+			continue
+		}
+		merged = append(merged, kv)
+	}
+	merged = append(merged, overrides...)
+	return merged
+}
+
+func formatServerDebugInfo(stdout, stderr *bytes.Buffer, env []string) string {
+	envLines := filterEnv(env, "TIGQL_DATABASE_", "TIGQL_SERVER_", "TIGQL_OBSERVABILITY_")
+	return fmt.Sprintf("Environment:\n%s\nSTDOUT:\n%s\nSTDERR:\n%s",
+		strings.Join(envLines, "\n"),
+		tailString(stdout, 4000),
+		tailString(stderr, 4000),
+	)
+}
+
+func filterEnv(env []string, prefixes ...string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	var filtered []string
+	for _, kv := range env {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(kv, prefix) {
+				filtered = append(filtered, kv)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
+func tailString(buf *bytes.Buffer, max int) string {
+	if buf == nil {
+		return ""
+	}
+	s := buf.String()
+	if len(s) <= max {
+		return s
+	}
+	return s[len(s)-max:]
 }

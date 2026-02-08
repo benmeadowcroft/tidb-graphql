@@ -89,8 +89,8 @@ func TestTryBatchEdgeList_Chunking(t *testing.T) {
 	parentCount := batchMaxInClause + 1
 
 	executor := &fakeExecutor{responses: [][][]any{
-		{{101, 1}},
-		{{999, parentCount}},
+		{{1, 101, 1}},
+		{{parentCount, 999, parentCount}},
 	}}
 
 	users := introspection.Table{
@@ -149,7 +149,7 @@ func TestTryBatchEdgeList_Chunking(t *testing.T) {
 	require.Len(t, results, 1)
 	assert.EqualValues(t, 999, results[0]["tagId"])
 	_, hasUserID := results[0]["userId"]
-	assert.False(t, hasUserID)
+	assert.True(t, hasUserID)
 
 	assert.Equal(t, 2, executor.calls)
 	require.Len(t, executor.args, 2)

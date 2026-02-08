@@ -151,8 +151,8 @@ func TestWhereFiltering_In(t *testing.T) {
 	// Test: Filter products by ID IN list (uses indexed PK column)
 	query := `
 		{
-			products(where: { id: { in: [1, 2, 3] } }, limit: 10) {
-				id
+			products(where: { databaseId: { in: [1, 2, 3] } }, limit: 10) {
+				databaseId
 				name
 			}
 		}
@@ -172,7 +172,7 @@ func TestWhereFiltering_In(t *testing.T) {
 	require.Equal(t, 3, len(products), "Should return exactly 3 products")
 	for _, p := range products {
 		product := p.(map[string]interface{})
-		id := int(product["id"].(int))
+		id := int(product["databaseId"].(int))
 		assert.Contains(t, []int{1, 2, 3}, id)
 	}
 }
@@ -315,12 +315,12 @@ func TestWhereFiltering_AND(t *testing.T) {
 				where: {
 					AND: [
 						{ price: { gt: 20 } },
-						{ id: { gte: 1 } }
+						{ databaseId: { gte: 1 } }
 					]
 				},
 				limit: 10
 			) {
-				id
+				databaseId
 				name
 				price
 			}
@@ -342,7 +342,7 @@ func TestWhereFiltering_AND(t *testing.T) {
 	for _, p := range products {
 		product := p.(map[string]interface{})
 		price := product["price"].(float64)
-		id := int(product["id"].(int))
+		id := int(product["databaseId"].(int))
 		assert.Greater(t, price, 20.0)
 		assert.GreaterOrEqual(t, id, 1)
 	}

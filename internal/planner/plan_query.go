@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/graphql-go/graphql/language/ast"
 	"tidb-graphql/internal/introspection"
+
+	"github.com/graphql-go/graphql/language/ast"
 )
 
 // Plan is the top-level output of planning a GraphQL query.
@@ -204,6 +205,35 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 			return &Plan{Root: planned, Table: table, Columns: selected}, nil
 		}
 
+		pkCols := introspection.PrimaryKeyColumns(table)
+		if len(pkCols) > 0 {
+			// Build expected field name
+			pkField := singleField + "_by"
+			for _, col := range pkCols {
+				pkField += "_" + introspection.GraphQLFieldName(col)
+			}
+
+			if fieldName == pkField {
+				// Extract argument values
+				values := make(map[string]interface{})
+				for _, col := range pkCols {
+					argName := introspection.GraphQLFieldName(col)
+					argValue, ok := args[argName]
+					if !ok {
+						return nil, fmt.Errorf("missing primary key argument %s", argName)
+					}
+					values[col.Name] = argValue
+				}
+
+				selected := SelectedColumns(table, field, options.fragments)
+				planned, err := PlanTableByPKColumns(table, selected, pkCols, values)
+				if err != nil {
+					return nil, err
+				}
+				return &Plan{Root: planned, Table: table, Columns: selected}, nil
+			}
+		}
+
 		// Check for unique key lookups
 		for _, idx := range table.Indexes {
 			if !idx.Unique || idx.Name == "PRIMARY" {
@@ -364,8 +394,12 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 
 	visitSelections(field.SelectionSet.Selections)
 
-	if len(selected) == 0 {
-		return table.Columns
+	if len(introspection.PrimaryKeyColumns(table)) > 0 {
+		for _, col := range table.Columns {
+			if col.IsPrimaryKey {
+				selected[col.Name] = struct{}{}
+			}
+		}
 	}
 
 	columns := make([]introspection.Column, 0, len(selected))

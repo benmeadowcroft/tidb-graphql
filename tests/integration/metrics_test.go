@@ -5,12 +5,15 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"tidb-graphql/internal/testutil/tidbcloud"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,11 +24,14 @@ func TestMetricsEndpoint(t *testing.T) {
 
 	// This test verifies that the /metrics endpoint exposes Prometheus metrics
 
+	testDB := tidbcloud.NewTestDB(t)
+
 	// Build the server binary
 	cmd, _ := startTestServer(
 		t,
 		"../../bin/tidb-graphql-metrics-test",
 		18081,
+		fmt.Sprintf("TIGQL_DATABASE_DATABASE=%s", testDB.DatabaseName),
 		"TIGQL_OBSERVABILITY_METRICS_ENABLED=true",
 		"TIGQL_OBSERVABILITY_LOGGING_FORMAT=text",
 	)

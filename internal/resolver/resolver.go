@@ -20,7 +20,9 @@ import (
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
+	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/observability"
+	"tidb-graphql/internal/schemanaming"
 	"tidb-graphql/internal/planner"
 	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/sqltype"
@@ -48,10 +50,12 @@ type Resolver struct {
 	singularQueryCache map[string]string
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
+	namesApplied       bool
 	orderDirection     *graphql.Enum
 	nonNegativeInt     *graphql.Scalar
 	jsonType           *graphql.Scalar
 	dateType           *graphql.Scalar
+	nodeInterface      *graphql.Interface
 	limits             *planner.PlanLimits
 	defaultLimit       int
 	filters            schemafilter.Config
@@ -91,6 +95,8 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 // It creates types for each table, adds list and by-primary-key queries, and wires up
 // relationship resolvers for foreign key navigation.
 func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
+	r.applyNaming()
+
 	queryFields := graphql.Fields{}
 
 	for _, table := range r.dbSchema.Tables {
@@ -105,6 +111,17 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 				return "No tables found in database", nil
 			},
 			Description: "Placeholder field when database has no tables",
+		}
+	}
+	if r.hasNodeTypes() {
+		queryFields["node"] = &graphql.Field{
+			Type: r.nodeInterfaceType(),
+			Args: graphql.FieldConfigArgument{
+				"id": &graphql.ArgumentConfig{
+					Type: graphql.NewNonNull(graphql.ID),
+				},
+			},
+			Resolve: r.makeNodeResolver(),
 		}
 	}
 
@@ -127,8 +144,28 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 			Fields: mutationFields,
 		})
 	}
+	if types := r.schemaTypes(); len(types) > 0 {
+		schemaConfig.Types = types
+	}
 
 	return graphql.NewSchema(schemaConfig)
+}
+
+func (r *Resolver) applyNaming() {
+	if r.dbSchema == nil {
+		return
+	}
+
+	r.mu.Lock()
+	if r.namesApplied {
+		r.mu.Unlock()
+		return
+	}
+	r.namesApplied = true
+	namingConfig := r.singularNamer.Config()
+	r.mu.Unlock()
+
+	schemanaming.Apply(r.dbSchema, naming.New(namingConfig, nil))
 }
 
 func (r *Resolver) singularQueryName(table introspection.Table) string {
@@ -218,7 +255,8 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 	pkCols := introspection.PrimaryKeyColumns(table)
 	if len(pkCols) > 0 {
 		pkFieldName := r.singularQueryName(table)
-		r.addSingleRowQuery(fields, table, tableType, pkFieldName, pkCols)
+		r.addPrimaryKeyQuery(fields, table, tableType, pkFieldName, pkCols)
+		r.addPrimaryKeyUniqueLookup(fields, table, tableType, pkFieldName, pkCols)
 	}
 
 	// Unique key queries
@@ -255,6 +293,31 @@ func (r *Resolver) addSingleRowQuery(fields graphql.Fields, table introspection.
 		Args:    args,
 		Resolve: r.makeSingleRowResolver(table),
 	}
+}
+
+// addPrimaryKeyQuery adds a query field that returns a single row by global node ID.
+func (r *Resolver) addPrimaryKeyQuery(fields graphql.Fields, table introspection.Table, tableType *graphql.Object, queryName string, pkCols []introspection.Column) {
+	fields[queryName] = &graphql.Field{
+		Type: tableType,
+		Args: graphql.FieldConfigArgument{
+			"id": &graphql.ArgumentConfig{
+				Type: graphql.NewNonNull(graphql.ID),
+			},
+		},
+		Resolve: r.makePrimaryKeyResolver(table, pkCols),
+	}
+}
+
+// addPrimaryKeyUniqueLookup adds a unique-key style lookup for raw primary key fields.
+func (r *Resolver) addPrimaryKeyUniqueLookup(fields graphql.Fields, table introspection.Table, tableType *graphql.Object, baseName string, pkCols []introspection.Column) {
+	if len(pkCols) == 0 {
+		return
+	}
+	queryName := baseName + "_by"
+	for _, col := range pkCols {
+		queryName += "_" + introspection.GraphQLFieldName(col)
+	}
+	r.addSingleRowQuery(fields, table, tableType, queryName, pkCols)
 }
 
 // addUniqueKeyQueries adds resolver fields for unique index lookups
@@ -300,6 +363,11 @@ func (r *Resolver) buildGraphQLType(table introspection.Table) *graphql.Object {
 		return cached
 	}
 
+	interfaces := []*graphql.Interface{}
+	if len(introspection.PrimaryKeyColumns(table)) > 0 {
+		interfaces = append(interfaces, r.nodeInterfaceType())
+	}
+
 	// Create type with FieldsThunk for lazy field initialization
 	// This prevents circular reference issues
 	objType := graphql.NewObject(graphql.ObjectConfig{
@@ -308,6 +376,7 @@ func (r *Resolver) buildGraphQLType(table introspection.Table) *graphql.Object {
 		Fields: graphql.FieldsThunk(func() graphql.Fields {
 			return r.buildFieldsForTable(table)
 		}),
+		Interfaces: interfaces,
 	})
 
 	// Cache immediately before building fields (important for circular refs)
@@ -336,6 +405,14 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 		fields[introspection.GraphQLFieldName(col)] = &graphql.Field{
 			Type:        fieldType,
 			Description: col.Comment,
+		}
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	if len(pkCols) > 0 {
+		fields["id"] = &graphql.Field{
+			Type:    graphql.NewNonNull(graphql.ID),
+			Resolve: r.makeNodeIDResolver(table, pkCols),
 		}
 	}
 
@@ -696,6 +773,155 @@ func (r *Resolver) makeSingleRowResolver(table introspection.Table) graphql.Fiel
 	}
 }
 
+func (r *Resolver) makeNodeIDResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type")
+		}
+		values := make([]interface{}, len(pkCols))
+		for i, col := range pkCols {
+			fieldName := introspection.GraphQLFieldName(col)
+			value, ok := source[fieldName]
+			if !ok {
+				return nil, fmt.Errorf("missing primary key field %s", fieldName)
+			}
+			values[i] = value
+		}
+		encoded := nodeid.Encode(introspection.GraphQLTypeName(table), values...)
+		if encoded == "" {
+			return nil, fmt.Errorf("failed to encode node id")
+		}
+		return encoded, nil
+	}
+}
+
+func (r *Resolver) makePrimaryKeyResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		rawID, ok := p.Args["id"]
+		if !ok || rawID == nil {
+			return nil, fmt.Errorf("missing id argument")
+		}
+		id, ok := rawID.(string)
+		if !ok {
+			id = fmt.Sprint(rawID)
+		}
+
+		pkValues, err := r.pkValuesFromNodeID(table, pkCols, id)
+		if err != nil {
+			return nil, err
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+		selected := planner.SelectedColumns(table, field, p.Info.Fragments)
+
+		var query planner.SQLQuery
+		if len(pkCols) == 1 {
+			pk := &pkCols[0]
+			query, err = planner.PlanTableByPK(table, selected, pk, pkValues[pk.Name])
+		} else {
+			query, err = planner.PlanTableByPKColumns(table, selected, pkCols, pkValues)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, query.SQL, query.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() {
+			_ = rows.Close()
+		}()
+
+		results, err := scanRows(rows, selected)
+		if err != nil {
+			return nil, err
+		}
+		if len(results) == 0 {
+			return nil, nil
+		}
+		return results[0], nil
+	}
+}
+
+func (r *Resolver) makeNodeResolver() graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		rawID, ok := p.Args["id"]
+		if !ok || rawID == nil {
+			return nil, fmt.Errorf("missing id argument")
+		}
+		id, ok := rawID.(string)
+		if !ok {
+			id = fmt.Sprint(rawID)
+		}
+
+		typeName, rawValues, err := nodeid.Decode(id)
+		if err != nil {
+			return nil, err
+		}
+
+		table, err := r.findTableByTypeName(typeName)
+		if err != nil {
+			return nil, err
+		}
+		pkCols := introspection.PrimaryKeyColumns(table)
+		if len(pkCols) == 0 {
+			return nil, fmt.Errorf("table %s has no primary key", table.Name)
+		}
+		if len(rawValues) != len(pkCols) {
+			return nil, fmt.Errorf("invalid id for %s", typeName)
+		}
+
+		pkValues := make(map[string]interface{}, len(pkCols))
+		for i, col := range pkCols {
+			parsed, err := nodeid.ParsePKValue(col, rawValues[i])
+			if err != nil {
+				return nil, err
+			}
+			pkValues[col.Name] = parsed
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+		selected := planner.SelectedColumns(table, field, p.Info.Fragments)
+
+		var query planner.SQLQuery
+		if len(pkCols) == 1 {
+			pk := &pkCols[0]
+			query, err = planner.PlanTableByPK(table, selected, pk, pkValues[pk.Name])
+		} else {
+			query, err = planner.PlanTableByPKColumns(table, selected, pkCols, pkValues)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, query.SQL, query.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() {
+			_ = rows.Close()
+		}()
+
+		results, err := scanRows(rows, selected)
+		if err != nil {
+			return nil, err
+		}
+		if len(results) == 0 {
+			return nil, nil
+		}
+		results[0]["__typename"] = typeName
+		return results[0], nil
+	}
+}
+
 func (r *Resolver) planFromParams(p graphql.ResolveParams) (*planner.Plan, error) {
 	field := firstFieldAST(p.Info.FieldASTs)
 	if field == nil {
@@ -706,6 +932,79 @@ func (r *Resolver) planFromParams(p graphql.ResolveParams) (*planner.Plan, error
 		return planner.PlanQuery(r.dbSchema, field, p.Args, planner.WithFragments(p.Info.Fragments), planner.WithLimits(*r.limits), planner.WithDefaultListLimit(r.defaultLimit))
 	}
 	return planner.PlanQuery(r.dbSchema, field, p.Args, planner.WithFragments(p.Info.Fragments), planner.WithDefaultListLimit(r.defaultLimit))
+}
+
+func (r *Resolver) pkValuesFromNodeID(table introspection.Table, pkCols []introspection.Column, id string) (map[string]interface{}, error) {
+	typeName, values, err := nodeid.Decode(id)
+	if err != nil {
+		return nil, err
+	}
+	expectedType := introspection.GraphQLTypeName(table)
+	if typeName != expectedType {
+		return nil, fmt.Errorf("invalid id for %s", expectedType)
+	}
+	if len(values) != len(pkCols) {
+		return nil, fmt.Errorf("invalid id for %s", expectedType)
+	}
+	pkValues := make(map[string]interface{}, len(pkCols))
+	for i, col := range pkCols {
+		parsed, err := nodeid.ParsePKValue(col, values[i])
+		if err != nil {
+			return nil, err
+		}
+		pkValues[col.Name] = parsed
+	}
+	return pkValues, nil
+}
+
+func (r *Resolver) findTableByTypeName(typeName string) (introspection.Table, error) {
+	if r.dbSchema == nil {
+		return introspection.Table{}, fmt.Errorf("schema not available")
+	}
+	for _, table := range r.dbSchema.Tables {
+		if introspection.GraphQLTypeName(table) == typeName {
+			return table, nil
+		}
+	}
+	return introspection.Table{}, fmt.Errorf("unknown type %s", typeName)
+}
+
+func (r *Resolver) hasNodeTypes() bool {
+	if r.dbSchema == nil {
+		return false
+	}
+	for _, table := range r.dbSchema.Tables {
+		if len(introspection.PrimaryKeyColumns(table)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Resolver) schemaTypes() []graphql.Type {
+	r.mu.RLock()
+	if len(r.typeCache) == 0 {
+		r.mu.RUnlock()
+		return nil
+	}
+	keys := make([]string, 0, len(r.typeCache))
+	for key := range r.typeCache {
+		keys = append(keys, key)
+	}
+	r.mu.RUnlock()
+
+	sort.Strings(keys)
+
+	types := make([]graphql.Type, 0, len(keys))
+	r.mu.RLock()
+	for _, key := range keys {
+		if objType, ok := r.typeCache[key]; ok {
+			types = append(types, objType)
+		}
+	}
+	r.mu.RUnlock()
+
+	return types
 }
 
 func seedBatchRows(p graphql.ResolveParams, rows []map[string]interface{}) {
@@ -1068,6 +1367,45 @@ func (r *Resolver) dateScalar() *graphql.Scalar {
 		r.dateType = scalar
 	}
 	cached = r.dateType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) nodeInterfaceType() *graphql.Interface {
+	r.mu.RLock()
+	cached := r.nodeInterface
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	nodeInterface := graphql.NewInterface(graphql.InterfaceConfig{
+		Name: "Node",
+		Fields: graphql.Fields{
+			"id": &graphql.Field{Type: graphql.NewNonNull(graphql.ID)},
+		},
+		ResolveType: func(p graphql.ResolveTypeParams) *graphql.Object {
+			source, ok := p.Value.(map[string]interface{})
+			if !ok {
+				return nil
+			}
+			typeName, ok := source["__typename"].(string)
+			if !ok || typeName == "" {
+				return nil
+			}
+			r.mu.RLock()
+			objType := r.typeCache[typeName]
+			r.mu.RUnlock()
+			return objType
+		},
+	})
+
+	r.mu.Lock()
+	if r.nodeInterface == nil {
+		r.nodeInterface = nodeInterface
+	}
+	cached = r.nodeInterface
 	r.mu.Unlock()
 
 	return cached

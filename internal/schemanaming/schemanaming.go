@@ -3,6 +3,7 @@ package schemanaming
 
 import (
 	"fmt"
+	"strings"
 
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
@@ -26,7 +27,8 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 
 		typeName := namer.RegisterType(table.Name)
 		table.GraphQLTypeName = typeName
-		table.GraphQLQueryName = namer.RegisterQueryField(table.Name)
+		pluralTableName := namer.Pluralize(table.Name)
+		table.GraphQLQueryName = namer.RegisterQueryField(pluralTableName)
 		singularTableName := singularNamer.Singularize(table.Name)
 		table.GraphQLSingleQueryName = singularNamer.RegisterQueryField(singularTableName)
 		table.GraphQLSingleTypeName = singularNamer.RegisterType(singularTableName)
@@ -34,6 +36,9 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 		for ci := range table.Columns {
 			col := &table.Columns[ci]
 			col.GraphQLFieldName = namer.RegisterColumnField(typeName, col.Name)
+			if col.IsPrimaryKey && strings.EqualFold(col.Name, "id") {
+				col.GraphQLFieldName = "databaseId"
+			}
 		}
 
 		for ri := range table.Relationships {

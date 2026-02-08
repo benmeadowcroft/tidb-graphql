@@ -106,8 +106,8 @@ func TestPlanQuery_ListFieldProjectionIncludesRelationshipKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, plan)
 	assertSQLMatches(t, plan.Root.SQL,
-		"SELECT `account_id` FROM `users` LIMIT ? OFFSET ?",
-		"SELECT `account_id` FROM `users` LIMIT 100 OFFSET 0",
+		"SELECT `id`, `account_id` FROM `users` LIMIT ? OFFSET ?",
+		"SELECT `id`, `account_id` FROM `users` LIMIT 100 OFFSET 0",
 	)
 	assertLimitOffsetArgs(t, plan.Root.SQL, plan.Root.Args, 100, 0)
 }

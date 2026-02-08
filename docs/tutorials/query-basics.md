@@ -103,7 +103,7 @@ Every table with a primary key gets a singular lookup field using the table's si
 
 ```graphql
 query test {
-  user(id:1){
+  user(id:"WyJVc2VyIiwgMV0="){
     fullName
     email
     status
@@ -113,7 +113,17 @@ query test {
 
 This compiles to a direct indexed lookup and returns a single object (or null if not found).
 
-For tables with composite primary keys, pass all key columns.
+The `id` is a global Node ID (base64-encoded). If you need raw primary key lookups, use the unique key style field:
+
+```graphql
+query test {
+  user_by_databaseId(databaseId: 1) {
+    fullName
+    email
+    status
+  }
+}
+```
 
 ## 7) Use unique key lookups
 

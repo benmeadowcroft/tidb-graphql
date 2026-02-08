@@ -16,7 +16,8 @@ This section describes how the GraphQL schema is derived from the TiDB schema.
 For each table `users`:
 
 - List query: `users(limit, offset, where, orderBy)` returns `[User!]!`.
-- Primary key lookup: `user(id: ID!)` returns `User`.
+- Primary key lookup: `user(id: ID!)` returns `User` (global Node ID).
+- Primary key raw lookup: `user_by_databaseId(databaseId: Int!)` returns `User` (name depends on PK column).
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
 - Aggregate query: `users_aggregate(...)` returns `UsersAggregate`.
 
@@ -35,9 +36,20 @@ For each table `users`:
 
 Notes:
 - Mutations are not generated for views.
-- Update/delete require primary key arguments (composite keys are multiple args).
+- Update/delete require the global Node `id: ID!`.
 - Create/update return the row directly using the selection set on the table type.
-- Delete returns the primary key fields in `DeleteXPayload`.
+- Delete returns the primary key fields and `id` in `DeleteXPayload`.
+
+## Node interface and global IDs
+
+Tables with primary keys implement the `Node` interface and expose an opaque `id: ID!` field.
+
+The schema includes a `node(id: ID!): Node` query that resolves any object by its global ID.
+
+Primary key columns named `id` are renamed to `databaseId` in the GraphQL schema to avoid
+conflict with the Node `id` field.
+
+Global IDs are base64-encoded JSON arrays of the form `["TypeName", pk1, pk2, ...]`.
 
 ## Relationships
 

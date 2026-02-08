@@ -1,0 +1,81 @@
+package nodeid
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"tidb-graphql/internal/introspection"
+)
+
+func TestEncodeDecodeRoundTrip(t *testing.T) {
+	encoded := Encode("User", int64(42))
+	typeName, values, err := Decode(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, "User", typeName)
+	require.Len(t, values, 1)
+	assert.Equal(t, 42.0, values[0])
+}
+
+func TestEncodeDecodeComposite(t *testing.T) {
+	encoded := Encode("OrderItem", "A-1", int64(7))
+	typeName, values, err := Decode(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, "OrderItem", typeName)
+	require.Len(t, values, 2)
+	assert.Equal(t, "A-1", values[0])
+	assert.Equal(t, 7.0, values[1])
+}
+
+func TestDecodeErrors(t *testing.T) {
+	_, _, err := Decode("not-base64")
+	require.Error(t, err)
+
+	_, _, err = Decode(Encode(""))
+	require.Error(t, err)
+
+	_, _, err = Decode(Encode("User"))
+	require.Error(t, err)
+}
+
+func TestParsePKValue_Int(t *testing.T) {
+	col := introspection.Column{Name: "id", DataType: "int"}
+	value, err := ParsePKValue(col, 12.0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 12, value)
+
+	_, err = ParsePKValue(col, 12.5)
+	require.Error(t, err)
+}
+
+func TestParsePKValue_String(t *testing.T) {
+	col := introspection.Column{Name: "code", DataType: "varchar(10)"}
+	value, err := ParsePKValue(col, "abc")
+	require.NoError(t, err)
+	assert.Equal(t, "abc", value)
+
+	_, err = ParsePKValue(col, 12.0)
+	require.Error(t, err)
+}
+
+func TestParsePKValue_Date(t *testing.T) {
+	col := introspection.Column{Name: "day", DataType: "date"}
+	value, err := ParsePKValue(col, "2024-01-15")
+	require.NoError(t, err)
+	assert.Equal(t, time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC), value)
+
+	value, err = ParsePKValue(col, "2024-01-15T10:30:00Z")
+	require.NoError(t, err)
+	assert.Equal(t, time.Date(2024, 1, 15, 0, 0, 0, 0, time.UTC), value)
+}
+
+func TestParsePKValue_DateTime(t *testing.T) {
+	col := introspection.Column{Name: "ts", DataType: "datetime"}
+	value, err := ParsePKValue(col, "2024-01-15T10:30:00Z")
+	require.NoError(t, err)
+	assert.Equal(t, time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC), value)
+
+	_, err = ParsePKValue(col, "2024-01-15")
+	require.Error(t, err)
+}

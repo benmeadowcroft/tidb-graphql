@@ -11,6 +11,7 @@ import (
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
+	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/planner"
 	"tidb-graphql/internal/schemafilter"
 
@@ -44,10 +45,11 @@ func TestListResolver(t *testing.T) {
 	users := introspection.Table{
 		Name: "users",
 		Columns: []introspection.Column{
-			{Name: "id", IsPrimaryKey: true},
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
 			{Name: "username"},
 		},
 	}
+	renamePrimaryKeyID(&users)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -74,9 +76,9 @@ func TestListResolver(t *testing.T) {
 	records, ok := result.([]map[string]interface{})
 	require.True(t, ok)
 	require.Len(t, records, 2)
-	assert.EqualValues(t, 1, records[0]["id"])
+	assert.EqualValues(t, 1, records[0]["databaseId"])
 	assert.Equal(t, "alice", records[0]["username"])
-	assert.EqualValues(t, 2, records[1]["id"])
+	assert.EqualValues(t, 2, records[1]["databaseId"])
 	assert.Equal(t, "bob", records[1]["username"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -89,10 +91,11 @@ func TestListResolver_Empty(t *testing.T) {
 	users := introspection.Table{
 		Name: "users",
 		Columns: []introspection.Column{
-			{Name: "id", IsPrimaryKey: true},
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
 			{Name: "username"},
 		},
 	}
+	renamePrimaryKeyID(&users)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -129,23 +132,26 @@ func TestPKResolver(t *testing.T) {
 	users := introspection.Table{
 		Name: "users",
 		Columns: []introspection.Column{
-			{Name: "id", IsPrimaryKey: true},
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
 			{Name: "username"},
 		},
 	}
+	renamePrimaryKeyID(&users)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	field := &ast.Field{Name: &ast.Name{Value: "user"}}
-	args := map[string]interface{}{"id": 1}
-	plan, err := planner.PlanQuery(dbSchema, field, args)
+	pkCols := introspection.PrimaryKeyColumns(users)
+	nodeID := nodeid.Encode(introspection.GraphQLTypeName(users), int64(1))
+	args := map[string]interface{}{"id": nodeID}
+	query, err := planner.PlanTableByPK(users, users.Columns, &pkCols[0], int64(1))
 	require.NoError(t, err)
 
 	rows := sqlmock.NewRows([]string{"id", "username"}).
 		AddRow(1, []byte("alice"))
-	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+	expectQuery(t, mock, query.SQL, query.Args, rows)
 
-	resolverFn := r.makeSingleRowResolver(users)
+	resolverFn := r.makePrimaryKeyResolver(users, pkCols)
 	result, err := resolverFn(graphql.ResolveParams{
 		Args:    args,
 		Context: context.Background(),
@@ -157,8 +163,78 @@ func TestPKResolver(t *testing.T) {
 
 	record, ok := result.(map[string]interface{})
 	require.True(t, ok)
-	assert.EqualValues(t, 1, record["id"])
+	assert.EqualValues(t, 1, record["databaseId"])
 	assert.Equal(t, "alice", record["username"])
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestNodeIDField(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	resolverFn := r.makeNodeIDResolver(table, pkCols)
+	result, err := resolverFn(graphql.ResolveParams{
+		Source: map[string]interface{}{
+			"databaseId": int64(5),
+		},
+	})
+	require.NoError(t, err)
+
+	expected := nodeid.Encode(introspection.GraphQLTypeName(table), int64(5))
+	assert.Equal(t, expected, result)
+}
+
+func TestNodeResolver(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	nodeID := nodeid.Encode(introspection.GraphQLTypeName(users), int64(1))
+	query, err := planner.PlanTableByPK(users, users.Columns, &users.Columns[0], int64(1))
+	require.NoError(t, err)
+
+	rows := sqlmock.NewRows([]string{"id", "username"}).
+		AddRow(1, []byte("alice"))
+	expectQuery(t, mock, query.SQL, query.Args, rows)
+
+	field := &ast.Field{Name: &ast.Name{Value: "node"}}
+	resolverFn := r.makeNodeResolver()
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"id": nodeID,
+		},
+		Context: context.Background(),
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	record, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, 1, record["databaseId"])
+	assert.Equal(t, "alice", record["username"])
+	assert.Equal(t, introspection.GraphQLTypeName(users), record["__typename"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -172,13 +248,14 @@ func TestSchemaDescriptionsFromComments(t *testing.T) {
 			{Name: "email", Comment: "User email address."},
 		},
 	}
+	renamePrimaryKeyID(&table)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
 	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	objType := r.buildGraphQLType(table)
 	assert.Equal(t, "Registered users of the store.", objType.Description())
 	objFields := objType.Fields()
-	assert.Equal(t, "Primary key for users.", objFields["id"].Description)
+	assert.Equal(t, "Primary key for users.", objFields["databaseId"].Description)
 	assert.Equal(t, "User email address.", objFields["email"].Description)
 
 	createInput := r.createInputType(table, table.Columns)
@@ -188,6 +265,26 @@ func TestSchemaDescriptionsFromComments(t *testing.T) {
 	whereInput := r.whereInput(table)
 	whereFields := whereInput.Fields()
 	assert.Equal(t, "User email address.", whereFields["email"].Description())
+}
+
+func TestDeletePayloadIncludesID(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	payload := r.deletePayloadType(table, pkCols)
+	fields := payload.Fields()
+	_, ok := fields["id"]
+	require.True(t, ok)
+	_, ok = fields["databaseId"]
+	require.True(t, ok)
 }
 
 func TestMutationEnumRoundTrip_Create(t *testing.T) {
@@ -201,6 +298,7 @@ func TestMutationEnumRoundTrip_Create(t *testing.T) {
 			{Name: "status", DataType: "enum", EnumValues: []string{"ready", "pending"}, IsNullable: false},
 		},
 	}
+	renamePrimaryKeyID(&table)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -249,7 +347,7 @@ func TestMutationEnumRoundTrip_Create(t *testing.T) {
 
 	record, ok := result.(map[string]interface{})
 	require.True(t, ok)
-	assert.EqualValues(t, 1, record["id"])
+	assert.EqualValues(t, 1, record["databaseId"])
 	assert.Equal(t, "ready", record["status"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -387,6 +485,8 @@ func TestManyToOneResolver(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -422,7 +522,7 @@ func TestManyToOneResolver(t *testing.T) {
 
 	record, ok := result.(map[string]interface{})
 	require.True(t, ok)
-	assert.EqualValues(t, 7, record["id"])
+	assert.EqualValues(t, 7, record["databaseId"])
 	assert.Equal(t, "alice", record["username"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -447,6 +547,8 @@ func TestOneToManyResolver(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -474,7 +576,7 @@ func TestOneToManyResolver(t *testing.T) {
 
 	resolverFn := r.makeOneToManyResolver(users, rel)
 	result, err := resolverFn(graphql.ResolveParams{
-		Source:  map[string]interface{}{"id": 3},
+		Source:  map[string]interface{}{"databaseId": 3},
 		Args:    args,
 		Context: context.Background(),
 		Info: graphql.ResolveInfo{
@@ -486,7 +588,7 @@ func TestOneToManyResolver(t *testing.T) {
 	records, ok := result.([]map[string]interface{})
 	require.True(t, ok)
 	require.Len(t, records, 2)
-	assert.EqualValues(t, 101, records[0]["id"])
+	assert.EqualValues(t, 101, records[0]["databaseId"])
 	assert.EqualValues(t, 3, records[0]["userId"])
 	assert.Equal(t, "first", records[0]["title"])
 
@@ -512,6 +614,8 @@ func TestOneToManyResolver_Empty(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -537,7 +641,7 @@ func TestOneToManyResolver_Empty(t *testing.T) {
 
 	resolverFn := r.makeOneToManyResolver(users, rel)
 	result, err := resolverFn(graphql.ResolveParams{
-		Source:  map[string]interface{}{"id": 1},
+		Source:  map[string]interface{}{"databaseId": 1},
 		Args:    args,
 		Context: context.Background(),
 		Info: graphql.ResolveInfo{
@@ -645,6 +749,8 @@ func TestOneToManyResolverBatch(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -703,7 +809,7 @@ func TestOneToManyResolverBatch(t *testing.T) {
 	firstRows, ok := first.([]map[string]interface{})
 	require.True(t, ok)
 	require.Len(t, firstRows, 1)
-	assert.EqualValues(t, 101, firstRows[0]["id"])
+	assert.EqualValues(t, 101, firstRows[0]["databaseId"])
 
 	second, err := childResolver(graphql.ResolveParams{
 		Source:  parentRows[1],
@@ -717,7 +823,7 @@ func TestOneToManyResolverBatch(t *testing.T) {
 	secondRows, ok := second.([]map[string]interface{})
 	require.True(t, ok)
 	require.Len(t, secondRows, 1)
-	assert.EqualValues(t, 102, secondRows[0]["id"])
+	assert.EqualValues(t, 102, secondRows[0]["databaseId"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -741,6 +847,8 @@ func TestManyToOneResolverBatch(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -796,7 +904,7 @@ func TestManyToOneResolverBatch(t *testing.T) {
 	require.NoError(t, err)
 	firstRow, ok := first.(map[string]interface{})
 	require.True(t, ok)
-	assert.EqualValues(t, 1, firstRow["id"])
+	assert.EqualValues(t, 1, firstRow["databaseId"])
 
 	second, err := childResolver(graphql.ResolveParams{
 		Source:  parentRows[1],
@@ -808,7 +916,7 @@ func TestManyToOneResolverBatch(t *testing.T) {
 	require.NoError(t, err)
 	secondRow, ok := second.(map[string]interface{})
 	require.True(t, ok)
-	assert.EqualValues(t, 2, secondRow["id"])
+	assert.EqualValues(t, 2, secondRow["databaseId"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -917,6 +1025,8 @@ func TestTryBatchOneToMany_CachesResults(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -983,7 +1093,7 @@ func TestTryBatchOneToMany_CachesResults(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, first, 1)
-	assert.EqualValues(t, 101, first[0]["id"])
+	assert.EqualValues(t, 101, first[0]["databaseId"])
 
 	// Second child resolution should hit the cached batch results.
 	second, ok, err := r.tryBatchOneToMany(graphql.ResolveParams{
@@ -997,7 +1107,7 @@ func TestTryBatchOneToMany_CachesResults(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, second, 1)
-	assert.EqualValues(t, 102, second[0]["id"])
+	assert.EqualValues(t, 102, second[0]["databaseId"])
 
 	// Validate cache counters to ensure N+1 avoidance behavior.
 	state, ok := GetBatchState(ctx)
@@ -1026,6 +1136,8 @@ func TestTryBatchOneToMany_CacheKeyIsolation(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -1035,8 +1147,8 @@ func TestTryBatchOneToMany_CacheKeyIsolation(t *testing.T) {
 
 	parentKey := "users|list|"
 	parentRows := []map[string]interface{}{
-		{"id": 1, batchParentKeyField: parentKey},
-		{"id": 2, batchParentKeyField: parentKey},
+		{"databaseId": 1, batchParentKeyField: parentKey},
+		{"databaseId": 2, batchParentKeyField: parentKey},
 	}
 	state.setParentRows(parentKey, parentRows)
 
@@ -1083,7 +1195,7 @@ func TestTryBatchOneToMany_CacheKeyIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, first, 1)
-	assert.EqualValues(t, 101, first[0]["id"])
+	assert.EqualValues(t, 101, first[0]["databaseId"])
 
 	second, ok, err := r.tryBatchOneToMany(graphql.ResolveParams{
 		Source:  parentRows[0],
@@ -1096,7 +1208,7 @@ func TestTryBatchOneToMany_CacheKeyIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, second, 1)
-	assert.EqualValues(t, 201, second[0]["id"])
+	assert.EqualValues(t, 201, second[0]["databaseId"])
 
 	assert.EqualValues(t, 2, state.GetCacheMisses())
 	assert.EqualValues(t, 0, state.GetCacheHits())
@@ -1149,6 +1261,8 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 			{Name: "title"},
 		},
 	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
 	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
@@ -1211,7 +1325,7 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 	}, posts, rel, 1)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.EqualValues(t, 1, first["id"])
+	assert.EqualValues(t, 1, first["databaseId"])
 
 	// Second child resolution should hit the cached batch results.
 	second, ok, err := r.tryBatchManyToOne(graphql.ResolveParams{
@@ -1223,7 +1337,7 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 	}, posts, rel, 2)
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.EqualValues(t, 2, second["id"])
+	assert.EqualValues(t, 2, second["databaseId"])
 
 	// Validate cache counters to ensure N+1 avoidance behavior.
 	state, ok := GetBatchState(ctx)

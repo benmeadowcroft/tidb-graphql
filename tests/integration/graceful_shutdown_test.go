@@ -4,9 +4,12 @@
 package integration
 
 import (
+	"fmt"
 	"syscall"
 	"testing"
 	"time"
+
+	"tidb-graphql/internal/testutil/tidbcloud"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,13 +18,20 @@ import (
 func TestGracefulShutdown(t *testing.T) {
 	requireIntegrationEnv(t)
 
+	testDB := tidbcloud.NewTestDB(t)
+
 	// This test verifies that the server shuts down gracefully by testing behavior:
 	// 1. Server starts successfully and becomes healthy
 	// 2. Server responds to SIGTERM signal
 	// 3. Server exits cleanly within the timeout period (exit code 0)
 	// No log parsing - we test actual behavior, not implementation details
 
-	cmd, _ := startTestServer(t, "../../bin/tidb-graphql-test", 18080)
+	cmd, _ := startTestServer(
+		t,
+		"../../bin/tidb-graphql-test",
+		18080,
+		fmt.Sprintf("TIGQL_DATABASE_DATABASE=%s", testDB.DatabaseName),
+	)
 
 	// Send SIGTERM to trigger graceful shutdown
 	err := cmd.Process.Signal(syscall.SIGTERM)

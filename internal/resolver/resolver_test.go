@@ -106,6 +106,33 @@ func TestPKResolver(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSchemaDescriptionsFromComments(t *testing.T) {
+	table := introspection.Table{
+		Name:    "users",
+		Comment: "Registered users of the store.",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true, IsAutoIncrement: true, Comment: "Primary key for users."},
+			{Name: "email", Comment: "User email address."},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	assert.Equal(t, "Registered users of the store.", objType.Description())
+	objFields := objType.Fields()
+	assert.Equal(t, "Primary key for users.", objFields["id"].Description)
+	assert.Equal(t, "User email address.", objFields["email"].Description)
+
+	createInput := r.createInputType(table, table.Columns)
+	createFields := createInput.Fields()
+	assert.Equal(t, "User email address.", createFields["email"].Description())
+
+	whereInput := r.whereInput(table)
+	whereFields := whereInput.Fields()
+	assert.Equal(t, "User email address.", whereFields["email"].Description())
+}
+
 func TestManyToOneResolver(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()

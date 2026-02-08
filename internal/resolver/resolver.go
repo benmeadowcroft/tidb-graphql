@@ -301,7 +301,8 @@ func (r *Resolver) buildGraphQLType(table introspection.Table) *graphql.Object {
 	// Create type with FieldsThunk for lazy field initialization
 	// This prevents circular reference issues
 	objType := graphql.NewObject(graphql.ObjectConfig{
-		Name: typeName,
+		Name:        typeName,
+		Description: table.Comment,
 		Fields: graphql.FieldsThunk(func() graphql.Fields {
 			return r.buildFieldsForTable(table)
 		}),
@@ -331,7 +332,8 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 		}
 
 		fields[introspection.GraphQLFieldName(col)] = &graphql.Field{
-			Type: fieldType,
+			Type:        fieldType,
+			Description: col.Comment,
 		}
 	}
 
@@ -1050,7 +1052,8 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 		filterType := r.getFilterInputType(table, col)
 		if filterType != nil {
 			fields[fieldName] = &graphql.InputObjectFieldConfig{
-				Type: filterType,
+				Type:        filterType,
+				Description: col.Comment,
 			}
 		}
 	}

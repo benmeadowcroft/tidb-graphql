@@ -30,6 +30,7 @@ type Column struct {
 	HasDefault      bool
 	ColumnDefault   string
 	EnumValues      []string
+	Comment         string
 	// GraphQLFieldName is the resolved GraphQL field name for this column.
 	GraphQLFieldName string
 }
@@ -96,8 +97,9 @@ type JunctionMap map[string]JunctionConfig
 
 // Table represents a database table
 type Table struct {
-	Name   string
-	IsView bool
+	Name    string
+	IsView  bool
+	Comment string
 	// GraphQLTypeName is the resolved GraphQL type name for this table.
 	GraphQLTypeName string
 	// GraphQLQueryName is the resolved GraphQL root field name for this table.
@@ -190,6 +192,7 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 		schema.Tables = append(schema.Tables, Table{
 			Name:        tableInfo.Name,
 			IsView:      tableInfo.IsView,
+			Comment:     tableInfo.Comment,
 			Columns:     columns,
 			ForeignKeys: foreignKeys,
 			Indexes:     indexes,
@@ -236,8 +239,9 @@ func RebuildRelationshipsWithJunctions(schema *Schema, namer *naming.Namer, junc
 }
 
 type tableInfo struct {
-	Name   string
-	IsView bool
+	Name    string
+	IsView  bool
+	Comment string
 }
 
 func getTables(ctx context.Context, db Queryer, databaseName string) ([]tableInfo, error) {
@@ -247,7 +251,7 @@ func getTables(ctx context.Context, db Queryer, databaseName string) ([]tableInf
 	defer span.End()
 
 	query := `
-		SELECT TABLE_NAME, TABLE_TYPE
+		SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT
 		FROM INFORMATION_SCHEMA.TABLES
 		WHERE TABLE_SCHEMA = ?
 		AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
@@ -267,13 +271,19 @@ func getTables(ctx context.Context, db Queryer, databaseName string) ([]tableInf
 	for rows.Next() {
 		var tableName string
 		var tableType string
-		if err := rows.Scan(&tableName, &tableType); err != nil {
+		var tableComment sql.NullString
+		if err := rows.Scan(&tableName, &tableType, &tableComment); err != nil {
 			recordSpanError(span, err)
 			return nil, err
 		}
+		comment := ""
+		if tableComment.Valid {
+			comment = strings.TrimSpace(tableComment.String)
+		}
 		tables = append(tables, tableInfo{
-			Name:   tableName,
-			IsView: strings.EqualFold(tableType, "VIEW"),
+			Name:    tableName,
+			IsView:  strings.EqualFold(tableType, "VIEW"),
+			Comment: comment,
 		})
 	}
 
@@ -296,6 +306,7 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 			COLUMN_NAME,
 			DATA_TYPE,
 			COLUMN_TYPE,
+			COLUMN_COMMENT,
 			IS_NULLABLE,
 			COLUMN_DEFAULT,
 			EXTRA
@@ -320,9 +331,13 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		var columnDefault sql.NullString
 		var extra string
 		var columnType string
-		if err := rows.Scan(&col.Name, &col.DataType, &columnType, &isNullable, &columnDefault, &extra); err != nil {
+		var columnComment sql.NullString
+		if err := rows.Scan(&col.Name, &col.DataType, &columnType, &columnComment, &isNullable, &columnDefault, &extra); err != nil {
 			recordSpanError(span, err)
 			return nil, err
+		}
+		if columnComment.Valid {
+			col.Comment = strings.TrimSpace(columnComment.String)
 		}
 		col.IsNullable = strings.ToUpper(isNullable) == "YES"
 		if columnDefault.Valid {

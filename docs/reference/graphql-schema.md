@@ -63,6 +63,10 @@ SQL types are mapped to GraphQL scalars:
 - `enum` -> GraphQL enum named `<SingularTable><Column>` (e.g., `users.status` -> `UserStatus`)
 - `char`, `text`, `blob`, `binary`, `date`, `time`, `set` -> `String`
 
+## Descriptions
+
+Table and column comments are emitted as GraphQL descriptions on the corresponding types and fields when present.
+
 ## Filter inputs
 
 Each table gets a `TableWhere` input type (see [Filters](./filters.md)). JSON columns are excluded from filter inputs.

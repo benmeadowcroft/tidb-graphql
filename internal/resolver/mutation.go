@@ -120,7 +120,8 @@ func (r *Resolver) createInputType(table introspection.Table, columns []introspe
 			fieldType = graphql.NewNonNull(fieldType)
 		}
 		fields[introspection.GraphQLFieldName(col)] = &graphql.InputObjectFieldConfig{
-			Type: fieldType,
+			Type:        fieldType,
+			Description: col.Comment,
 		}
 	}
 
@@ -153,7 +154,8 @@ func (r *Resolver) updateSetInputType(table introspection.Table, columns []intro
 	for _, col := range columns {
 		fieldType := r.mapColumnTypeToGraphQLInput(table, &col)
 		fields[introspection.GraphQLFieldName(col)] = &graphql.InputObjectFieldConfig{
-			Type: fieldType,
+			Type:        fieldType,
+			Description: col.Comment,
 		}
 	}
 

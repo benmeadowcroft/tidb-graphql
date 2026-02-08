@@ -12,77 +12,77 @@ DROP TABLE IF EXISTS categories;
 DROP TABLE IF EXISTS users;
 
 CREATE TABLE users (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  email VARCHAR(255) NOT NULL,
-  email_domain VARCHAR(255) AS (SUBSTRING_INDEX(email, '@', -1)) VIRTUAL,
-  full_name VARCHAR(255) NOT NULL,
-  status ENUM('active','inactive','pending') NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT 'Primary key for users.',
+  email VARCHAR(255) NOT NULL COMMENT 'User email address.',
+  email_domain VARCHAR(255) AS (SUBSTRING_INDEX(email, '@', -1)) VIRTUAL COMMENT 'Derived email domain.',
+  full_name VARCHAR(255) NOT NULL COMMENT 'Full name for display.',
+  status ENUM('active','inactive','pending') NOT NULL COMMENT 'Account status.',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC).',
+  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Row update time (UTC).',
   UNIQUE KEY uq_users_email (email),
   KEY idx_users_status (status),
   KEY idx_users_created_at (created_at)
-);
+) COMMENT='Registered users of the store.';
 
 CREATE TABLE categories (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  name VARCHAR(64) NOT NULL,
-  description VARCHAR(255) NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT 'Primary key for categories.',
+  name VARCHAR(64) NOT NULL COMMENT 'Category name.',
+  description VARCHAR(255) NOT NULL COMMENT 'Short category description.',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC).',
+  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Row update time (UTC).',
   UNIQUE KEY uq_categories_name (name),
   KEY idx_categories_created_at (created_at)
-);
+) COMMENT='Product categories available in the store.';
 
 CREATE TABLE products (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  sku VARCHAR(64) NOT NULL,
-  name VARCHAR(255) NOT NULL,
-  price_cents INT NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT 'Primary key for products.',
+  sku VARCHAR(64) NOT NULL COMMENT 'Stock keeping unit.',
+  name VARCHAR(255) NOT NULL COMMENT 'Product name.',
+  price_cents INT NOT NULL COMMENT 'Price in cents.',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC).',
+  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Row update time (UTC).',
   UNIQUE KEY uq_products_sku (sku),
   KEY idx_products_price (price_cents)
-);
+) COMMENT='Products available for purchase.';
 
 CREATE TABLE product_categories (
-  product_id BIGINT NOT NULL,
-  category_id BIGINT NOT NULL,
+  product_id BIGINT NOT NULL COMMENT 'Product identifier.',
+  category_id BIGINT NOT NULL COMMENT 'Category identifier.',
   PRIMARY KEY (product_id, category_id),
   CONSTRAINT fk_product_categories_product
     FOREIGN KEY (product_id) REFERENCES products(id),
   CONSTRAINT fk_product_categories_category
     FOREIGN KEY (category_id) REFERENCES categories(id),
   KEY idx_product_categories_category (category_id)
-);
+) COMMENT='Many-to-many relationship between products and categories.';
 
 CREATE TABLE orders (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  user_id BIGINT NOT NULL,
-  status ENUM('paid','shipped','processing','canceled') NOT NULL,
-  total_cents INT NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT 'Primary key for orders.',
+  user_id BIGINT NOT NULL COMMENT 'Owning user identifier.',
+  status ENUM('paid','shipped','processing','canceled') NOT NULL COMMENT 'Order lifecycle status.',
+  total_cents INT NOT NULL COMMENT 'Order total in cents.',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC).',
+  last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Row update time (UTC).',
   CONSTRAINT fk_orders_user
     FOREIGN KEY (user_id) REFERENCES users(id),
   KEY idx_orders_user_id (user_id),
   KEY idx_orders_status (status),
   KEY idx_orders_created_at (created_at)
-);
+) COMMENT='Customer orders placed in the store.';
 
 CREATE TABLE order_items (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  order_id BIGINT NOT NULL,
-  product_id BIGINT NOT NULL,
-  quantity INT NOT NULL,
-  unit_price_cents INT NOT NULL,
+  id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT 'Primary key for order items.',
+  order_id BIGINT NOT NULL COMMENT 'Order identifier.',
+  product_id BIGINT NOT NULL COMMENT 'Product identifier.',
+  quantity INT NOT NULL COMMENT 'Quantity of the product.',
+  unit_price_cents INT NOT NULL COMMENT 'Unit price in cents at purchase time.',
   CONSTRAINT fk_order_items_order
     FOREIGN KEY (order_id) REFERENCES orders(id),
   CONSTRAINT fk_order_items_product
     FOREIGN KEY (product_id) REFERENCES products(id),
   KEY idx_items_order_id (order_id),
   KEY idx_items_product_id (product_id)
-);
+) COMMENT='Line items belonging to orders.';
 
 INSERT INTO users (email, full_name, status) VALUES
   ('ava.lee@example.com', 'Ava Lee', 'active'),

@@ -349,6 +349,9 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			}
 			relatedType := r.buildGraphQLType(relatedTable)
 
+			// Keep many-to-one fields nullable even when FK is NOT NULL.
+			// Row-level/table-level security can hide the related row; non-null would
+			// bubble errors and null out parent objects/lists.
 			fields[rel.GraphQLFieldName] = &graphql.Field{
 				Type:    relatedType,
 				Resolve: r.makeManyToOneResolver(table, rel),

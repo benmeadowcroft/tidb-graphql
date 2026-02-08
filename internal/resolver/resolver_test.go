@@ -20,6 +20,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func assertNonNullListOfNonNullObject(t *testing.T, typ graphql.Type) {
+	t.Helper()
+
+	outerNonNull, ok := typ.(*graphql.NonNull)
+	require.True(t, ok, "expected outer NonNull, got %T", typ)
+
+	list, ok := outerNonNull.OfType.(*graphql.List)
+	require.True(t, ok, "expected List, got %T", outerNonNull.OfType)
+
+	innerNonNull, ok := list.OfType.(*graphql.NonNull)
+	require.True(t, ok, "expected inner NonNull, got %T", list.OfType)
+
+	_, ok = innerNonNull.OfType.(*graphql.Object)
+	require.True(t, ok, "expected Object, got %T", innerNonNull.OfType)
+}
+
 func TestListResolver(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
@@ -61,6 +77,46 @@ func TestListResolver(t *testing.T) {
 	assert.Equal(t, "alice", records[0]["username"])
 	assert.EqualValues(t, 2, records[1]["id"])
 	assert.Equal(t, "bob", records[1]["username"])
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestListResolver_Empty(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	field := &ast.Field{Name: &ast.Name{Value: "users"}}
+	args := map[string]interface{}{"limit": 2, "offset": 0}
+	plan, err := planner.PlanQuery(dbSchema, field, args)
+	require.NoError(t, err)
+
+	rows := sqlmock.NewRows([]string{"id", "username"})
+	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+
+	resolverFn := r.makeListResolver(users)
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    args,
+		Context: context.Background(),
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	records, ok := result.([]map[string]interface{})
+	require.True(t, ok)
+	assert.NotNil(t, records)
+	assert.Len(t, records, 0)
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -256,6 +312,139 @@ func TestOneToManyResolver(t *testing.T) {
 	assert.Equal(t, "first", records[0]["title"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOneToManyResolver_Empty(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		LocalColumn:      "id",
+		RemoteTable:      "posts",
+		RemoteColumn:     "user_id",
+		GraphQLFieldName: "posts",
+	}
+	field := &ast.Field{Name: &ast.Name{Value: "posts"}}
+	args := map[string]interface{}{"limit": 10, "offset": 0}
+	plan, err := planner.PlanQuery(dbSchema, field, args, planner.WithRelationship(planner.RelationshipContext{
+		RelatedTable: posts,
+		RemoteColumn: "user_id",
+		Value:        1,
+		IsOneToMany:  true,
+	}))
+	require.NoError(t, err)
+
+	rows := sqlmock.NewRows([]string{"id", "user_id", "title"})
+	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+
+	resolverFn := r.makeOneToManyResolver(users, rel)
+	result, err := resolverFn(graphql.ResolveParams{
+		Source:  map[string]interface{}{"id": 1},
+		Args:    args,
+		Context: context.Background(),
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	records, ok := result.([]map[string]interface{})
+	require.True(t, ok)
+	assert.NotNil(t, records)
+	assert.Len(t, records, 0)
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestListFieldTypesNonNull(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsOneToMany:      true,
+				LocalColumn:      "id",
+				RemoteTable:      "posts",
+				RemoteColumn:     "user_id",
+				GraphQLFieldName: "posts",
+			},
+			{
+				IsManyToMany:     true,
+				LocalColumn:      "id",
+				RemoteTable:      "roles",
+				RemoteColumn:     "id",
+				JunctionTable:    "user_roles",
+				JunctionLocalFK:  "user_id",
+				JunctionRemoteFK: "role_id",
+				GraphQLFieldName: "roles",
+			},
+			{
+				IsEdgeList:       true,
+				LocalColumn:      "id",
+				JunctionTable:    "user_roles",
+				JunctionLocalFK:  "user_id",
+				GraphQLFieldName: "userRoles",
+			},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+		},
+	}
+	roles := introspection.Table{
+		Name: "roles",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	userRoles := introspection.Table{
+		Name: "user_roles",
+		Columns: []introspection.Column{
+			{Name: "user_id", IsPrimaryKey: true},
+			{Name: "role_id", IsPrimaryKey: true},
+			{Name: "assigned_at"},
+		},
+	}
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts, roles, userRoles}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	schema, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	rootListField := schema.QueryType().Fields()["users"]
+	require.NotNil(t, rootListField)
+	assertNonNullListOfNonNullObject(t, rootListField.Type)
+
+	userType := r.buildGraphQLType(users)
+	fields := userType.Fields()
+	assertNonNullListOfNonNullObject(t, fields["posts"].Type)
+	assertNonNullListOfNonNullObject(t, fields["roles"].Type)
+	assertNonNullListOfNonNullObject(t, fields["userRoles"].Type)
 }
 
 func TestOneToManyResolverBatch(t *testing.T) {

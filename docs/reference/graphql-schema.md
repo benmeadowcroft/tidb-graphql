@@ -15,7 +15,7 @@ This section describes how the GraphQL schema is derived from the TiDB schema.
 
 For each table `users`:
 
-- List query: `users(limit, offset, where, orderBy)` returns `[User]`.
+- List query: `users(limit, offset, where, orderBy)` returns `[User!]!`.
 - Primary key lookup: `user(id: ID!)` returns `User`.
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
 - Aggregate query: `users_aggregate(...)` returns `UsersAggregate`.
@@ -51,6 +51,7 @@ Foreign keys create relationship fields on both sides:
 Pluralization uses the [Inflection library](https://github.com/jinzhu/inflection) (with naming overrides).
 
 One-to-many fields accept the same `limit`, `offset`, and `orderBy` arguments as list queries.
+List fields never return `null` and never contain `null` items.
 
 ## Type mapping
 

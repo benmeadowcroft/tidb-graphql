@@ -187,7 +187,7 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 
 	// List query
 	fields[fieldName] = &graphql.Field{
-		Type: graphql.NewList(tableType),
+		Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(tableType))),
 		Args: graphql.FieldConfigArgument{
 			"limit": &graphql.ArgumentConfig{
 				Type:         r.nonNegativeIntScalar(),
@@ -364,7 +364,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			relatedType := r.buildGraphQLType(relatedTable)
 
 			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewList(graphql.NewNonNull(relatedType)),
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(relatedType))),
 				Args: graphql.FieldConfigArgument{
 					"limit": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
@@ -400,7 +400,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			relatedType := r.buildGraphQLType(relatedTable)
 
 			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewList(graphql.NewNonNull(relatedType)),
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(relatedType))),
 				Args: graphql.FieldConfigArgument{
 					"limit": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
@@ -427,7 +427,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			edgeType := r.buildGraphQLType(junctionTable)
 
 			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewList(graphql.NewNonNull(edgeType)),
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(edgeType))),
 				Args: graphql.FieldConfigArgument{
 					"limit": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
@@ -2205,7 +2205,7 @@ func normalizeQueryError(err error) error {
 }
 
 func scanRows(rows dbexec.Rows, columns []introspection.Column) ([]map[string]interface{}, error) {
-	var results []map[string]interface{}
+	results := make([]map[string]interface{}, 0)
 
 	for rows.Next() {
 		values := make([]interface{}, len(columns))
@@ -2232,7 +2232,7 @@ func scanRows(rows dbexec.Rows, columns []introspection.Column) ([]map[string]in
 }
 
 func scanRowsWithExtras(rows dbexec.Rows, columns []introspection.Column, extras []string) ([]map[string]interface{}, error) {
-	var results []map[string]interface{}
+	results := make([]map[string]interface{}, 0)
 
 	totalColumns := len(columns) + len(extras)
 	for rows.Next() {
@@ -2260,6 +2260,13 @@ func scanRowsWithExtras(rows dbexec.Rows, columns []introspection.Column, extras
 	}
 
 	return results, rows.Err()
+}
+
+func ensureNonNullRows(rows []map[string]interface{}) []map[string]interface{} {
+	if rows == nil {
+		return []map[string]interface{}{}
+	}
+	return rows
 }
 
 func graphQLFieldNameForColumn(table introspection.Table, columnName string) string {
@@ -2405,13 +2412,14 @@ func (r *Resolver) makeOneToManyResolver(table introspection.Table, rel introspe
 		pkValue := source[pkFieldName]
 
 		if pkValue == nil {
-			return []interface{}{}, nil
+			return []map[string]interface{}{}, nil
 		}
 
 		if results, ok, err := r.tryBatchOneToMany(p, table, rel, pkValue); ok || err != nil {
 			if err != nil {
 				return nil, err
 			}
+			results = ensureNonNullRows(results)
 			seedBatchRows(p, results)
 			return results, nil
 		}
@@ -2467,13 +2475,14 @@ func (r *Resolver) makeManyToManyResolver(table introspection.Table, rel introsp
 		pkValue := source[pkFieldName]
 
 		if pkValue == nil {
-			return []interface{}{}, nil
+			return []map[string]interface{}{}, nil
 		}
 
 		if results, ok, err := r.tryBatchManyToMany(p, table, rel, pkValue); ok || err != nil {
 			if err != nil {
 				return nil, err
 			}
+			results = ensureNonNullRows(results)
 			seedBatchRows(p, results)
 			return results, nil
 		}
@@ -2554,13 +2563,14 @@ func (r *Resolver) makeEdgeListResolver(table introspection.Table, rel introspec
 		pkValue := source[pkFieldName]
 
 		if pkValue == nil {
-			return []interface{}{}, nil
+			return []map[string]interface{}{}, nil
 		}
 
 		if results, ok, err := r.tryBatchEdgeList(p, table, rel, pkValue); ok || err != nil {
 			if err != nil {
 				return nil, err
 			}
+			results = ensureNonNullRows(results)
 			seedBatchRows(p, results)
 			return results, nil
 		}

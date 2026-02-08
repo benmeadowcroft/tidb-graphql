@@ -18,6 +18,10 @@ const (
 	TypeBoolean
 	// TypeJSON represents JSON data types.
 	TypeJSON
+	// TypeDate represents date-only data types.
+	TypeDate
+	// TypeDateTime represents date/time data types.
+	TypeDateTime
 )
 
 // MapToGraphQL converts a SQL data type string to its corresponding GraphQL type category.
@@ -52,7 +56,11 @@ func MapToGraphQL(sqlType string) GraphQLType {
 		"ENUM", "SET":
 		return TypeString
 	// Date and Time Data Types
-	case "DATE", "DATETIME", "TIMESTAMP", "TIME", "YEAR":
+	case "DATE":
+		return TypeDate
+	case "DATETIME", "TIMESTAMP":
+		return TypeDateTime
+	case "TIME", "YEAR":
 		return TypeString
 	default:
 		return TypeString
@@ -70,6 +78,10 @@ func (t GraphQLType) String() string {
 		return "Boolean"
 	case TypeJSON:
 		return "JSON"
+	case TypeDate:
+		return "Date"
+	case TypeDateTime:
+		return "DateTime"
 	default:
 		return "String"
 	}
@@ -84,6 +96,10 @@ func (t GraphQLType) FilterTypeName() string {
 		return "FloatFilter"
 	case TypeBoolean:
 		return "BooleanFilter"
+	case TypeDate:
+		return "DateFilter"
+	case TypeDateTime:
+		return "DateTimeFilter"
 	default:
 		// JSON and String both use StringFilter (JSON columns are skipped in WHERE)
 		return "StringFilter"

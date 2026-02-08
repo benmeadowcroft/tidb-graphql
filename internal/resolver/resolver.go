@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
@@ -50,6 +51,7 @@ type Resolver struct {
 	orderDirection     *graphql.Enum
 	nonNegativeInt     *graphql.Scalar
 	jsonType           *graphql.Scalar
+	dateType           *graphql.Scalar
 	limits             *planner.PlanLimits
 	defaultLimit       int
 	filters            schemafilter.Config
@@ -1008,6 +1010,69 @@ func (r *Resolver) jsonScalar() *graphql.Scalar {
 	return cached
 }
 
+func (r *Resolver) dateScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.dateType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := graphql.NewScalar(graphql.ScalarConfig{
+		Name:        "Date",
+		Description: "Date value serialized as YYYY-MM-DD.",
+		Serialize: func(value interface{}) interface{} {
+			switch v := value.(type) {
+			case time.Time:
+				return v.UTC().Format("2006-01-02")
+			case *time.Time:
+				if v == nil {
+					return nil
+				}
+				return v.UTC().Format("2006-01-02")
+			default:
+				return nil
+			}
+		},
+		ParseValue: func(value interface{}) interface{} {
+			switch v := value.(type) {
+			case time.Time:
+				return v
+			case string:
+				if parsed, err := time.Parse("2006-01-02", v); err == nil {
+					return parsed
+				}
+				if parsed, err := time.Parse(time.RFC3339, v); err == nil {
+					return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC)
+				}
+				return nil
+			default:
+				return nil
+			}
+		},
+		ParseLiteral: func(valueAST ast.Value) interface{} {
+			if sv, ok := valueAST.(*ast.StringValue); ok {
+				if parsed, err := time.Parse("2006-01-02", sv.Value); err == nil {
+					return parsed
+				}
+				if parsed, err := time.Parse(time.RFC3339, sv.Value); err == nil {
+					return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC)
+				}
+			}
+			return nil
+		},
+	})
+
+	r.mu.Lock()
+	if r.dateType == nil {
+		r.dateType = scalar
+	}
+	cached = r.dateType
+	r.mu.Unlock()
+
+	return cached
+}
+
 func coerceNonNegativeInt(value interface{}) (int, bool) {
 	switch v := value.(type) {
 	case int:
@@ -1295,6 +1360,36 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 			Fields: graphql.InputObjectConfigFieldMap{
 				"eq":     &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 				"ne":     &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "DateFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "DateFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.dateScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.dateScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "DateTimeFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "DateTimeFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"ne":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"lt":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"lte":    &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"gt":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"gte":    &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.DateTime))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.DateTime))},
 				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 			},
 		})
@@ -2321,6 +2416,10 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 		return graphql.Float
 	case sqltype.TypeBoolean:
 		return graphql.Boolean
+	case sqltype.TypeDate:
+		return r.dateScalar()
+	case sqltype.TypeDateTime:
+		return graphql.DateTime
 	default:
 		return graphql.String
 	}
@@ -2339,6 +2438,10 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 		return graphql.Float
 	case sqltype.TypeBoolean:
 		return graphql.Boolean
+	case sqltype.TypeDate:
+		return r.dateScalar()
+	case sqltype.TypeDateTime:
+		return graphql.DateTime
 	default:
 		return graphql.String
 	}

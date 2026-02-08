@@ -22,7 +22,7 @@ func TestDatabaseConfig_DSN(t *testing.T) {
 				Password: "password",
 				Database: "test",
 			},
-			expected: "root:password@tcp(localhost:4000)/test?parseTime=true",
+			expected: "root:password@tcp(localhost:4000)/test?parseTime=true&loc=UTC",
 		},
 		{
 			name: "with special characters in password",
@@ -33,7 +33,7 @@ func TestDatabaseConfig_DSN(t *testing.T) {
 				Password: "p@ss:w0rd!",
 				Database: "mydb",
 			},
-			expected: "admin:p@ss:w0rd!@tcp(db.example.com:3306)/mydb?parseTime=true",
+			expected: "admin:p@ss:w0rd!@tcp(db.example.com:3306)/mydb?parseTime=true&loc=UTC",
 		},
 		{
 			name: "empty password",
@@ -44,7 +44,14 @@ func TestDatabaseConfig_DSN(t *testing.T) {
 				Password: "",
 				Database: "test",
 			},
-			expected: "root:@tcp(localhost:4000)/test?parseTime=true",
+			expected: "root:@tcp(localhost:4000)/test?parseTime=true&loc=UTC",
+		},
+		{
+			name: "dsn with existing loc",
+			config: DatabaseConfig{
+				ConnectionString: "root:password@tcp(localhost:4000)/test?parseTime=true&loc=Local",
+			},
+			expected: "root:password@tcp(localhost:4000)/test?parseTime=true&loc=Local",
 		},
 	}
 

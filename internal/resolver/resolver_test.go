@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"regexp"
 	"testing"
+	"time"
 
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
@@ -252,6 +253,119 @@ func TestMutationEnumRoundTrip_Create(t *testing.T) {
 	assert.Equal(t, "ready", record["status"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDateTimeFieldType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "created_at", DataType: "datetime", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	fields := objType.Fields()
+
+	nonNull, ok := fields["createdAt"].Type.(*graphql.NonNull)
+	require.True(t, ok)
+	_, ok = nonNull.OfType.(*graphql.Scalar)
+	require.True(t, ok)
+	assert.Equal(t, "DateTime", nonNull.OfType.Name())
+}
+
+func TestDateFieldType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "event_date", DataType: "date", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	fields := objType.Fields()
+
+	nonNull, ok := fields["eventDate"].Type.(*graphql.NonNull)
+	require.True(t, ok)
+	_, ok = nonNull.OfType.(*graphql.Scalar)
+	require.True(t, ok)
+	assert.Equal(t, "Date", nonNull.OfType.Name())
+}
+
+func TestDateTimeFilterType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "created_at", DataType: "datetime", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	filterType := r.getFilterInputType(table, table.Columns[0])
+	require.NotNil(t, filterType)
+	fields := filterType.Fields()
+	assert.NotNil(t, fields["eq"])
+	assert.NotNil(t, fields["ne"])
+	assert.NotNil(t, fields["lt"])
+	assert.NotNil(t, fields["lte"])
+	assert.NotNil(t, fields["gt"])
+	assert.NotNil(t, fields["gte"])
+	assert.NotNil(t, fields["in"])
+	assert.NotNil(t, fields["notIn"])
+	assert.NotNil(t, fields["isNull"])
+	assert.Nil(t, fields["like"])
+	assert.Nil(t, fields["notLike"])
+}
+
+func TestDateFilterType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "event_date", DataType: "date", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	filterType := r.getFilterInputType(table, table.Columns[0])
+	require.NotNil(t, filterType)
+	fields := filterType.Fields()
+	assert.NotNil(t, fields["eq"])
+	assert.NotNil(t, fields["ne"])
+	assert.NotNil(t, fields["lt"])
+	assert.NotNil(t, fields["lte"])
+	assert.NotNil(t, fields["gt"])
+	assert.NotNil(t, fields["gte"])
+	assert.NotNil(t, fields["in"])
+	assert.NotNil(t, fields["notIn"])
+	assert.NotNil(t, fields["isNull"])
+	assert.Nil(t, fields["like"])
+	assert.Nil(t, fields["notLike"])
+}
+
+func TestDateScalarSerialize(t *testing.T) {
+	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	input := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	serialized := r.dateScalar().Serialize(input)
+	assert.Equal(t, "2024-01-15", serialized)
+}
+
+func TestDateTimeScalarSerialize(t *testing.T) {
+	input := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	serialized := graphql.DateTime.Serialize(input)
+	assert.Equal(t, "2024-01-15T10:30:00Z", serialized)
+}
+
+func TestConvertValue_PreservesTime(t *testing.T) {
+	now := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	converted := convertValue(now)
+	assert.Equal(t, now, converted)
 }
 
 func TestManyToOneResolver(t *testing.T) {

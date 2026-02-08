@@ -1120,9 +1120,12 @@ func (d *DatabaseConfig) DSN() string {
 				dsn += "?parseTime=true"
 			}
 		}
+		if !strings.Contains(dsn, "loc=") {
+			dsn += "&loc=UTC"
+		}
 	} else {
 		dsn = fmt.Sprintf(
-			"%s:%s@tcp(%s:%d)/%s?parseTime=true",
+			"%s:%s@tcp(%s:%d)/%s?parseTime=true&loc=UTC",
 			d.User,
 			d.Password,
 			d.Host,
@@ -1157,9 +1160,12 @@ func (d *DatabaseConfig) DSNWithoutDatabase() string {
 				dsn += "?parseTime=true"
 			}
 		}
+		if !strings.Contains(dsn, "loc=") {
+			dsn += "&loc=UTC"
+		}
 	} else {
 		dsn = fmt.Sprintf(
-			"%s:%s@tcp(%s:%d)/?parseTime=true",
+			"%s:%s@tcp(%s:%d)/?parseTime=true&loc=UTC",
 			d.User,
 			d.Password,
 			d.Host,

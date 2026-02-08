@@ -75,9 +75,6 @@ func TestMapToGraphQL_StringTypes(t *testing.T) {
 		"VARBINARY", "varbinary",
 		"ENUM", "enum",
 		"SET", "set",
-		"DATE", "date",
-		"DATETIME", "datetime",
-		"TIMESTAMP", "timestamp",
 		"TIME", "time",
 		"YEAR", "year",
 	}
@@ -87,6 +84,35 @@ func TestMapToGraphQL_StringTypes(t *testing.T) {
 			assert.Equal(t, TypeString, MapToGraphQL(sqlType))
 			assert.Equal(t, "String", MapToGraphQL(sqlType).String())
 			assert.Equal(t, "StringFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_DateTimeTypes(t *testing.T) {
+	dateTypes := []string{
+		"DATETIME", "datetime",
+		"TIMESTAMP", "timestamp",
+	}
+
+	for _, sqlType := range dateTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeDateTime, MapToGraphQL(sqlType))
+			assert.Equal(t, "DateTime", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "DateTimeFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_DateTypes(t *testing.T) {
+	dateTypes := []string{
+		"DATE", "date",
+	}
+
+	for _, sqlType := range dateTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeDate, MapToGraphQL(sqlType))
+			assert.Equal(t, "Date", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "DateFilter", MapToGraphQL(sqlType).FilterTypeName())
 		})
 	}
 }
@@ -180,6 +206,8 @@ func TestIsNumeric(t *testing.T) {
 		{TypeString, false},
 		{TypeBoolean, false},
 		{TypeJSON, false},
+		{TypeDate, false},
+		{TypeDateTime, false},
 	}
 
 	for _, tc := range testCases {
@@ -199,6 +227,8 @@ func TestIsComparable(t *testing.T) {
 		{TypeString, true},
 		{TypeBoolean, true},
 		{TypeJSON, false}, // JSON is not comparable
+		{TypeDate, true},
+		{TypeDateTime, true},
 	}
 
 	for _, tc := range testCases {

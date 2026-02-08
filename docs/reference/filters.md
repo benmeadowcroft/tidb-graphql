@@ -12,7 +12,7 @@ Example:
 
 ```graphql
 {
-  users(where: { AND: [{ status: { eq: "active" } }, { createdAt: { gte: "2024-01-01" } }] }) {
+  users(where: { AND: [{ status: { eq: "active" } }, { createdAt: { gte: "2024-01-01T00:00:00Z" } }] }) {
     id
     email
   }
@@ -27,6 +27,8 @@ Supported operators depend on the column type:
 - String: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `like`, `notLike`, `isNull`
 - Boolean: `eq`, `ne`, `isNull`
 - Enum: `eq`, `ne`, `in`, `notIn`, `isNull`
+- Date: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
+- DateTime: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
 
 Example:
 

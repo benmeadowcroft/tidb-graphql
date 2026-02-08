@@ -189,6 +189,71 @@ func TestSchemaDescriptionsFromComments(t *testing.T) {
 	assert.Equal(t, "User email address.", whereFields["email"].Description())
 }
 
+func TestMutationEnumRoundTrip_Create(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "status", DataType: "enum", EnumValues: []string{"ready", "pending"}, IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	inputArg := map[string]interface{}{"status": "ready"}
+	insertable := columnNameSet(r.mutationInsertableColumns(table))
+	columns, values, err := mapInputColumns(table, inputArg, insertable)
+	require.NoError(t, err)
+
+	insertPlan, err := planner.PlanInsert(table, columns, values)
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(insertPlan.SQL)).
+		WithArgs(toDriverValues(insertPlan.Args)...).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "createUser"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{Name: &ast.Name{Value: "id"}},
+			&ast.Field{Name: &ast.Name{Value: "status"}},
+		}},
+	}
+	selected := planner.SelectedColumns(table, field, nil)
+	selectPlan, err := planner.PlanTableByPK(table, selected, &table.Columns[0], int64(1))
+	require.NoError(t, err)
+
+	rows := sqlmock.NewRows([]string{"id", "status"}).AddRow(1, "ready")
+	expectQuery(t, mock, selectPlan.SQL, selectPlan.Args, rows)
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	ctx := WithMutationContext(context.Background(), NewMutationContext(tx))
+
+	resolverFn := r.makeCreateResolver(table, insertable)
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"input": inputArg,
+		},
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	record, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, 1, record["id"])
+	assert.Equal(t, "ready", record["status"])
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestManyToOneResolver(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()

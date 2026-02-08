@@ -50,6 +50,8 @@ Foreign keys create relationship fields on both sides:
 
 Pluralization uses the [Inflection library](https://github.com/jinzhu/inflection) (with naming overrides).
 
+Many-to-one fields remain nullable even when the FK column is NOT NULL, because role-based access can hide the related row.
+
 One-to-many fields accept the same `limit`, `offset`, and `orderBy` arguments as list queries.
 List fields never return `null` and never contain `null` items.
 If role-based restrictions hide a nested type, the nested field error can null out the parent list because list items are non-null.

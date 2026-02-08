@@ -1139,13 +1139,17 @@ func normalizeEnumValueName(value string) string {
 }
 
 func uniqueEnumValueName(base string, used map[string]int) string {
-	if count, ok := used[base]; ok {
-		count++
-		used[base] = count
-		return fmt.Sprintf("%s_%d", base, count)
+	name := base
+	for {
+		if count, ok := used[name]; ok {
+			count++
+			used[name] = count
+			name = fmt.Sprintf("%s_%d", base, count)
+			continue
+		}
+		used[name] = 1
+		return name
 	}
-	used[base] = 1
-	return base
 }
 
 // enumTypeForColumn preserves DB enum values while exposing GraphQL enums consistently.
@@ -2459,6 +2463,7 @@ func (r *Resolver) makeOneToManyResolver(table introspection.Table, rel introspe
 			return nil, err
 		}
 
+		results = ensureNonNullRows(results)
 		seedBatchRows(p, results)
 		return results, nil
 	}
@@ -2547,6 +2552,7 @@ func (r *Resolver) makeManyToManyResolver(table introspection.Table, rel introsp
 			return nil, err
 		}
 
+		results = ensureNonNullRows(results)
 		seedBatchRows(p, results)
 		return results, nil
 	}
@@ -2632,6 +2638,7 @@ func (r *Resolver) makeEdgeListResolver(table introspection.Table, rel introspec
 			return nil, err
 		}
 
+		results = ensureNonNullRows(results)
 		seedBatchRows(p, results)
 		return results, nil
 	}

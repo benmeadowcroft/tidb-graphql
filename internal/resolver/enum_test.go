@@ -22,3 +22,10 @@ func TestUniqueEnumValueName(t *testing.T) {
 	assert.Equal(t, "READY_2", uniqueEnumValueName("READY", used))
 	assert.Equal(t, "READY_3", uniqueEnumValueName("READY", used))
 }
+
+func TestUniqueEnumValueName_CollisionWithSuffix(t *testing.T) {
+	used := make(map[string]int)
+	assert.Equal(t, "READY", uniqueEnumValueName("READY", used))
+	assert.Equal(t, "READY_2", uniqueEnumValueName("READY_2", used))
+	assert.Equal(t, "READY_3", uniqueEnumValueName("READY", used))
+}

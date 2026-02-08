@@ -50,7 +50,6 @@ type Resolver struct {
 	singularQueryCache map[string]string
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
-	namesApplied       bool
 	orderDirection     *graphql.Enum
 	nonNegativeInt     *graphql.Scalar
 	jsonType           *graphql.Scalar
@@ -155,16 +154,7 @@ func (r *Resolver) applyNaming() {
 	if r.dbSchema == nil {
 		return
 	}
-
-	r.mu.Lock()
-	if r.namesApplied {
-		r.mu.Unlock()
-		return
-	}
-	r.namesApplied = true
 	namingConfig := r.singularNamer.Config()
-	r.mu.Unlock()
-
 	schemanaming.Apply(r.dbSchema, naming.New(namingConfig, nil))
 }
 

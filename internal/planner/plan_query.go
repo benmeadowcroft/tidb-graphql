@@ -394,6 +394,10 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 
 	visitSelections(field.SelectionSet.Selections)
 
+	if len(selected) == 0 {
+		return table.Columns
+	}
+
 	if len(introspection.PrimaryKeyColumns(table)) > 0 {
 		for _, col := range table.Columns {
 			if col.IsPrimaryKey {

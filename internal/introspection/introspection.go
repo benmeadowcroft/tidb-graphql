@@ -118,6 +118,8 @@ type Table struct {
 type Schema struct {
 	Tables    []Table
 	Junctions JunctionMap
+	// NamesApplied marks whether GraphQL naming has been applied to this schema.
+	NamesApplied bool
 }
 
 // Queryer provides query access for schema introspection.

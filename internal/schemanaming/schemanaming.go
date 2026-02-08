@@ -3,6 +3,7 @@ package schemanaming
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"tidb-graphql/internal/introspection"
@@ -13,6 +14,9 @@ import (
 // It resets collision state to ensure deterministic naming per schema build.
 func Apply(schema *introspection.Schema, namer *naming.Namer) {
 	if schema == nil {
+		return
+	}
+	if schema.NamesApplied {
 		return
 	}
 	if namer == nil {
@@ -36,8 +40,20 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 		for ci := range table.Columns {
 			col := &table.Columns[ci]
 			col.GraphQLFieldName = namer.RegisterColumnField(typeName, col.Name)
+		}
+
+		for ci := range table.Columns {
+			col := &table.Columns[ci]
 			if col.IsPrimaryKey && strings.EqualFold(col.Name, "id") {
-				col.GraphQLFieldName = "databaseId"
+				desiredName := "databaseId"
+				if hasColumnFieldName(table.Columns, desiredName, ci) {
+					slog.Default().Warn("GraphQL name collision for databaseId; using databaseId_raw",
+						"table", table.Name,
+						"column", col.Name,
+					)
+					desiredName = "databaseId_raw"
+				}
+				col.GraphQLFieldName = desiredName
 			}
 		}
 
@@ -53,4 +69,18 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 			rel.GraphQLFieldName = namer.RegisterRelationshipField(typeName, baseName, source, useRefSuffix)
 		}
 	}
+
+	schema.NamesApplied = true
+}
+
+func hasColumnFieldName(columns []introspection.Column, name string, skipIndex int) bool {
+	for i := range columns {
+		if i == skipIndex {
+			continue
+		}
+		if columns[i].GraphQLFieldName == name {
+			return true
+		}
+	}
+	return false
 }

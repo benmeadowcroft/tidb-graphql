@@ -105,6 +105,16 @@ func orderByFieldName(columns []string, columnNames map[string]string) string {
 	return strings.Join(parts, "_")
 }
 
+// OrderByKey returns the GraphQL field name for a set of orderBy columns,
+// used as part of the cursor identity.
+func OrderByKey(table introspection.Table, columns []string) string {
+	columnNames := make(map[string]string, len(table.Columns))
+	for _, col := range table.Columns {
+		columnNames[col.Name] = introspection.GraphQLFieldName(col)
+	}
+	return orderByFieldName(columns, columnNames)
+}
+
 func containsColumn(columns []string, target string) bool {
 	for _, col := range columns {
 		if col == target {

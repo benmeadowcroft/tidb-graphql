@@ -419,6 +419,121 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 	return columns
 }
 
+// SelectedColumnsForConnection extracts the column selection from a connection
+// field's selection set. Connection fields wrap actual columns inside nodes { ... }
+// and/or edges { node { ... } }, so we traverse into those sub-selections.
+// OrderBy and PK columns are always included to ensure cursor generation works.
+func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, fragments map[string]ast.Definition, orderBy *OrderBy) []introspection.Column {
+	if field == nil || field.SelectionSet == nil {
+		return EnsureColumns(table, table.Columns, orderBy.Columns)
+	}
+
+	// Build column lookup
+	columnByField := make(map[string]string, len(table.Columns))
+	for _, col := range table.Columns {
+		columnByField[introspection.GraphQLFieldName(col)] = col.Name
+	}
+
+	selected := make(map[string]struct{})
+
+	// Walk connection-level selections looking for "nodes" and "edges"
+	for _, sel := range field.SelectionSet.Selections {
+		subField, ok := sel.(*ast.Field)
+		if !ok || subField.Name == nil {
+			continue
+		}
+
+		switch subField.Name.Value {
+		case "nodes":
+			// nodes { name email } -> extract column fields directly
+			collectColumnFields(subField, columnByField, selected, fragments)
+		case "edges":
+			// edges { node { name email } } -> find "node" inside edges
+			if subField.SelectionSet != nil {
+				for _, edgeSel := range subField.SelectionSet.Selections {
+					nodeField, ok := edgeSel.(*ast.Field)
+					if !ok || nodeField.Name == nil {
+						continue
+					}
+					if nodeField.Name.Value == "node" {
+						collectColumnFields(nodeField, columnByField, selected, fragments)
+					}
+				}
+			}
+		}
+	}
+
+	if len(selected) == 0 {
+		return EnsureColumns(table, table.Columns, orderBy.Columns)
+	}
+
+	// Always include PK columns (for id field / cursor generation)
+	for _, col := range table.Columns {
+		if col.IsPrimaryKey {
+			selected[col.Name] = struct{}{}
+		}
+	}
+
+	// Always include orderBy columns (for cursor generation)
+	for _, colName := range orderBy.Columns {
+		selected[colName] = struct{}{}
+	}
+
+	// Build result preserving table column order
+	columns := make([]introspection.Column, 0, len(selected))
+	for _, col := range table.Columns {
+		if _, ok := selected[col.Name]; ok {
+			columns = append(columns, col)
+		}
+	}
+
+	if len(columns) == 0 {
+		return EnsureColumns(table, table.Columns, orderBy.Columns)
+	}
+	return columns
+}
+
+// collectColumnFields extracts column names from a field's selection set.
+func collectColumnFields(field *ast.Field, columnByField map[string]string, selected map[string]struct{}, fragments map[string]ast.Definition) {
+	if field == nil || field.SelectionSet == nil {
+		return
+	}
+
+	var visit func(selections []ast.Selection)
+	visit = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil || s.Name.Value == "__typename" {
+					continue
+				}
+				if colName, ok := columnByField[s.Name.Value]; ok {
+					selected[colName] = struct{}{}
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					visit(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				visit(frag.SelectionSet.Selections)
+			}
+		}
+	}
+
+	visit(field.SelectionSet.Selections)
+}
+
 func findColumn(columns []introspection.Column, name string) (introspection.Column, bool) {
 	for _, col := range columns {
 		if col.Name == name {

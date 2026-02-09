@@ -17,13 +17,14 @@ import (
 	"sync"
 	"time"
 
+	"tidb-graphql/internal/cursor"
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/observability"
-	"tidb-graphql/internal/schemanaming"
 	"tidb-graphql/internal/planner"
+	"tidb-graphql/internal/schemanaming"
 	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/sqltype"
 
@@ -55,6 +56,9 @@ type Resolver struct {
 	jsonType           *graphql.Scalar
 	dateType           *graphql.Scalar
 	nodeInterface      *graphql.Interface
+	pageInfoType       *graphql.Object
+	edgeCache          map[string]*graphql.Object
+	connectionCache    map[string]*graphql.Object
 	limits             *planner.PlanLimits
 	defaultLimit       int
 	filters            schemafilter.Config
@@ -84,6 +88,8 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		singularQueryCache: make(map[string]string),
 		singularTypeCache:  make(map[string]string),
 		singularNamer:      naming.New(namingConfig, nil),
+		edgeCache:          make(map[string]*graphql.Object),
+		connectionCache:    make(map[string]*graphql.Object),
 		limits:             limits,
 		defaultLimit:       defaultLimit,
 		filters:            filters,
@@ -260,6 +266,36 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 		Type:    aggregateType,
 		Args:    r.aggregateArgs(table),
 		Resolve: r.makeAggregateResolver(table),
+	}
+
+	// Connection query (only for tables with primary keys)
+	if len(pkCols) > 0 {
+		connectionName := fieldName + "Connection"
+		connectionType := r.buildConnectionType(table, tableType)
+		connArgs := graphql.FieldConfigArgument{
+			"first": &graphql.ArgumentConfig{
+				Type:         r.nonNegativeIntScalar(),
+				DefaultValue: planner.DefaultConnectionLimit,
+			},
+			"after": &graphql.ArgumentConfig{
+				Type: graphql.String,
+			},
+		}
+		if orderByInput := r.orderByInput(table); orderByInput != nil {
+			connArgs["orderBy"] = &graphql.ArgumentConfig{
+				Type: orderByInput,
+			}
+		}
+		if whereInput := r.whereInput(table); whereInput != nil {
+			connArgs["where"] = &graphql.ArgumentConfig{
+				Type: whereInput,
+			}
+		}
+		fields[connectionName] = &graphql.Field{
+			Type:    graphql.NewNonNull(connectionType),
+			Args:    connArgs,
+			Resolve: r.makeConnectionResolver(table),
+		}
 	}
 
 	return fields
@@ -462,6 +498,32 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				Type:    aggregateType,
 				Args:    r.aggregateArgs(relatedTable),
 				Resolve: r.makeRelationshipAggregateResolver(table, rel),
+			}
+
+			// Add connection field for one-to-many relationships (only if related table has PK)
+			relPKCols := introspection.PrimaryKeyColumns(relatedTable)
+			if len(relPKCols) > 0 {
+				connFieldName := rel.GraphQLFieldName + "Connection"
+				connType := r.buildConnectionType(relatedTable, relatedType)
+				connArgs := graphql.FieldConfigArgument{
+					"first": &graphql.ArgumentConfig{
+						Type:         r.nonNegativeIntScalar(),
+						DefaultValue: planner.DefaultConnectionLimit,
+					},
+					"after": &graphql.ArgumentConfig{
+						Type: graphql.String,
+					},
+				}
+				if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
+					connArgs["orderBy"] = &graphql.ArgumentConfig{
+						Type: orderByInput,
+					}
+				}
+				fields[connFieldName] = &graphql.Field{
+					Type:    graphql.NewNonNull(connType),
+					Args:    connArgs,
+					Resolve: r.makeOneToManyConnectionResolver(table, rel),
+				}
 			}
 		} else if rel.IsManyToMany {
 			// Many-to-many through pure junction: returns list of related entities
@@ -1399,6 +1461,333 @@ func (r *Resolver) nodeInterfaceType() *graphql.Interface {
 	r.mu.Unlock()
 
 	return cached
+}
+
+// pageInfoType returns the shared PageInfo GraphQL type (lazy-init).
+func (r *Resolver) getPageInfoType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.pageInfoType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	pageInfo := graphql.NewObject(graphql.ObjectConfig{
+		Name: "PageInfo",
+		Fields: graphql.Fields{
+			"hasNextPage": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Boolean),
+			},
+			"hasPreviousPage": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Boolean),
+			},
+			"startCursor": &graphql.Field{
+				Type: graphql.String,
+			},
+			"endCursor": &graphql.Field{
+				Type: graphql.String,
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if r.pageInfoType == nil {
+		r.pageInfoType = pageInfo
+	}
+	cached = r.pageInfoType
+	r.mu.Unlock()
+
+	return cached
+}
+
+// buildEdgeType builds the Edge type for a table (cached per table).
+func (r *Resolver) buildEdgeType(table introspection.Table, tableType *graphql.Object) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + "Edge"
+
+	r.mu.RLock()
+	if cached, ok := r.edgeCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	edgeType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			"cursor": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.String),
+			},
+			"node": &graphql.Field{
+				Type: graphql.NewNonNull(tableType),
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.edgeCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.edgeCache[typeName] = edgeType
+	r.mu.Unlock()
+
+	return edgeType
+}
+
+// buildConnectionType builds the Connection type for a table (cached per table).
+func (r *Resolver) buildConnectionType(table introspection.Table, tableType *graphql.Object) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + "Connection"
+
+	r.mu.RLock()
+	if cached, ok := r.connectionCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	edgeType := r.buildEdgeType(table, tableType)
+	pageInfo := r.getPageInfoType()
+
+	connType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			"edges": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(edgeType))),
+			},
+			"nodes": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(tableType))),
+			},
+			"pageInfo": &graphql.Field{
+				Type: graphql.NewNonNull(pageInfo),
+			},
+			"totalCount": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Int),
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					source, ok := p.Source.(map[string]interface{})
+					if !ok {
+						return 0, nil
+					}
+					cr, ok := source["__connectionResult"].(*connectionResult)
+					if !ok || cr == nil || cr.plan == nil {
+						return 0, nil
+					}
+					return cr.totalCount()
+				},
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.connectionCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.connectionCache[typeName] = connType
+	r.mu.Unlock()
+
+	return connType
+}
+
+// connectionResult holds the data needed to resolve connection fields.
+type connectionResult struct {
+	rows     []map[string]interface{}
+	plan     *planner.ConnectionPlan
+	hasNext  bool
+	hasPrev  bool
+	executor dbexec.QueryExecutor
+	ctx      context.Context
+	// totalCount is lazily computed
+	totalCountVal *int
+	totalCountMu  sync.Mutex
+}
+
+func (cr *connectionResult) totalCount() (int, error) {
+	cr.totalCountMu.Lock()
+	defer cr.totalCountMu.Unlock()
+
+	if cr.totalCountVal != nil {
+		return *cr.totalCountVal, nil
+	}
+
+	rows, err := cr.executor.QueryContext(cr.ctx, cr.plan.Count.SQL, cr.plan.Count.Args...)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var count int
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			return 0, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	cr.totalCountVal = &count
+	return count, nil
+}
+
+func encodeCursorFromRow(row map[string]interface{}, plan *planner.ConnectionPlan) string {
+	typeName := introspection.GraphQLTypeName(plan.Table)
+	values := make([]interface{}, len(plan.CursorColumns))
+	for i, col := range plan.CursorColumns {
+		fieldName := introspection.GraphQLFieldName(col)
+		values[i] = row[fieldName]
+	}
+	return cursor.EncodeCursor(typeName, plan.OrderByKey, plan.OrderBy.Direction, values...)
+}
+
+// makeConnectionResolver creates a resolver for root connection queries.
+func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		var opts []planner.PlanOption
+		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		if r.limits != nil {
+			opts = append(opts, planner.WithLimits(*r.limits))
+		}
+
+		plan, err := planner.PlanConnection(r.dbSchema, table, field, p.Args, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan connection: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := scanRows(rows, plan.Columns)
+		if err != nil {
+			return nil, err
+		}
+
+		hasNext := len(results) > plan.First
+		if hasNext {
+			results = results[:plan.First]
+		}
+
+		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+	}
+}
+
+// makeOneToManyConnectionResolver creates a resolver for relationship connection queries.
+func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type")
+		}
+
+		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
+		pkValue := source[pkFieldName]
+		if pkValue == nil {
+			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+		}
+
+		relatedTable, err := r.findTable(rel.RemoteTable)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		var opts []planner.PlanOption
+		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		if r.limits != nil {
+			opts = append(opts, planner.WithLimits(*r.limits))
+		}
+
+		plan, err := planner.PlanOneToManyConnection(relatedTable, rel.RemoteColumn, pkValue, field, p.Args, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan connection: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := scanRows(rows, plan.Columns)
+		if err != nil {
+			return nil, err
+		}
+
+		hasNext := len(results) > plan.First
+		if hasNext {
+			results = results[:plan.First]
+		}
+
+		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+	}
+}
+
+// buildConnectionResult constructs the map that connection field resolvers read from.
+func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]interface{}, plan *planner.ConnectionPlan, hasNext bool) map[string]interface{} {
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+
+	result := &connectionResult{
+		rows:     rows,
+		plan:     plan,
+		hasNext:  hasNext,
+		executor: r.executor,
+		ctx:      ctx,
+	}
+	if plan != nil {
+		result.hasPrev = plan.HasCursor
+	}
+
+	// Build edges
+	edges := make([]map[string]interface{}, len(rows))
+	for i, row := range rows {
+		var c string
+		if plan != nil {
+			c = encodeCursorFromRow(row, plan)
+		}
+		edges[i] = map[string]interface{}{
+			"cursor": c,
+			"node":   row,
+		}
+	}
+
+	// Build pageInfo
+	var startCursor, endCursor interface{}
+	if len(edges) > 0 {
+		startCursor = edges[0]["cursor"]
+		endCursor = edges[len(edges)-1]["cursor"]
+	}
+
+	hasPrev := false
+	if plan != nil {
+		hasPrev = plan.HasCursor
+	}
+
+	connMap := map[string]interface{}{
+		"edges": edges,
+		"nodes": rows,
+		"pageInfo": map[string]interface{}{
+			"hasNextPage":     hasNext,
+			"hasPreviousPage": hasPrev,
+			"startCursor":     startCursor,
+			"endCursor":       endCursor,
+		},
+		"__connectionResult": result,
+	}
+
+	return connMap
 }
 
 func coerceNonNegativeInt(value interface{}) (int, bool) {

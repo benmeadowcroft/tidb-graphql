@@ -62,13 +62,71 @@ func validateLimits(cost PlanCost, limits PlanLimits) error {
 	return nil
 }
 
+// isConnectionField returns true if the field uses Relay connection pagination
+// (has a "first" argument), indicating its children are connection wrappers
+// rather than actual data fields.
+func isConnectionField(field *ast.Field) bool {
+	return hasFirstArg(field)
+}
+
+// connectionDataSelections extracts the actual data field selections from a
+// connection field by unwrapping Relay scaffolding. It looks inside
+// edges → node and nodes for real column fields, and skips pageInfo,
+// totalCount, and cursor which have no SQL cost.
+func connectionDataSelections(field *ast.Field) []ast.Selection {
+	if field.SelectionSet == nil {
+		return nil
+	}
+
+	var result []ast.Selection
+	for _, sel := range field.SelectionSet.Selections {
+		sub, ok := sel.(*ast.Field)
+		if !ok || sub.Name == nil {
+			continue
+		}
+		switch sub.Name.Value {
+		case "edges":
+			if sub.SelectionSet == nil {
+				continue
+			}
+			for _, edgeSel := range sub.SelectionSet.Selections {
+				nodeField, ok := edgeSel.(*ast.Field)
+				if !ok || nodeField.Name == nil {
+					continue
+				}
+				// Only unwrap the "node" child; "cursor" is skipped
+				if nodeField.Name.Value == "node" && nodeField.SelectionSet != nil {
+					result = append(result, nodeField.SelectionSet.Selections...)
+				}
+			}
+		case "nodes":
+			if sub.SelectionSet != nil {
+				result = append(result, sub.SelectionSet.Selections...)
+			}
+		case "pageInfo", "totalCount":
+			// No SQL cost — skip entirely
+		}
+	}
+	return result
+}
+
 func selectionDepth(field *ast.Field, current int) int {
 	if field.SelectionSet == nil || len(field.SelectionSet.Selections) == 0 {
 		return current
 	}
 
+	// For connections, recurse into the unwrapped data fields so that
+	// wrapper levels (edges, node, pageInfo) don't inflate depth.
+	selections := field.SelectionSet.Selections
+	if isConnectionField(field) {
+		selections = connectionDataSelections(field)
+		if len(selections) == 0 {
+			return current
+		}
+	}
+
 	maxDepth := current
-	for _, selection := range field.SelectionSet.Selections {
+	for _, selection := range selections {
 		sub, ok := selection.(*ast.Field)
 		if !ok {
 			continue
@@ -93,7 +151,16 @@ func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallba
 		return rows
 	}
 
-	for _, selection := range field.SelectionSet.Selections {
+	// Unwrap connection scaffolding to count only real data fields.
+	selections := field.SelectionSet.Selections
+	if isConnectionField(field) {
+		selections = connectionDataSelections(field)
+		if len(selections) == 0 {
+			return rows
+		}
+	}
+
+	for _, selection := range selections {
 		sub, ok := selection.(*ast.Field)
 		if !ok {
 			continue
@@ -117,7 +184,16 @@ func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, 
 		return complexity * limit
 	}
 
-	for _, selection := range field.SelectionSet.Selections {
+	// Unwrap connection scaffolding to count only real data fields.
+	selections := field.SelectionSet.Selections
+	if isConnectionField(field) {
+		selections = connectionDataSelections(field)
+		if len(selections) == 0 {
+			return complexity * limit
+		}
+	}
+
+	for _, selection := range selections {
 		sub, ok := selection.(*ast.Field)
 		if !ok {
 			continue
@@ -169,22 +245,40 @@ func argInt(args map[string]interface{}, key string) (int, bool) {
 }
 
 func listLimitForField(field *ast.Field, args map[string]interface{}, fallback int) int {
-	if !hasLimitArg(field) {
+	if !hasLimitArg(field) && !hasFirstArg(field) {
 		if _, ok := argInt(args, "limit"); !ok {
-			return 1
+			if _, ok := argInt(args, "first"); !ok {
+				return 1
+			}
 		}
 	}
 
 	if limit, ok := argInt(args, "limit"); ok {
 		return limit
 	}
-	if limit := limitFromAST(field, fallback); limit > 0 {
+	if first, ok := argInt(args, "first"); ok {
+		return first
+	}
+	// Check AST arguments without fallback so that a missing "limit" arg
+	// doesn't shadow a present "first" arg via the fallback value.
+	if limit := limitFromAST(field, 0); limit > 0 {
 		return limit
+	}
+	if first := firstFromAST(field, 0); first > 0 {
+		return first
 	}
 	return fallback
 }
 
 func hasLimitArg(field *ast.Field) bool {
+	return hasArgNamed(field, "limit")
+}
+
+func hasFirstArg(field *ast.Field) bool {
+	return hasArgNamed(field, "first")
+}
+
+func hasArgNamed(field *ast.Field, name string) bool {
 	if field == nil {
 		return false
 	}
@@ -192,11 +286,33 @@ func hasLimitArg(field *ast.Field) bool {
 		if arg == nil || arg.Name == nil {
 			continue
 		}
-		if arg.Name.Value == "limit" {
+		if arg.Name.Value == name {
 			return true
 		}
 	}
 	return false
+}
+
+func firstFromAST(field *ast.Field, fallback int) int {
+	if field == nil {
+		return fallback
+	}
+	for _, arg := range field.Arguments {
+		if arg == nil || arg.Name == nil || arg.Value == nil {
+			continue
+		}
+		if arg.Name.Value != "first" {
+			continue
+		}
+		if intVal, ok := arg.Value.(*ast.IntValue); ok {
+			if intVal.Value != "" {
+				if parsed, err := parseInt(intVal.Value); err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	return fallback
 }
 
 func parseInt(value string) (int, error) {

@@ -26,14 +26,14 @@ type PlanCost struct {
 }
 
 // EstimateCost estimates cost based on the field selection and arguments.
-func EstimateCost(field *ast.Field, args map[string]interface{}, fallbackLimit int) PlanCost {
+func EstimateCost(field *ast.Field, args map[string]interface{}, fallbackLimit int, fragments map[string]ast.Definition) PlanCost {
 	if field == nil {
 		return PlanCost{}
 	}
 
-	depth := selectionDepth(field, 1)
-	rows := estimateRowsRecursive(field, args, fallbackLimit)
-	complexity := estimateComplexityRecursive(field, args, fallbackLimit)
+	depth := selectionDepth(field, 1, fragments)
+	rows := estimateRowsRecursive(field, args, fallbackLimit, fragments)
+	complexity := estimateComplexityRecursive(field, args, fallbackLimit, fragments)
 
 	return PlanCost{
 		Depth:      depth,
@@ -73,44 +73,119 @@ func isConnectionField(field *ast.Field) bool {
 // connection field by unwrapping Relay scaffolding. It looks inside
 // edges → node and nodes for real column fields, and skips pageInfo,
 // totalCount, and cursor which have no SQL cost.
-func connectionDataSelections(field *ast.Field) []ast.Selection {
+func connectionDataSelections(field *ast.Field, fragments map[string]ast.Definition) []ast.Selection {
 	if field.SelectionSet == nil {
 		return nil
 	}
 
 	var result []ast.Selection
-	for _, sel := range field.SelectionSet.Selections {
-		sub, ok := sel.(*ast.Field)
-		if !ok || sub.Name == nil {
-			continue
-		}
-		switch sub.Name.Value {
-		case "edges":
-			if sub.SelectionSet == nil {
-				continue
-			}
-			for _, edgeSel := range sub.SelectionSet.Selections {
-				nodeField, ok := edgeSel.(*ast.Field)
-				if !ok || nodeField.Name == nil {
+
+	var appendDataSelections func(selections []ast.Selection)
+	appendDataSelections = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				result = append(result, s)
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					appendDataSelections(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
 					continue
 				}
-				// Only unwrap the "node" child; "cursor" is skipped
-				if nodeField.Name.Value == "node" && nodeField.SelectionSet != nil {
-					result = append(result, nodeField.SelectionSet.Selections...)
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
 				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				appendDataSelections(frag.SelectionSet.Selections)
 			}
-		case "nodes":
-			if sub.SelectionSet != nil {
-				result = append(result, sub.SelectionSet.Selections...)
-			}
-		case "pageInfo", "totalCount":
-			// No SQL cost — skip entirely
 		}
 	}
+
+	var appendEdgeNodeSelections func(selections []ast.Selection)
+	appendEdgeNodeSelections = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil {
+					continue
+				}
+				if s.Name.Value == "node" && s.SelectionSet != nil {
+					appendDataSelections(s.SelectionSet.Selections)
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					appendEdgeNodeSelections(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				appendEdgeNodeSelections(frag.SelectionSet.Selections)
+			}
+		}
+	}
+
+	var visit func(selections []ast.Selection)
+	visit = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil {
+					continue
+				}
+				switch s.Name.Value {
+				case "edges":
+					if s.SelectionSet != nil {
+						appendEdgeNodeSelections(s.SelectionSet.Selections)
+					}
+				case "nodes":
+					if s.SelectionSet != nil {
+						appendDataSelections(s.SelectionSet.Selections)
+					}
+				case "pageInfo", "totalCount":
+					// No SQL cost — skip entirely
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					visit(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				visit(frag.SelectionSet.Selections)
+			}
+		}
+	}
+
+	visit(field.SelectionSet.Selections)
+
 	return result
 }
 
-func selectionDepth(field *ast.Field, current int) int {
+func selectionDepth(field *ast.Field, current int, fragments map[string]ast.Definition) int {
 	if field.SelectionSet == nil || len(field.SelectionSet.Selections) == 0 {
 		return current
 	}
@@ -119,7 +194,7 @@ func selectionDepth(field *ast.Field, current int) int {
 	// wrapper levels (edges, node, pageInfo) don't inflate depth.
 	selections := field.SelectionSet.Selections
 	if isConnectionField(field) {
-		selections = connectionDataSelections(field)
+		selections = connectionDataSelections(field, fragments)
 		if len(selections) == 0 {
 			return current
 		}
@@ -131,7 +206,7 @@ func selectionDepth(field *ast.Field, current int) int {
 		if !ok {
 			continue
 		}
-		depth := selectionDepth(sub, current+1)
+		depth := selectionDepth(sub, current+1, fragments)
 		if depth > maxDepth {
 			maxDepth = depth
 		}
@@ -139,7 +214,7 @@ func selectionDepth(field *ast.Field, current int) int {
 	return maxDepth
 }
 
-func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int) int {
+func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int, fragments map[string]ast.Definition) int {
 	if field == nil {
 		return 0
 	}
@@ -154,7 +229,7 @@ func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallba
 	// Unwrap connection scaffolding to count only real data fields.
 	selections := field.SelectionSet.Selections
 	if isConnectionField(field) {
-		selections = connectionDataSelections(field)
+		selections = connectionDataSelections(field, fragments)
 		if len(selections) == 0 {
 			return rows
 		}
@@ -165,14 +240,14 @@ func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallba
 		if !ok {
 			continue
 		}
-		childRows := estimateRowsRecursive(sub, nil, fallbackLimit)
+		childRows := estimateRowsRecursive(sub, nil, fallbackLimit, fragments)
 		rows += limit * childRows
 	}
 
 	return rows
 }
 
-func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int) int {
+func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int, fragments map[string]ast.Definition) int {
 	if field == nil {
 		return 0
 	}
@@ -187,7 +262,7 @@ func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, 
 	// Unwrap connection scaffolding to count only real data fields.
 	selections := field.SelectionSet.Selections
 	if isConnectionField(field) {
-		selections = connectionDataSelections(field)
+		selections = connectionDataSelections(field, fragments)
 		if len(selections) == 0 {
 			return complexity * limit
 		}
@@ -198,7 +273,7 @@ func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, 
 		if !ok {
 			continue
 		}
-		complexity += limit * estimateComplexityRecursive(sub, nil, fallbackLimit)
+		complexity += limit * estimateComplexityRecursive(sub, nil, fallbackLimit, fragments)
 	}
 
 	return complexity

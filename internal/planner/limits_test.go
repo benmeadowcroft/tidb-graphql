@@ -50,7 +50,7 @@ func TestEstimateCostNestedLists(t *testing.T) {
 		},
 	}
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
 	require.Equal(t, 4, cost.Depth)
 	require.Equal(t, 56, cost.Rows)
 	require.Equal(t, 33, cost.Complexity)
@@ -63,7 +63,7 @@ func TestEstimateCostConnection_EdgesNode(t *testing.T) {
 		edgesWithNode(&ast.Field{Name: &ast.Name{Value: "id"}}),
 	)
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
 	require.Equal(t, 2, cost.Depth)
 	require.Equal(t, 4, cost.Rows)
 	require.Equal(t, 3, cost.Complexity)
@@ -76,7 +76,7 @@ func TestEstimateCostConnection_Nodes(t *testing.T) {
 		nodesField(&ast.Field{Name: &ast.Name{Value: "id"}}),
 	)
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
 	require.Equal(t, 2, cost.Depth)
 	require.Equal(t, 4, cost.Rows)
 	require.Equal(t, 3, cost.Complexity)
@@ -98,7 +98,7 @@ func TestEstimateCostConnection_PageInfoIgnored(t *testing.T) {
 		edgesWithNode(&ast.Field{Name: &ast.Name{Value: "id"}}),
 	)
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
 	require.Equal(t, 2, cost.Depth)
 	require.Equal(t, 4, cost.Rows)
 	require.Equal(t, 3, cost.Complexity)
@@ -123,7 +123,7 @@ func TestEstimateCostConnection_NestedConnections(t *testing.T) {
 		edgesWithNode(posts),
 	)
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
 	require.Equal(t, 4, cost.Depth)
 	require.Equal(t, 56, cost.Rows)
 	require.Equal(t, 33, cost.Complexity)
@@ -143,7 +143,7 @@ func TestEstimateCostConnection_OnlyPageInfo(t *testing.T) {
 		},
 	)
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
 	require.Equal(t, 1, cost.Depth)
 	require.Equal(t, 2, cost.Rows)
 	require.Equal(t, 2, cost.Complexity)
@@ -171,7 +171,33 @@ func TestEstimateCostConnection_EdgesCursorIgnored(t *testing.T) {
 		},
 	)
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
+	require.Equal(t, 2, cost.Depth)
+	require.Equal(t, 4, cost.Rows)
+	require.Equal(t, 3, cost.Complexity)
+}
+
+func TestEstimateCostConnection_FragmentSpread(t *testing.T) {
+	// conn(first:2) { ...ConnFrag }
+	// fragment ConnFrag on Connection { edges { node { id } } }
+	frag := &ast.FragmentDefinition{
+		Name: &ast.Name{Value: "ConnFrag"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				edgesWithNode(&ast.Field{Name: &ast.Name{Value: "id"}}),
+			},
+		},
+	}
+
+	field := connectionField("conn", "2",
+		&ast.FragmentSpread{Name: &ast.Name{Value: "ConnFrag"}},
+	)
+
+	fragments := map[string]ast.Definition{
+		"ConnFrag": frag,
+	}
+
+	cost := EstimateCost(field, nil, DefaultListLimit, fragments)
 	require.Equal(t, 2, cost.Depth)
 	require.Equal(t, 4, cost.Rows)
 	require.Equal(t, 3, cost.Complexity)
@@ -232,7 +258,7 @@ func TestEstimateCostScalarOnly(t *testing.T) {
 		},
 	}
 
-	cost := EstimateCost(field, nil, DefaultListLimit)
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
 	require.Equal(t, 2, cost.Depth)
 	require.Equal(t, 2, cost.Rows)
 	require.Equal(t, 2, cost.Complexity)

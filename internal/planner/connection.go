@@ -21,13 +21,13 @@ const (
 
 // ConnectionPlan holds the planned SQL for a connection query.
 type ConnectionPlan struct {
-	Root          SQLQuery             // main data query (first+1 rows)
-	Count         SQLQuery             // totalCount query (filter only, no cursor)
+	Root          SQLQuery // main data query (first+1 rows)
+	Count         SQLQuery // totalCount query (filter only, no cursor)
 	Table         introspection.Table
 	Columns       []introspection.Column // selected + orderBy + PK columns
 	OrderBy       *OrderBy
-	OrderByKey    string                     // GraphQL orderBy field name
-	CursorColumns []introspection.Column     // columns encoded in cursor
+	OrderByKey    string                 // GraphQL orderBy field name
+	CursorColumns []introspection.Column // columns encoded in cursor
 	First         int
 	HasCursor     bool // whether an after cursor was provided
 }
@@ -51,7 +51,7 @@ func PlanConnection(
 	}
 
 	if options.limits != nil {
-		cost := EstimateCost(field, args, defaultLimit)
+		cost := EstimateCost(field, args, defaultLimit, options.fragments)
 		if err := validateLimits(cost, *options.limits); err != nil {
 			return nil, err
 		}
@@ -169,7 +169,7 @@ func PlanOneToManyConnection(
 	}
 
 	if options.limits != nil {
-		cost := EstimateCost(field, args, defaultLimit)
+		cost := EstimateCost(field, args, defaultLimit, options.fragments)
 		if err := validateLimits(cost, *options.limits); err != nil {
 			return nil, err
 		}
@@ -310,9 +310,6 @@ func parseFirst(args map[string]interface{}) (int, error) {
 		if v > MaxConnectionLimit {
 			return MaxConnectionLimit, nil
 		}
-		if v == 0 {
-			return DefaultConnectionLimit, nil
-		}
 		return v, nil
 	case float64:
 		iv := int(v)
@@ -321,9 +318,6 @@ func parseFirst(args map[string]interface{}) (int, error) {
 		}
 		if iv > MaxConnectionLimit {
 			return MaxConnectionLimit, nil
-		}
-		if iv == 0 {
-			return DefaultConnectionLimit, nil
 		}
 		return iv, nil
 	default:

@@ -87,7 +87,7 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 	}
 
 	if options.limits != nil {
-		cost := EstimateCost(field, args, defaultLimit)
+		cost := EstimateCost(field, args, defaultLimit, options.fragments)
 		if err := validateLimits(cost, *options.limits); err != nil {
 			return nil, err
 		}

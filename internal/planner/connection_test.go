@@ -71,7 +71,7 @@ func TestBuildSeekConditionQualified(t *testing.T) {
 }
 
 func TestParseFirst_Defaults(t *testing.T) {
-	first, err := parseFirst(nil)
+	first, err := ParseFirst(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestParseFirst_Defaults(t *testing.T) {
 
 func TestParseFirst_Explicit(t *testing.T) {
 	args := map[string]interface{}{"first": 50}
-	first, err := parseFirst(args)
+	first, err := ParseFirst(args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestParseFirst_Explicit(t *testing.T) {
 
 func TestParseFirst_CapsAtMax(t *testing.T) {
 	args := map[string]interface{}{"first": 500}
-	first, err := parseFirst(args)
+	first, err := ParseFirst(args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestParseFirst_CapsAtMax(t *testing.T) {
 
 func TestParseFirst_Negative(t *testing.T) {
 	args := map[string]interface{}{"first": -1}
-	_, err := parseFirst(args)
+	_, err := ParseFirst(args)
 	if err == nil {
 		t.Fatal("expected error for negative first")
 	}
@@ -154,7 +154,7 @@ func TestCursorColumns(t *testing.T) {
 		Columns:   []string{"created_at", "id"},
 		Direction: "ASC",
 	}
-	cols := cursorColumns(table, orderBy)
+	cols := CursorColumns(table, orderBy)
 	if len(cols) != 2 {
 		t.Fatalf("expected 2 cursor columns, got %d", len(cols))
 	}
@@ -237,11 +237,27 @@ func TestPlanManyToManyConnection_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if plan.First != 2 {
+		t.Errorf("expected first=2, got %d", plan.First)
+	}
 	if !strings.Contains(plan.Root.SQL, "JOIN") {
 		t.Errorf("expected JOIN in SQL, got: %s", plan.Root.SQL)
 	}
 	if !strings.Contains(plan.Root.SQL, "`user_tags`") {
 		t.Errorf("expected junction table in SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Root.SQL, "LIMIT") {
+		t.Errorf("expected LIMIT in SQL, got: %s", plan.Root.SQL)
+	}
+	if len(plan.Root.Args) > 1 {
+		if plan.Root.Args[len(plan.Root.Args)-1] != 3 {
+			t.Errorf("expected last arg to be first+1 (3), got: %v", plan.Root.Args)
+		}
+	} else if !strings.Contains(plan.Root.SQL, "LIMIT 3") {
+		t.Errorf("expected LIMIT 3 in SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Count.SQL, "COUNT") {
+		t.Errorf("expected COUNT in count SQL, got: %s", plan.Count.SQL)
 	}
 }
 
@@ -277,10 +293,26 @@ func TestPlanEdgeListConnection_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if plan.First != 2 {
+		t.Errorf("expected first=2, got %d", plan.First)
+	}
 	if !strings.Contains(plan.Root.SQL, "`user_tags`") {
 		t.Errorf("expected junction table in SQL, got: %s", plan.Root.SQL)
 	}
 	if !strings.Contains(plan.Root.SQL, "`user_id`") {
 		t.Errorf("expected FK filter in SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Root.SQL, "LIMIT") {
+		t.Errorf("expected LIMIT in SQL, got: %s", plan.Root.SQL)
+	}
+	if len(plan.Root.Args) > 1 {
+		if plan.Root.Args[len(plan.Root.Args)-1] != 3 {
+			t.Errorf("expected last arg to be first+1 (3), got: %v", plan.Root.Args)
+		}
+	} else if !strings.Contains(plan.Root.SQL, "LIMIT 3") {
+		t.Errorf("expected LIMIT 3 in SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Count.SQL, "COUNT") {
+		t.Errorf("expected COUNT in count SQL, got: %s", plan.Count.SQL)
 	}
 }

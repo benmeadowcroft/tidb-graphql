@@ -62,7 +62,7 @@ func PlanConnection(
 		return nil, fmt.Errorf("connections require a primary key on table %s", table.Name)
 	}
 
-	first, err := parseFirst(args)
+	first, err := ParseFirst(args)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func PlanConnection(
 	typeName := introspection.GraphQLTypeName(table)
 
 	// Identify cursor columns (the columns encoded in the cursor).
-	cursorCols := cursorColumns(table, orderBy)
+	cursorCols := CursorColumns(table, orderBy)
 
 	// Parse after cursor
 	var seekCondition sq.Sqlizer
@@ -180,7 +180,7 @@ func PlanOneToManyConnection(
 		return nil, fmt.Errorf("connections require a primary key on table %s", table.Name)
 	}
 
-	first, err := parseFirst(args)
+	first, err := ParseFirst(args)
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,7 @@ func PlanOneToManyConnection(
 	orderByKey := OrderByKey(table, orderBy.Columns)
 	typeName := introspection.GraphQLTypeName(table)
 
-	cursorCols := cursorColumns(table, orderBy)
+	cursorCols := CursorColumns(table, orderBy)
 
 	// Parse after cursor
 	var seekCondition sq.Sqlizer
@@ -326,7 +326,7 @@ func PlanManyToManyConnection(
 		return nil, fmt.Errorf("connections require a primary key on table %s", targetTable.Name)
 	}
 
-	first, err := parseFirst(args)
+	first, err := ParseFirst(args)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +338,7 @@ func PlanManyToManyConnection(
 
 	orderByKey := OrderByKey(targetTable, orderBy.Columns)
 	typeName := introspection.GraphQLTypeName(targetTable)
-	cursorCols := cursorColumns(targetTable, orderBy)
+	cursorCols := CursorColumns(targetTable, orderBy)
 
 	// Parse after cursor
 	var seekCondition sq.Sqlizer
@@ -371,7 +371,7 @@ func PlanManyToManyConnection(
 	var whereClause *WhereClause
 	if whereArg, ok := args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = BuildWhereClause(targetTable, whereMap)
+			whereClause, err = BuildWhereClauseQualified(targetTable, targetTable.Name, whereMap)
 			if err != nil {
 				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
 			}
@@ -461,7 +461,7 @@ func PlanEdgeListConnection(
 		return nil, fmt.Errorf("connections require a primary key on table %s", junctionTable.Name)
 	}
 
-	first, err := parseFirst(args)
+	first, err := ParseFirst(args)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +473,7 @@ func PlanEdgeListConnection(
 
 	orderByKey := OrderByKey(junctionTable, orderBy.Columns)
 	typeName := introspection.GraphQLTypeName(junctionTable)
-	cursorCols := cursorColumns(junctionTable, orderBy)
+	cursorCols := CursorColumns(junctionTable, orderBy)
 
 	// Parse after cursor
 	var seekCondition sq.Sqlizer
@@ -731,7 +731,8 @@ func PlanEdgeListConnectionBatch(
 	)
 }
 
-func parseFirst(args map[string]interface{}) (int, error) {
+// ParseFirst extracts the "first" argument for connection queries.
+func ParseFirst(args map[string]interface{}) (int, error) {
 	if args == nil {
 		return DefaultConnectionLimit, nil
 	}
@@ -787,7 +788,9 @@ func parseConnectionOrderBy(table introspection.Table, args map[string]interface
 
 // cursorColumns returns the columns that make up the cursor value.
 // This is the orderBy columns (which already include PK tie-breaker from ParseOrderBy).
-func cursorColumns(table introspection.Table, orderBy *OrderBy) []introspection.Column {
+// CursorColumns returns the columns that make up the cursor value.
+// This is the orderBy columns (which already include PK tie-breaker from ParseOrderBy).
+func CursorColumns(table introspection.Table, orderBy *OrderBy) []introspection.Column {
 	cols := make([]introspection.Column, 0, len(orderBy.Columns))
 	for _, colName := range orderBy.Columns {
 		for _, tc := range table.Columns {

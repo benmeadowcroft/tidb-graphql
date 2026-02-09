@@ -524,11 +524,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: whereInput,
 					}
 				}
-				fields[connFieldName] = &graphql.Field{
-					Type:    graphql.NewNonNull(connType),
-					Args:    connArgs,
-					Resolve: r.makeOneToManyConnectionResolver(table, rel),
-				}
+				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeOneToManyConnectionResolver(table, rel))
 			}
 		} else if rel.IsManyToMany {
 			// Many-to-many through pure junction: returns list of related entities
@@ -582,11 +578,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: whereInput,
 					}
 				}
-				fields[connFieldName] = &graphql.Field{
-					Type:    graphql.NewNonNull(connType),
-					Args:    connArgs,
-					Resolve: r.makeManyToManyConnectionResolver(table, rel),
-				}
+				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeManyToManyConnectionResolver(table, rel))
 			}
 		} else if rel.IsEdgeList {
 			// Edge list through attribute junction: returns list of edge/junction objects
@@ -640,16 +632,20 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: whereInput,
 					}
 				}
-				fields[connFieldName] = &graphql.Field{
-					Type:    graphql.NewNonNull(connType),
-					Args:    connArgs,
-					Resolve: r.makeEdgeListConnectionResolver(table, rel),
-				}
+				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeEdgeListConnectionResolver(table, rel))
 			}
 		}
 	}
 
 	return fields
+}
+
+func addRelConnectionField(fields graphql.Fields, name string, connType *graphql.Object, args graphql.FieldConfigArgument, resolve graphql.FieldResolveFn) {
+	fields[name] = &graphql.Field{
+		Type:    graphql.NewNonNull(connType),
+		Args:    args,
+		Resolve: resolve,
+	}
 }
 
 // findTable finds a table by name in the schema
@@ -1741,6 +1737,7 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 			results = results[:plan.First]
 		}
 
+		seedBatchRows(p, results)
 		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
 	}
 }
@@ -1796,6 +1793,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			results = results[:plan.First]
 		}
 
+		seedBatchRows(p, results)
 		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
 	}
 }
@@ -1868,6 +1866,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			results = results[:plan.First]
 		}
 
+		seedBatchRows(p, results)
 		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
 	}
 }
@@ -2018,53 +2017,6 @@ func coerceNonNegativeInt(value interface{}) (int, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func parseConnectionFirstArg(args map[string]interface{}) (int, error) {
-	if args == nil {
-		return planner.DefaultConnectionLimit, nil
-	}
-	raw, ok := args["first"]
-	if !ok || raw == nil {
-		return planner.DefaultConnectionLimit, nil
-	}
-	switch v := raw.(type) {
-	case int:
-		if v < 0 {
-			return 0, fmt.Errorf("first must be non-negative")
-		}
-		if v > planner.MaxConnectionLimit {
-			return planner.MaxConnectionLimit, nil
-		}
-		return v, nil
-	case float64:
-		iv := int(v)
-		if iv < 0 {
-			return 0, fmt.Errorf("first must be non-negative")
-		}
-		if iv > planner.MaxConnectionLimit {
-			return planner.MaxConnectionLimit, nil
-		}
-		return iv, nil
-	default:
-		return 0, fmt.Errorf("first must be an integer")
-	}
-}
-
-func cursorColumnsForTable(table introspection.Table, orderBy *planner.OrderBy) []introspection.Column {
-	if orderBy == nil {
-		return nil
-	}
-	cols := make([]introspection.Column, 0, len(orderBy.Columns))
-	for _, colName := range orderBy.Columns {
-		for _, tc := range table.Columns {
-			if tc.Name == colName {
-				cols = append(cols, tc)
-				break
-			}
-		}
-	}
-	return cols
 }
 
 func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
@@ -2817,7 +2769,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		return nil, true, fmt.Errorf("missing field AST")
 	}
 
-	first, err := parseConnectionFirstArg(p.Args)
+	first, err := planner.ParseFirst(p.Args)
 	if err != nil {
 		return nil, true, err
 	}
@@ -2840,7 +2792,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	var whereClause *planner.WhereClause
 	if whereArg, ok := p.Args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClause(relatedTable, whereMap)
+			whereClause, err = planner.BuildWhereClauseQualified(relatedTable, relatedTable.Name, whereMap)
 			if err != nil {
 				return nil, true, err
 			}
@@ -2854,15 +2806,14 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 
 	selection := planner.SelectedColumnsForConnection(relatedTable, field, p.Info.Fragments, orderBy)
 	orderByKey := planner.OrderByKey(relatedTable, orderBy.Columns)
-	cursorCols := cursorColumnsForTable(relatedTable, orderBy)
+	cursorCols := planner.CursorColumns(relatedTable, orderBy)
 
 	relKey := fmt.Sprintf(
-		"%s|%s|%s|%s|%d|%s|%s|%s",
+		"%s|%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.RemoteTable,
 		rel.JunctionTable,
 		rel.RemoteColumn,
-		first,
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
@@ -2920,6 +2871,12 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 			whereClause,
 		)
 		if err != nil {
+			if errors.Is(err, planner.ErrNoPrimaryKey) {
+				if metrics != nil {
+					metrics.RecordBatchSkipped(p.Context, relationManyToMany, "no_primary_key")
+				}
+				return nil, false, nil
+			}
 			return nil, true, err
 		}
 		if planned.SQL == "" {
@@ -3035,7 +2992,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		return nil, true, fmt.Errorf("missing field AST")
 	}
 
-	first, err := parseConnectionFirstArg(p.Args)
+	first, err := planner.ParseFirst(p.Args)
 	if err != nil {
 		return nil, true, err
 	}
@@ -3072,14 +3029,13 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 
 	selection := planner.SelectedColumnsForConnection(junctionTable, field, p.Info.Fragments, orderBy)
 	orderByKey := planner.OrderByKey(junctionTable, orderBy.Columns)
-	cursorCols := cursorColumnsForTable(junctionTable, orderBy)
+	cursorCols := planner.CursorColumns(junctionTable, orderBy)
 
 	relKey := fmt.Sprintf(
-		"%s|%s|%s|%d|%s|%s|%s",
+		"%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.JunctionTable,
 		rel.JunctionLocalFK,
-		first,
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
@@ -3134,6 +3090,12 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 			whereClause,
 		)
 		if err != nil {
+			if errors.Is(err, planner.ErrNoPrimaryKey) {
+				if metrics != nil {
+					metrics.RecordBatchSkipped(p.Context, relationEdgeList, "no_primary_key")
+				}
+				return nil, false, nil
+			}
 			return nil, true, err
 		}
 		if planned.SQL == "" {

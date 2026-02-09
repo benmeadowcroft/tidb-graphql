@@ -2,7 +2,6 @@ package planner
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/graphql-go/graphql/language/ast"
 )
@@ -66,11 +65,61 @@ func validateLimits(cost PlanCost, limits PlanLimits) error {
 // isConnectionField returns true if the field uses Relay connection pagination
 // (has a "first" argument), indicating its children are connection wrappers
 // rather than actual data fields.
-func isConnectionField(field *ast.Field) bool {
+func isConnectionField(field *ast.Field, fragments map[string]ast.Definition) bool {
 	if field == nil || field.Name == nil {
 		return false
 	}
-	return hasFirstArg(field) || strings.HasSuffix(field.Name.Value, "Connection")
+	if hasFirstArg(field) {
+		return true
+	}
+	return hasConnectionSelections(field, fragments)
+}
+
+func hasConnectionSelections(field *ast.Field, fragments map[string]ast.Definition) bool {
+	if field == nil || field.SelectionSet == nil {
+		return false
+	}
+
+	var visit func(selections []ast.Selection) bool
+	visit = func(selections []ast.Selection) bool {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil {
+					continue
+				}
+				switch s.Name.Value {
+				case "edges", "nodes", "pageInfo":
+					return true
+				}
+				if s.SelectionSet != nil && visit(s.SelectionSet.Selections) {
+					return true
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil && visit(s.SelectionSet.Selections) {
+					return true
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				if visit(frag.SelectionSet.Selections) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	return visit(field.SelectionSet.Selections)
 }
 
 // connectionDataSelections extracts the actual data field selections from a
@@ -197,7 +246,7 @@ func selectionDepth(field *ast.Field, current int, fragments map[string]ast.Defi
 	// For connections, recurse into the unwrapped data fields so that
 	// wrapper levels (edges, node, pageInfo) don't inflate depth.
 	selections := field.SelectionSet.Selections
-	if isConnectionField(field) {
+	if isConnectionField(field, fragments) {
 		selections = connectionDataSelections(field, fragments)
 		if len(selections) == 0 {
 			return current
@@ -232,7 +281,7 @@ func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallba
 
 	// Unwrap connection scaffolding to count only real data fields.
 	selections := field.SelectionSet.Selections
-	if isConnectionField(field) {
+	if isConnectionField(field, fragments) {
 		selections = connectionDataSelections(field, fragments)
 		if len(selections) == 0 {
 			return rows
@@ -265,7 +314,7 @@ func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, 
 
 	// Unwrap connection scaffolding to count only real data fields.
 	selections := field.SelectionSet.Selections
-	if isConnectionField(field) {
+	if isConnectionField(field, fragments) {
 		selections = connectionDataSelections(field, fragments)
 		if len(selections) == 0 {
 			return complexity * limit

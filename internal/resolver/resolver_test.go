@@ -38,6 +38,15 @@ func assertNonNullListOfNonNullObject(t *testing.T, typ graphql.Type) {
 	require.True(t, ok, "expected Object, got %T", innerNonNull.OfType)
 }
 
+func hasArg(field *graphql.FieldDefinition, name string) bool {
+	for _, arg := range field.Args {
+		if arg != nil && arg.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestListResolver(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
@@ -237,6 +246,86 @@ func TestNodeResolver(t *testing.T) {
 	assert.Equal(t, introspection.GraphQLTypeName(users), record["__typename"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRelationshipConnectionFields_Wiring(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "name"},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "user_id"},
+		},
+	}
+	tags := introspection.Table{
+		Name: "tags",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	userTags := introspection.Table{
+		Name: "user_tags",
+		Columns: []introspection.Column{
+			{Name: "user_id", DataType: "int", IsPrimaryKey: true},
+			{Name: "tag_id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	renamePrimaryKeyID(&tags)
+	renamePrimaryKeyID(&userTags)
+
+	users.Relationships = []introspection.Relationship{
+		{
+			IsOneToMany:      true,
+			LocalColumn:      "id",
+			RemoteTable:      "posts",
+			RemoteColumn:     "user_id",
+			GraphQLFieldName: "posts",
+		},
+		{
+			IsManyToMany:     true,
+			LocalColumn:      "id",
+			RemoteTable:      "tags",
+			RemoteColumn:     "id",
+			JunctionTable:    "user_tags",
+			JunctionLocalFK:  "user_id",
+			JunctionRemoteFK: "tag_id",
+			GraphQLFieldName: "tags",
+		},
+		{
+			IsEdgeList:       true,
+			LocalColumn:      "id",
+			JunctionTable:    "user_tags",
+			JunctionLocalFK:  "user_id",
+			GraphQLFieldName: "userTags",
+		},
+	}
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts, tags, userTags}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	userType := r.buildGraphQLType(users)
+	fields := userType.Fields()
+
+	tagsConn, ok := fields["tagsConnection"]
+	require.True(t, ok, "expected tagsConnection field")
+	require.True(t, hasArg(tagsConn, "where"), "expected tagsConnection where arg")
+
+	userTagsConn, ok := fields["userTagsConnection"]
+	require.True(t, ok, "expected userTagsConnection field")
+	require.True(t, hasArg(userTagsConn, "where"), "expected userTagsConnection where arg")
+
+	postsConn, ok := fields["postsConnection"]
+	require.True(t, ok, "expected postsConnection field")
+	require.True(t, hasArg(postsConn, "where"), "expected postsConnection where arg")
 }
 
 func TestSchemaDescriptionsFromComments(t *testing.T) {

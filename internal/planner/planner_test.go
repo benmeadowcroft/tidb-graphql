@@ -273,6 +273,7 @@ func TestPlanManyToManyBatch(t *testing.T) {
 		10,
 		0,
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
@@ -290,7 +291,7 @@ func TestPlanEdgeListBatch_CompositePKOrder(t *testing.T) {
 		},
 	}
 
-	planned, err := PlanEdgeListBatch(table, "user_id", nil, []interface{}{1, 2}, 10, 0, nil)
+	planned, err := PlanEdgeListBatch(table, "user_id", nil, []interface{}{1, 2}, 10, 0, nil, nil)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
 		"SELECT `user_id`, `tag_id`, __batch_parent_id FROM (SELECT `user_id`, `tag_id`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `user_id`, `tag_id`) AS __rn FROM `user_tags` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",

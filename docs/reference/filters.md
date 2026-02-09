@@ -1,6 +1,6 @@
 # Filter language
 
-Filters are expressed with a `where` input object on list fields and one-to-many relationship fields.
+Filters are expressed with a `where` input object on list fields and relationship connection fields.
 JSON columns are excluded from `where` inputs.
 If a table has a primary key column named `id`, it is exposed as `databaseId` in filter inputs.
 

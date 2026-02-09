@@ -2,6 +2,7 @@ package planner
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/graphql-go/graphql/language/ast"
 )
@@ -66,7 +67,10 @@ func validateLimits(cost PlanCost, limits PlanLimits) error {
 // (has a "first" argument), indicating its children are connection wrappers
 // rather than actual data fields.
 func isConnectionField(field *ast.Field) bool {
-	return hasFirstArg(field)
+	if field == nil || field.Name == nil {
+		return false
+	}
+	return hasFirstArg(field) || strings.HasSuffix(field.Name.Value, "Connection")
 }
 
 // connectionDataSelections extracts the actual data field selections from a

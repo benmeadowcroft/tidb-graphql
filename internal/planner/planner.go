@@ -269,6 +269,7 @@ func PlanManyToManyBatch(
 	values []interface{},
 	limit, offset int,
 	orderBy *OrderBy,
+	where *WhereClause,
 ) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
@@ -296,8 +297,19 @@ func PlanManyToManyBatch(
 	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
 	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, partitionColumn, BatchParentAlias)
 
+	whereSQL := ""
+	var whereArgs []interface{}
+	if where != nil && where.Condition != nil {
+		condSQL, condArgs, err := where.Condition.ToSql()
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		whereSQL = " AND " + condSQL
+		whereArgs = condArgs
+	}
+
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
 		partitionColumn,
@@ -308,10 +320,13 @@ func PlanManyToManyBatch(
 		quotedTarget, quotedTargetPK,
 		quotedJunction, quotedLocalFK,
 		placeholders,
+		whereSQL,
 		BatchParentAlias,
 	)
 
-	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	args := append([]interface{}{}, values...)
+	args = append(args, whereArgs...)
+	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
@@ -323,6 +338,7 @@ func PlanEdgeListBatch(
 	values []interface{},
 	limit, offset int,
 	orderBy *OrderBy,
+	where *WhereClause,
 ) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
@@ -343,10 +359,21 @@ func PlanEdgeListBatch(
 	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
 	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
 
+	whereSQL := ""
+	var whereArgs []interface{}
+	if where != nil && where.Condition != nil {
+		condSQL, condArgs, err := where.Condition.ToSql()
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		whereSQL = " AND " + condSQL
+		whereArgs = condArgs
+	}
+
 	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
 	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedLocalFK, BatchParentAlias)
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
 		quotedLocalFK,
@@ -354,10 +381,13 @@ func PlanEdgeListBatch(
 		quotedTable,
 		quotedLocalFK,
 		placeholders,
+		whereSQL,
 		BatchParentAlias,
 	)
 
-	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	args := append([]interface{}{}, values...)
+	args = append(args, whereArgs...)
+	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"tidb-graphql/internal/introspection"
+
+	"github.com/graphql-go/graphql/language/ast"
 )
 
 func testTable() introspection.Table {
@@ -48,6 +50,20 @@ func TestBuildSeekCondition_DESC(t *testing.T) {
 	}
 	if !strings.Contains(sql, "<") {
 		t.Errorf("expected < operator for DESC, got: %s", sql)
+	}
+	if len(args) != 2 {
+		t.Errorf("expected 2 args, got %d", len(args))
+	}
+}
+
+func TestBuildSeekConditionQualified(t *testing.T) {
+	cond := BuildSeekConditionQualified("users", []string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, "ASC")
+	sql, args, err := cond.ToSql()
+	if err != nil {
+		t.Fatalf("ToSql error: %v", err)
+	}
+	if !strings.Contains(sql, "`users`.`created_at`") || !strings.Contains(sql, "`users`.`id`") {
+		t.Errorf("expected qualified columns in SQL, got: %s", sql)
 	}
 	if len(args) != 2 {
 		t.Errorf("expected 2 args, got %d", len(args))
@@ -196,5 +212,75 @@ func TestOrderByKey(t *testing.T) {
 	key = OrderByKey(table, []string{"created_at", "id"})
 	if key != "createdAt_databaseId" {
 		t.Errorf("expected createdAt_databaseId, got %s", key)
+	}
+}
+
+func TestPlanManyToManyConnection_Basic(t *testing.T) {
+	table := testTable()
+	field := &ast.Field{
+		Name: &ast.Name{Value: "usersConnection"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	args := map[string]interface{}{"first": 2}
+	plan, err := PlanManyToManyConnection(table, "user_tags", "user_id", "tag_id", "id", 7, field, args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(plan.Root.SQL, "JOIN") {
+		t.Errorf("expected JOIN in SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Root.SQL, "`user_tags`") {
+		t.Errorf("expected junction table in SQL, got: %s", plan.Root.SQL)
+	}
+}
+
+func TestPlanEdgeListConnection_Basic(t *testing.T) {
+	junction := introspection.Table{
+		Name: "user_tags",
+		Columns: []introspection.Column{
+			{Name: "user_id", IsPrimaryKey: true, GraphQLFieldName: "userId"},
+			{Name: "tag_id", IsPrimaryKey: true, GraphQLFieldName: "tagId"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"user_id", "tag_id"}},
+		},
+		GraphQLTypeName: "UserTag",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "tagsConnection"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "userId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	args := map[string]interface{}{"first": 2}
+	plan, err := PlanEdgeListConnection(junction, "user_id", 7, field, args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(plan.Root.SQL, "`user_tags`") {
+		t.Errorf("expected junction table in SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Root.SQL, "`user_id`") {
+		t.Errorf("expected FK filter in SQL, got: %s", plan.Root.SQL)
 	}
 }

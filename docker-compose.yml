@@ -51,7 +51,6 @@ services:
       - TIGQL_DATABASE_DATABASE=tidb_graphql_tutorial
       - TIGQL_SERVER_GRAPHIQL_ENABLED=true
       - TIGQL_SERVER_TLS_MODE=off
-      - TIGQL_OBSERVABILITY_LOGGING_LEVEL=debug
       - TIGQL_OBSERVABILITY_LOGGING_FORMAT=text
       - TIGQL_OBSERVABILITY_ENVIRONMENT=development
     depends_on:

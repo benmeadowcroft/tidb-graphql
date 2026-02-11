@@ -51,7 +51,7 @@ func TestCompositePK_TwoColumns(t *testing.T) {
 	assert.EqualValues(t, 100, item["orderId"])
 	assert.EqualValues(t, 2, item["productId"])
 	assert.EqualValues(t, 1, item["quantity"])
-	assert.EqualValues(t, 49.99, item["unitPrice"])
+	assert.EqualValues(t, 49.99, requireDecimalAsFloat64(t, item["unitPrice"]))
 }
 
 func TestCompositePK_ThreeColumns(t *testing.T) {

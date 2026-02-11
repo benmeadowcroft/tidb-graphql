@@ -51,7 +51,7 @@ func TestWhereFiltering_Eq(t *testing.T) {
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product with price 29.99")
 	for _, p := range products {
 		product := p.(map[string]interface{})
-		assert.Equal(t, 29.99, product["price"])
+		assert.Equal(t, 29.99, requireDecimalAsFloat64(t, product["price"]))
 	}
 }
 
@@ -90,7 +90,7 @@ func TestWhereFiltering_Gt(t *testing.T) {
 	// All products should have price > 50
 	for _, p := range products {
 		product := p.(map[string]interface{})
-		price := product["price"].(float64)
+		price := requireDecimalAsFloat64(t, product["price"])
 		assert.Greater(t, price, 50.0)
 	}
 }
@@ -131,7 +131,7 @@ func TestWhereFiltering_GteLte(t *testing.T) {
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product in range")
 	for _, p := range products {
 		product := p.(map[string]interface{})
-		price := product["price"].(float64)
+		price := requireDecimalAsFloat64(t, product["price"])
 		assert.GreaterOrEqual(t, price, 20.0)
 		assert.LessOrEqual(t, price, 50.0)
 	}
@@ -341,7 +341,7 @@ func TestWhereFiltering_AND(t *testing.T) {
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product matching both conditions")
 	for _, p := range products {
 		product := p.(map[string]interface{})
-		price := product["price"].(float64)
+		price := requireDecimalAsFloat64(t, product["price"])
 		id := int(product["databaseId"].(int))
 		assert.Greater(t, price, 20.0)
 		assert.GreaterOrEqual(t, id, 1)
@@ -392,7 +392,7 @@ func TestWhereFiltering_OR(t *testing.T) {
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product matching either condition")
 	for _, p := range products {
 		product := p.(map[string]interface{})
-		price := product["price"].(float64)
+		price := requireDecimalAsFloat64(t, product["price"])
 		assert.True(t, price < 25.0 || price > 100.0, "Product price should be < 25 OR > 100")
 	}
 }
@@ -447,7 +447,7 @@ func TestWhereFiltering_ComplexANDOR(t *testing.T) {
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product matching the complex condition")
 	for _, p := range products {
 		product := p.(map[string]interface{})
-		price := product["price"].(float64)
+		price := requireDecimalAsFloat64(t, product["price"])
 		inRange := price >= 20.0 && price <= 50.0
 		highPrice := price >= 100.0
 		assert.True(t, inRange || highPrice, "Product price should be in [20, 50] OR >= 100")

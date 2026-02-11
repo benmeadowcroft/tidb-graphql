@@ -605,7 +605,7 @@ func TestMutation_GeneratedColumnExcluded(t *testing.T) {
 	assert.EqualValues(t, 1, inventory["productId"])
 	assert.EqualValues(t, 100, inventory["quantity"])
 	// Generated column should be computed: 100 * 10.50 = 1050.00
-	assert.EqualValues(t, 1050.00, inventory["totalValue"])
+	assert.EqualValues(t, 1050.00, requireDecimalAsFloat64(t, inventory["totalValue"]))
 }
 
 func TestMutation_TransactionRollbackOnSecondMutation(t *testing.T) {

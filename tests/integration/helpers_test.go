@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,4 +182,23 @@ func tailString(buf *bytes.Buffer, max int) string {
 		return s
 	}
 	return s[len(s)-max:]
+}
+
+func requireDecimalAsFloat64(t *testing.T, value interface{}) float64 {
+	t.Helper()
+	switch v := value.(type) {
+	case float64:
+		return v
+	case string:
+		parsed, err := strconv.ParseFloat(v, 64)
+		require.NoError(t, err)
+		return parsed
+	case []byte:
+		parsed, err := strconv.ParseFloat(string(v), 64)
+		require.NoError(t, err)
+		return parsed
+	default:
+		t.Fatalf("unexpected decimal value type: %T", value)
+		return 0
+	}
 }

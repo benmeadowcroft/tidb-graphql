@@ -360,6 +360,13 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 			} else {
 				col.EnumValues = values
 			}
+		} else if strings.EqualFold(col.DataType, "set") {
+			values, err := parseSetValues(columnType)
+			if err != nil {
+				slog.Default().Warn("failed to parse set values", slog.String("column", col.Name), slog.String("type", columnType), slog.String("error", err.Error()))
+			} else {
+				col.EnumValues = values
+			}
 		}
 		columns = append(columns, col)
 	}

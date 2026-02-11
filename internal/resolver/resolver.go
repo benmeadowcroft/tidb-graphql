@@ -2172,6 +2172,10 @@ func (r *Resolver) enumFilterType(enumType *graphql.Enum) *graphql.InputObject {
 }
 
 func (r *Resolver) getFilterInputType(table introspection.Table, col introspection.Column) *graphql.InputObject {
+	// SET columns are represented as list-of-enum and are excluded from WHERE in phase 1.
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+		return nil
+	}
 	if enumType := r.enumTypeForColumn(table, &col); enumType != nil {
 		return r.enumFilterType(enumType)
 	}
@@ -3706,7 +3710,7 @@ func scanRows(rows dbexec.Rows, columns []introspection.Column) ([]map[string]in
 		row := make(map[string]interface{})
 		for i, col := range columns {
 			fieldName := introspection.GraphQLFieldName(col)
-			row[fieldName] = convertValue(values[i])
+			row[fieldName] = convertColumnValue(col, values[i])
 		}
 
 		results = append(results, row)
@@ -3734,7 +3738,7 @@ func scanRowsWithExtras(rows dbexec.Rows, columns []introspection.Column, extras
 		row := make(map[string]interface{}, totalColumns)
 		for i, col := range columns {
 			fieldName := introspection.GraphQLFieldName(col)
-			row[fieldName] = convertValue(values[i])
+			row[fieldName] = convertColumnValue(col, values[i])
 		}
 		for i, name := range extras {
 			row[name] = convertValue(values[len(columns)+i])
@@ -3785,7 +3789,51 @@ func convertValue(val interface{}) interface{} {
 	return val
 }
 
+func convertColumnValue(col introspection.Column, val interface{}) interface{} {
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+		return parseSetColumnValue(val)
+	}
+	return convertValue(val)
+}
+
+func parseSetColumnValue(val interface{}) interface{} {
+	if val == nil {
+		return nil
+	}
+
+	var raw string
+	switch v := val.(type) {
+	case []byte:
+		raw = string(v)
+	case string:
+		raw = v
+	default:
+		return convertValue(val)
+	}
+
+	if raw == "" {
+		return []string{}
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
 func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *introspection.Column) graphql.Output {
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+		if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+			return graphql.NewList(graphql.NewNonNull(enumType))
+		}
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
+	}
 	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
 		return enumType
 	}
@@ -3810,12 +3858,20 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 		return r.timeScalar()
 	case sqltype.TypeYear:
 		return r.yearScalar()
+	case sqltype.TypeSet:
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
 	default:
 		return graphql.String
 	}
 }
 
 func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *introspection.Column) graphql.Input {
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+		if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+			return graphql.NewList(graphql.NewNonNull(enumType))
+		}
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
+	}
 	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
 		return enumType
 	}
@@ -3840,6 +3896,8 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 		return r.timeScalar()
 	case sqltype.TypeYear:
 		return r.yearScalar()
+	case sqltype.TypeSet:
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
 	default:
 		return graphql.String
 	}

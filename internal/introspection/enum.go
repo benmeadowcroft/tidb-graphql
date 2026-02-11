@@ -8,16 +8,26 @@ import (
 // parseEnumValues interprets INFORMATION_SCHEMA.COLUMNS.COLUMN_TYPE without a DB round-trip,
 // so schema builds can carry enum metadata even when only metadata is available.
 func parseEnumValues(columnType string) ([]string, error) {
+	return parseQuotedValues(columnType, "enum")
+}
+
+// parseSetValues interprets INFORMATION_SCHEMA.COLUMNS.COLUMN_TYPE for SQL SET columns.
+func parseSetValues(columnType string) ([]string, error) {
+	return parseQuotedValues(columnType, "set")
+}
+
+func parseQuotedValues(columnType, typeName string) ([]string, error) {
 	trimmed := strings.TrimSpace(columnType)
-	if len(trimmed) < len("enum()") {
-		return nil, fmt.Errorf("invalid enum definition")
+	if len(trimmed) < len(typeName+"()") {
+		return nil, fmt.Errorf("invalid %s definition", typeName)
 	}
 	lower := strings.ToLower(trimmed)
-	if !strings.HasPrefix(lower, "enum(") || !strings.HasSuffix(lower, ")") {
-		return nil, fmt.Errorf("invalid enum prefix or suffix")
+	prefix := typeName + "("
+	if !strings.HasPrefix(lower, prefix) || !strings.HasSuffix(lower, ")") {
+		return nil, fmt.Errorf("invalid %s prefix or suffix", typeName)
 	}
 
-	definition := trimmed[len("enum(") : len(trimmed)-1]
+	definition := trimmed[len(prefix) : len(trimmed)-1]
 	values := []string{}
 	i := 0
 	for i < len(definition) {
@@ -68,7 +78,7 @@ func parseEnumValues(columnType string) ([]string, error) {
 	}
 
 	if len(values) == 0 {
-		return nil, fmt.Errorf("no enum values parsed")
+		return nil, fmt.Errorf("no %s values parsed", typeName)
 	}
 	return values, nil
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
@@ -13,6 +14,7 @@ import (
 	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/planner"
 	"tidb-graphql/internal/schemafilter"
+	"tidb-graphql/internal/sqltype"
 )
 
 func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.Table) graphql.Fields {
@@ -456,7 +458,11 @@ func collectInputColumns(table introspection.Table, input map[string]interface{}
 		if !ok {
 			continue
 		}
-		handle(col, value)
+		normalized, err := normalizeMutationInputValue(col, value)
+		if err != nil {
+			return err
+		}
+		handle(col, normalized)
 		seen[fieldName] = struct{}{}
 	}
 
@@ -469,6 +475,58 @@ func collectInputColumns(table introspection.Table, input map[string]interface{}
 	}
 
 	return nil
+}
+
+func normalizeMutationInputValue(col introspection.Column, value interface{}) (interface{}, error) {
+	if sqltype.MapToGraphQL(col.DataType) != sqltype.TypeSet {
+		return value, nil
+	}
+	return normalizeSetInputValue(col, value)
+}
+
+func normalizeSetInputValue(col introspection.Column, value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	var provided []string
+	switch v := value.(type) {
+	case []interface{}:
+		provided = make([]string, 0, len(v))
+		for _, item := range v {
+			strVal, ok := item.(string)
+			if !ok {
+				return nil, newMutationError("set values must be strings", "invalid_input", 0)
+			}
+			provided = append(provided, strVal)
+		}
+	case []string:
+		provided = append([]string(nil), v...)
+	default:
+		return nil, newMutationError("set values must be a list", "invalid_input", 0)
+	}
+
+	allowed := make(map[string]struct{}, len(col.EnumValues))
+	for _, item := range col.EnumValues {
+		allowed[item] = struct{}{}
+	}
+
+	selected := make(map[string]struct{}, len(provided))
+	for _, item := range provided {
+		if _, ok := allowed[item]; !ok {
+			return nil, newMutationError("invalid set value: "+item, "invalid_input", 0)
+		}
+		selected[item] = struct{}{}
+	}
+
+	ordered := make([]string, 0, len(selected))
+	for _, option := range col.EnumValues {
+		if _, ok := selected[option]; ok {
+			ordered = append(ordered, option)
+		}
+	}
+
+	return strings.Join(ordered, ","), nil
 }
 
 func pkValuesFromArgs(table introspection.Table, pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {

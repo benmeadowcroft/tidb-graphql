@@ -485,6 +485,32 @@ func TestDateFieldType(t *testing.T) {
 	assert.Equal(t, "Date", nonNull.OfType.Name())
 }
 
+func TestSetFieldType(t *testing.T) {
+	table := introspection.Table{
+		Name: "products",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "tags", DataType: "set", EnumValues: []string{"featured", "sale", "clearance"}, IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	fields := objType.Fields()
+
+	nonNull, ok := fields["tags"].Type.(*graphql.NonNull)
+	require.True(t, ok)
+
+	listType, ok := nonNull.OfType.(*graphql.List)
+	require.True(t, ok)
+	itemNonNull, ok := listType.OfType.(*graphql.NonNull)
+	require.True(t, ok)
+	enumType, ok := itemNonNull.OfType.(*graphql.Enum)
+	require.True(t, ok)
+	assert.Equal(t, "ProductTags", enumType.Name())
+}
+
 func TestTimeFieldType(t *testing.T) {
 	table := introspection.Table{
 		Name: "events",
@@ -631,6 +657,23 @@ func TestYearFilterType(t *testing.T) {
 	assert.Nil(t, fields["notLike"])
 }
 
+func TestSetFilterTypeSkipped(t *testing.T) {
+	table := introspection.Table{
+		Name: "products",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsNullable: false},
+			{Name: "tags", DataType: "set", EnumValues: []string{"featured", "sale"}},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	whereType := r.whereInput(table)
+	require.NotNil(t, whereType)
+	fields := whereType.Fields()
+	assert.Nil(t, fields["tags"])
+}
+
 func TestDateScalarSerialize(t *testing.T) {
 	input := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	serialized := scalars.Date().Serialize(input)
@@ -647,6 +690,30 @@ func TestConvertValue_PreservesTime(t *testing.T) {
 	now := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
 	converted := convertValue(now)
 	assert.Equal(t, now, converted)
+}
+
+func TestParseSetColumnValue(t *testing.T) {
+	assert.Equal(t, []string{"featured", "sale"}, parseSetColumnValue("featured,sale"))
+	assert.Equal(t, []string{}, parseSetColumnValue(""))
+	assert.Equal(t, []string{"featured"}, parseSetColumnValue([]byte("featured")))
+}
+
+func TestMapInputColumns_SetValueNormalization(t *testing.T) {
+	table := introspection.Table{
+		Name: "products",
+		Columns: []introspection.Column{
+			{Name: "tags", DataType: "set", EnumValues: []string{"featured", "sale", "clearance"}},
+		},
+	}
+	input := map[string]interface{}{
+		"tags": []interface{}{"sale", "featured", "sale"},
+	}
+	allowed := map[string]bool{"tags": true}
+
+	cols, vals, err := mapInputColumns(table, input, allowed)
+	require.NoError(t, err)
+	require.Equal(t, []string{"tags"}, cols)
+	require.Equal(t, []interface{}{"featured,sale"}, vals)
 }
 
 func TestManyToOneResolver(t *testing.T) {

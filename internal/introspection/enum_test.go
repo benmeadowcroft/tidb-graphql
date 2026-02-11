@@ -35,3 +35,15 @@ func TestParseEnumValuesWhitespace(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"a", "b"}, values)
 }
+
+func TestParseSetValuesSimple(t *testing.T) {
+	values, err := parseSetValues("set('red','green','blue')")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"red", "green", "blue"}, values)
+}
+
+func TestParseSetValuesEscapes(t *testing.T) {
+	values, err := parseSetValues("SET('in\\'progress','it''s','a,b')")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"in'progress", "it's", "a,b"}, values)
+}

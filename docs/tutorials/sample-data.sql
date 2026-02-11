@@ -39,6 +39,7 @@ CREATE TABLE products (
   sku VARCHAR(64) NOT NULL COMMENT 'Stock keeping unit.',
   name VARCHAR(255) NOT NULL COMMENT 'Product name.',
   price DECIMAL(10,2) NOT NULL COMMENT 'Price in dollars (two decimal places).',
+  tags SET('featured','new','clearance','seasonal','limited') NOT NULL DEFAULT '' COMMENT 'Optional merchandising tags for storefront merchandising and campaigns.',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC).',
   last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Row update time (UTC).',
   UNIQUE KEY uq_products_sku (sku),
@@ -215,6 +216,17 @@ INSERT INTO products (sku, name, price) VALUES
   ('SKU-1018', 'Bluetooth Speaker', 68.00),
   ('SKU-1019', 'Whiteboard', 27.00),
   ('SKU-1020', 'Water-resistant Notebook', 16.00);
+
+-- Most rows keep the empty set (default). Assign a handful with single and multi-value combinations.
+UPDATE products SET tags = 'new' WHERE sku IN ('SKU-1001', 'SKU-1010');
+UPDATE products SET tags = 'featured' WHERE sku = 'SKU-1007';
+UPDATE products SET tags = 'clearance' WHERE sku = 'SKU-1019';
+UPDATE products SET tags = 'seasonal' WHERE sku = 'SKU-1015';
+UPDATE products SET tags = 'limited' WHERE sku = 'SKU-1013';
+UPDATE products SET tags = 'featured,new' WHERE sku = 'SKU-1003';
+UPDATE products SET tags = 'seasonal,featured' WHERE sku = 'SKU-1018';
+UPDATE products SET tags = 'clearance,limited' WHERE sku = 'SKU-1012';
+UPDATE products SET tags = 'new,seasonal,featured' WHERE sku = 'SKU-1005';
 
 CREATE TEMPORARY TABLE product_category_seeds (
   sku VARCHAR(64) NOT NULL,

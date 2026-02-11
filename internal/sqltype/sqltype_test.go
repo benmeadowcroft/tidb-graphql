@@ -99,7 +99,6 @@ func TestMapToGraphQL_StringTypes(t *testing.T) {
 		"BINARY", "binary",
 		"VARBINARY", "varbinary",
 		"ENUM", "enum",
-		"SET", "set",
 	}
 
 	for _, sqlType := range stringTypes {
@@ -164,6 +163,20 @@ func TestMapToGraphQL_YearTypes(t *testing.T) {
 			assert.Equal(t, TypeYear, MapToGraphQL(sqlType))
 			assert.Equal(t, "Year", MapToGraphQL(sqlType).String())
 			assert.Equal(t, "YearFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_SetTypes(t *testing.T) {
+	setTypes := []string{
+		"SET", "set",
+	}
+
+	for _, sqlType := range setTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeSet, MapToGraphQL(sqlType))
+			assert.Equal(t, "Set", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "StringFilter", MapToGraphQL(sqlType).FilterTypeName())
 		})
 	}
 }
@@ -263,6 +276,7 @@ func TestIsNumeric(t *testing.T) {
 		{TypeDateTime, false},
 		{TypeTime, false},
 		{TypeYear, false},
+		{TypeSet, false},
 	}
 
 	for _, tc := range testCases {
@@ -288,6 +302,7 @@ func TestIsComparable(t *testing.T) {
 		{TypeDateTime, true},
 		{TypeTime, true},
 		{TypeYear, true},
+		{TypeSet, true},
 	}
 
 	for _, tc := range testCases {

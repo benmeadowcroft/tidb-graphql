@@ -30,6 +30,8 @@ const (
 	TypeTime
 	// TypeYear represents year data types.
 	TypeYear
+	// TypeSet represents SQL SET data types.
+	TypeSet
 )
 
 // MapToGraphQL converts a SQL data type string to its corresponding GraphQL type category.
@@ -63,8 +65,10 @@ func MapToGraphQL(sqlType string) GraphQLType {
 	case "CHAR", "VARCHAR", "TINYTEXT", "TEXT",
 		"MEDIUMTEXT", "LONGTEXT", "BLOB", "TINYBLOB",
 		"MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY",
-		"ENUM", "SET":
+		"ENUM":
 		return TypeString
+	case "SET":
+		return TypeSet
 	// Date and Time Data Types
 	case "DATE":
 		return TypeDate
@@ -102,6 +106,8 @@ func (t GraphQLType) String() string {
 		return "Time"
 	case TypeYear:
 		return "Year"
+	case TypeSet:
+		return "Set"
 	default:
 		return "String"
 	}
@@ -128,6 +134,8 @@ func (t GraphQLType) FilterTypeName() string {
 		return "TimeFilter"
 	case TypeYear:
 		return "YearFilter"
+	case TypeSet:
+		return "StringFilter"
 	default:
 		// JSON and String both use StringFilter (JSON columns are skipped in WHERE)
 		return "StringFilter"

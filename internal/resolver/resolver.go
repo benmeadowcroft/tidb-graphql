@@ -6,16 +6,12 @@ package resolver
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"tidb-graphql/internal/cursor"
 	"tidb-graphql/internal/dbexec"
@@ -24,6 +20,7 @@ import (
 	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/observability"
 	"tidb-graphql/internal/planner"
+	"tidb-graphql/internal/scalars"
 	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/schemanaming"
 	"tidb-graphql/internal/sqltype"
@@ -54,6 +51,7 @@ type Resolver struct {
 	orderDirection     *graphql.Enum
 	nonNegativeInt     *graphql.Scalar
 	bigIntType         *graphql.Scalar
+	decimalType        *graphql.Scalar
 	jsonType           *graphql.Scalar
 	dateType           *graphql.Scalar
 	nodeInterface      *graphql.Interface
@@ -1335,33 +1333,7 @@ func (r *Resolver) nonNegativeIntScalar() *graphql.Scalar {
 		return cached
 	}
 
-	scalar := graphql.NewScalar(graphql.ScalarConfig{
-		Name:        "NonNegativeInt",
-		Description: "An integer greater than or equal to zero.",
-		Serialize: func(value interface{}) interface{} {
-			if parsed, ok := coerceNonNegativeInt(value); ok {
-				return parsed
-			}
-			return nil
-		},
-		ParseValue: func(value interface{}) interface{} {
-			if parsed, ok := coerceNonNegativeInt(value); ok {
-				return parsed
-			}
-			return nil
-		},
-		ParseLiteral: func(valueAST ast.Value) interface{} {
-			intValue, ok := valueAST.(*ast.IntValue)
-			if !ok {
-				return nil
-			}
-			parsed, err := strconv.Atoi(intValue.Value)
-			if err != nil || parsed < 0 {
-				return nil
-			}
-			return parsed
-		},
-	})
+	scalar := scalars.NonNegativeInt()
 
 	r.mu.Lock()
 	if r.nonNegativeInt == nil {
@@ -1381,39 +1353,7 @@ func (r *Resolver) jsonScalar() *graphql.Scalar {
 		return cached
 	}
 
-	scalar := graphql.NewScalar(graphql.ScalarConfig{
-		Name:        "JSON",
-		Description: "Arbitrary JSON value serialized as a string.",
-		Serialize: func(value interface{}) interface{} {
-			switch v := value.(type) {
-			case []byte:
-				return string(v)
-			case string:
-				return v
-			case nil:
-				return nil
-			default:
-				serialized, err := json.Marshal(v)
-				if err != nil {
-					slog.Default().Warn("failed to serialize JSON scalar", slog.String("error", err.Error()))
-					return nil
-				}
-				return string(serialized)
-			}
-		},
-		ParseValue: func(value interface{}) interface{} {
-			if s, ok := value.(string); ok {
-				return s
-			}
-			return nil
-		},
-		ParseLiteral: func(valueAST ast.Value) interface{} {
-			if sv, ok := valueAST.(*ast.StringValue); ok {
-				return sv.Value
-			}
-			return nil
-		},
-	})
+	scalar := scalars.JSON()
 
 	r.mu.Lock()
 	if r.jsonType == nil {
@@ -1433,116 +1373,33 @@ func (r *Resolver) bigIntScalar() *graphql.Scalar {
 		return cached
 	}
 
-	scalar := graphql.NewScalar(graphql.ScalarConfig{
-		Name:        "BigInt",
-		Description: "64-bit integer value serialized as a string.",
-		Serialize: func(value interface{}) interface{} {
-			switch v := value.(type) {
-			case int:
-				return strconv.FormatInt(int64(v), 10)
-			case int8:
-				return strconv.FormatInt(int64(v), 10)
-			case int16:
-				return strconv.FormatInt(int64(v), 10)
-			case int32:
-				return strconv.FormatInt(int64(v), 10)
-			case int64:
-				return strconv.FormatInt(v, 10)
-			case uint:
-				return strconv.FormatUint(uint64(v), 10)
-			case uint8:
-				return strconv.FormatUint(uint64(v), 10)
-			case uint16:
-				return strconv.FormatUint(uint64(v), 10)
-			case uint32:
-				return strconv.FormatUint(uint64(v), 10)
-			case uint64:
-				return strconv.FormatUint(v, 10)
-			case float64:
-				if v != math.Trunc(v) {
-					return nil
-				}
-				return strconv.FormatInt(int64(v), 10)
-			case string:
-				if _, err := strconv.ParseInt(v, 10, 64); err == nil {
-					return v
-				}
-				return nil
-			case []byte:
-				strVal := string(v)
-				if _, err := strconv.ParseInt(strVal, 10, 64); err == nil {
-					return strVal
-				}
-				return nil
-			default:
-				return nil
-			}
-		},
-		ParseValue: func(value interface{}) interface{} {
-			switch v := value.(type) {
-			case int:
-				return int64(v)
-			case int8:
-				return int64(v)
-			case int16:
-				return int64(v)
-			case int32:
-				return int64(v)
-			case int64:
-				return v
-			case uint:
-				return int64(v)
-			case uint8:
-				return int64(v)
-			case uint16:
-				return int64(v)
-			case uint32:
-				return int64(v)
-			case uint64:
-				if v > math.MaxInt64 {
-					return nil
-				}
-				return int64(v)
-			case float64:
-				if v != math.Trunc(v) {
-					return nil
-				}
-				return int64(v)
-			case string:
-				parsed, err := strconv.ParseInt(v, 10, 64)
-				if err != nil {
-					return nil
-				}
-				return parsed
-			default:
-				return nil
-			}
-		},
-		ParseLiteral: func(valueAST ast.Value) interface{} {
-			switch v := valueAST.(type) {
-			case *ast.IntValue:
-				parsed, err := strconv.ParseInt(v.Value, 10, 64)
-				if err != nil {
-					return nil
-				}
-				return parsed
-			case *ast.StringValue:
-				parsed, err := strconv.ParseInt(v.Value, 10, 64)
-				if err != nil {
-					return nil
-				}
-				return parsed
-			default:
-				return nil
-			}
-		},
-	})
+	scalar := scalars.BigInt()
 
 	r.mu.Lock()
 	if r.bigIntType == nil {
 		r.bigIntType = scalar
 	}
 	cached = r.bigIntType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) decimalScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.decimalType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Decimal()
+
+	r.mu.Lock()
+	if r.decimalType == nil {
+		r.decimalType = scalar
+	}
+	cached = r.decimalType
 	r.mu.Unlock()
 
 	return cached
@@ -1556,50 +1413,7 @@ func (r *Resolver) dateScalar() *graphql.Scalar {
 		return cached
 	}
 
-	scalar := graphql.NewScalar(graphql.ScalarConfig{
-		Name:        "Date",
-		Description: "Date value serialized as YYYY-MM-DD.",
-		Serialize: func(value interface{}) interface{} {
-			switch v := value.(type) {
-			case time.Time:
-				return v.UTC().Format("2006-01-02")
-			case *time.Time:
-				if v == nil {
-					return nil
-				}
-				return v.UTC().Format("2006-01-02")
-			default:
-				return nil
-			}
-		},
-		ParseValue: func(value interface{}) interface{} {
-			switch v := value.(type) {
-			case time.Time:
-				return v
-			case string:
-				if parsed, err := time.Parse("2006-01-02", v); err == nil {
-					return parsed
-				}
-				if parsed, err := time.Parse(time.RFC3339, v); err == nil {
-					return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC)
-				}
-				return nil
-			default:
-				return nil
-			}
-		},
-		ParseLiteral: func(valueAST ast.Value) interface{} {
-			if sv, ok := valueAST.(*ast.StringValue); ok {
-				if parsed, err := time.Parse("2006-01-02", sv.Value); err == nil {
-					return parsed
-				}
-				if parsed, err := time.Parse(time.RFC3339, sv.Value); err == nil {
-					return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.UTC)
-				}
-			}
-			return nil
-		},
-	})
+	scalar := scalars.Date()
 
 	r.mu.Lock()
 	if r.dateType == nil {
@@ -2121,28 +1935,6 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 	return connMap
 }
 
-func coerceNonNegativeInt(value interface{}) (int, bool) {
-	switch v := value.(type) {
-	case int:
-		if v < 0 {
-			return 0, false
-		}
-		return v, true
-	case int64:
-		if v < 0 || v > math.MaxInt {
-			return 0, false
-		}
-		return int(v), true
-	case float64:
-		if v < 0 || v > math.MaxInt || v != math.Trunc(v) {
-			return 0, false
-		}
-		return int(v), true
-	default:
-		return 0, false
-	}
-}
-
 func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 	if table.IsView {
 		return nil
@@ -2382,6 +2174,21 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 				"gte":    &graphql.InputObjectFieldConfig{Type: r.bigIntScalar()},
 				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bigIntScalar()))},
 				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bigIntScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "DecimalFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "DecimalFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.decimalScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.decimalScalar()))},
 				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 			},
 		})
@@ -3919,6 +3726,8 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 		return r.bigIntScalar()
 	case sqltype.TypeFloat:
 		return graphql.Float
+	case sqltype.TypeDecimal:
+		return r.decimalScalar()
 	case sqltype.TypeBoolean:
 		return graphql.Boolean
 	case sqltype.TypeDate:
@@ -3943,6 +3752,8 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 		return r.bigIntScalar()
 	case sqltype.TypeFloat:
 		return graphql.Float
+	case sqltype.TypeDecimal:
+		return r.decimalScalar()
 	case sqltype.TypeBoolean:
 		return graphql.Boolean
 	case sqltype.TypeDate:

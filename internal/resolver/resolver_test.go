@@ -13,6 +13,7 @@ import (
 	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/planner"
+	"tidb-graphql/internal/scalars"
 	"tidb-graphql/internal/schemafilter"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
@@ -537,9 +538,8 @@ func TestDateFilterType(t *testing.T) {
 }
 
 func TestDateScalarSerialize(t *testing.T) {
-	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 	input := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
-	serialized := r.dateScalar().Serialize(input)
+	serialized := scalars.Date().Serialize(input)
 	assert.Equal(t, "2024-01-15", serialized)
 }
 

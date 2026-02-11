@@ -100,6 +100,19 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		default:
 			return nil, fmt.Errorf("invalid float value for %s", col.Name)
 		}
+	case sqltype.TypeDecimal:
+		switch v := raw.(type) {
+		case string:
+			return v, nil
+		case []byte:
+			return string(v), nil
+		case float64:
+			return strconv.FormatFloat(v, 'f', -1, 64), nil
+		case float32:
+			return strconv.FormatFloat(float64(v), 'f', -1, 32), nil
+		default:
+			return fmt.Sprintf("%v", v), nil
+		}
 	case sqltype.TypeBoolean:
 		switch v := raw.(type) {
 		case bool:

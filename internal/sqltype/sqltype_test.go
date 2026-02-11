@@ -44,8 +44,6 @@ func TestMapToGraphQL_FloatTypes(t *testing.T) {
 	floatTypes := []string{
 		"FLOAT", "float",
 		"DOUBLE", "double",
-		"DECIMAL", "decimal",
-		"NUMERIC", "numeric",
 	}
 
 	for _, sqlType := range floatTypes {
@@ -57,6 +55,20 @@ func TestMapToGraphQL_FloatTypes(t *testing.T) {
 	}
 }
 
+func TestMapToGraphQL_DecimalTypes(t *testing.T) {
+	decimalTypes := []string{
+		"DECIMAL", "decimal",
+		"NUMERIC", "numeric",
+	}
+
+	for _, sqlType := range decimalTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeDecimal, MapToGraphQL(sqlType))
+			assert.Equal(t, "Decimal", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "DecimalFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
 func TestMapToGraphQL_BooleanTypes(t *testing.T) {
 	boolTypes := []string{
 		"BOOL", "bool",
@@ -192,8 +204,8 @@ func TestMapToGraphQL_WithSizeSpecifiers(t *testing.T) {
 		{"varchar(255)", TypeString, "String"},
 		{"VARCHAR(100)", TypeString, "String"},
 		{"char(10)", TypeString, "String"},
-		{"decimal(10,2)", TypeFloat, "Float"},
-		{"DECIMAL(18,4)", TypeFloat, "Float"},
+		{"decimal(10,2)", TypeDecimal, "Decimal"},
+		{"DECIMAL(18,4)", TypeDecimal, "Decimal"},
 		{"int(11)", TypeInt, "Int"},
 		{"INT(10)", TypeInt, "Int"},
 		{"bigint(20)", TypeBigInt, "BigInt"},
@@ -217,6 +229,7 @@ func TestIsNumeric(t *testing.T) {
 		{TypeInt, true},
 		{TypeBigInt, true},
 		{TypeFloat, true},
+		{TypeDecimal, true},
 		{TypeString, false},
 		{TypeBoolean, false},
 		{TypeJSON, false},
@@ -239,6 +252,7 @@ func TestIsComparable(t *testing.T) {
 		{TypeInt, true},
 		{TypeBigInt, true},
 		{TypeFloat, true},
+		{TypeDecimal, true},
 		{TypeString, true},
 		{TypeBoolean, true},
 		{TypeJSON, false}, // JSON is not comparable

@@ -16,6 +16,8 @@ const (
 	TypeBigInt
 	// TypeFloat represents floating-point and fixed-point numeric types.
 	TypeFloat
+	// TypeDecimal represents fixed-point numeric types that should preserve precision.
+	TypeDecimal
 	// TypeBoolean represents boolean types.
 	TypeBoolean
 	// TypeJSON represents JSON data types.
@@ -46,7 +48,7 @@ func MapToGraphQL(sqlType string) GraphQLType {
 		return TypeFloat
 	// Fixed-Point Numeric Data Types
 	case "DECIMAL", "NUMERIC":
-		return TypeFloat
+		return TypeDecimal
 	// Boolean Data Type
 	case "BOOL", "BOOLEAN":
 		return TypeBoolean
@@ -80,6 +82,8 @@ func (t GraphQLType) String() string {
 		return "BigInt"
 	case TypeFloat:
 		return "Float"
+	case TypeDecimal:
+		return "Decimal"
 	case TypeBoolean:
 		return "Boolean"
 	case TypeJSON:
@@ -102,6 +106,8 @@ func (t GraphQLType) FilterTypeName() string {
 		return "BigIntFilter"
 	case TypeFloat:
 		return "FloatFilter"
+	case TypeDecimal:
+		return "DecimalFilter"
 	case TypeBoolean:
 		return "BooleanFilter"
 	case TypeDate:
@@ -116,7 +122,7 @@ func (t GraphQLType) FilterTypeName() string {
 
 // IsNumeric returns true if the type can be used with AVG/SUM aggregations.
 func (t GraphQLType) IsNumeric() bool {
-	return t == TypeInt || t == TypeBigInt || t == TypeFloat
+	return t == TypeInt || t == TypeBigInt || t == TypeFloat || t == TypeDecimal
 }
 
 // IsComparable returns true if the type can be used with MIN/MAX aggregations.

@@ -88,7 +88,8 @@ SQL types are mapped to GraphQL scalars:
 
 - `int`, `serial` -> `Int`
 - `bigint` -> `BigInt` (custom scalar, serialized as a string)
-- `float`, `double`, `decimal` -> `Float`
+- `float`, `double` -> `Float`
+- `decimal`, `numeric` -> `Decimal` (custom scalar, serialized as a string)
 - `bool` -> `Boolean`
 - `json` -> `JSON` (custom scalar)
 - `enum` -> GraphQL enum named `<SingularTable><Column>` (e.g., `users.status` -> `UserStatus`)

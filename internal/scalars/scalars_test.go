@@ -54,6 +54,16 @@ func TestDateScalar(t *testing.T) {
 	parsedRFCTime := parsedRFC.(time.Time)
 	assert.Equal(t, "2024-01-02", parsedRFCTime.Format("2006-01-02"))
 	assert.Equal(t, 0, parsedRFCTime.Hour())
+
+	minDate := scalar.ParseValue("0000-01-01")
+	require.IsType(t, time.Time{}, minDate)
+	assert.Equal(t, "0000-01-01", minDate.(time.Time).Format("2006-01-02"))
+
+	maxDate := scalar.ParseValue("9999-12-31")
+	require.IsType(t, time.Time{}, maxDate)
+	assert.Equal(t, "9999-12-31", maxDate.(time.Time).Format("2006-01-02"))
+
+	assert.Nil(t, scalar.ParseValue("10000-01-01"))
 }
 
 func TestJSONScalar(t *testing.T) {
@@ -82,4 +92,32 @@ func TestNonNegativeIntScalar(t *testing.T) {
 
 	literal := scalar.ParseLiteral(&ast.IntValue{Value: "7"})
 	assert.Equal(t, 7, literal)
+}
+
+func TestTimeScalar(t *testing.T) {
+	scalar := Time()
+
+	assert.Equal(t, "11:12:00", scalar.ParseValue("11:12"))
+	assert.Equal(t, "00:11:12", scalar.ParseValue("1112"))
+	assert.Equal(t, "-838:59:59.000000", scalar.ParseValue("-838:59:59.000000"))
+	assert.Equal(t, "05:06:07.89", scalar.ParseValue("05:06:07.89"))
+	assert.Equal(t, "01:01:01", scalar.Serialize([]byte("1:1:1")))
+
+	assert.Nil(t, scalar.ParseValue("839:00:00"))
+	assert.Nil(t, scalar.ParseValue("12:60:00"))
+	assert.Nil(t, scalar.ParseValue("25:00:00.1234567"))
+	assert.Nil(t, scalar.ParseValue("not-a-time"))
+}
+
+func TestYearScalar(t *testing.T) {
+	scalar := Year()
+
+	assert.Equal(t, "2026", scalar.ParseValue("2026"))
+	assert.Equal(t, "0000", scalar.ParseValue(0))
+	assert.Equal(t, "2155", scalar.Serialize(int64(2155)))
+
+	assert.Nil(t, scalar.ParseValue("99"))
+	assert.Nil(t, scalar.ParseValue(2156))
+	assert.Nil(t, scalar.ParseValue(-1))
+	assert.Nil(t, scalar.ParseValue("abcd"))
 }

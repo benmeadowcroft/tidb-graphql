@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/graphql-go/graphql"
@@ -279,6 +281,94 @@ func Date() *graphql.Scalar {
 	})
 }
 
+func Time() *graphql.Scalar {
+	return graphql.NewScalar(graphql.ScalarConfig{
+		Name:        "Time",
+		Description: "Time value serialized as HH:MM:SS[.fraction]. Supports TiDB TIME range -838:59:59.000000 to 838:59:59.000000.",
+		Serialize: func(value interface{}) interface{} {
+			switch v := value.(type) {
+			case string:
+				normalized, ok := normalizeTiDBTime(v)
+				if !ok {
+					return nil
+				}
+				return normalized
+			case []byte:
+				normalized, ok := normalizeTiDBTime(string(v))
+				if !ok {
+					return nil
+				}
+				return normalized
+			default:
+				return nil
+			}
+		},
+		ParseValue: func(value interface{}) interface{} {
+			switch v := value.(type) {
+			case string:
+				normalized, ok := normalizeTiDBTime(v)
+				if !ok {
+					return nil
+				}
+				return normalized
+			case []byte:
+				normalized, ok := normalizeTiDBTime(string(v))
+				if !ok {
+					return nil
+				}
+				return normalized
+			default:
+				return nil
+			}
+		},
+		ParseLiteral: func(valueAST ast.Value) interface{} {
+			if sv, ok := valueAST.(*ast.StringValue); ok {
+				normalized, ok := normalizeTiDBTime(sv.Value)
+				if !ok {
+					return nil
+				}
+				return normalized
+			}
+			return nil
+		},
+	})
+}
+
+func Year() *graphql.Scalar {
+	return graphql.NewScalar(graphql.ScalarConfig{
+		Name:        "Year",
+		Description: "Year value in YYYY format. Supports TiDB YEAR range 0000 to 2155.",
+		Serialize: func(value interface{}) interface{} {
+			if normalized, ok := normalizeTiDBYear(value); ok {
+				return normalized
+			}
+			return nil
+		},
+		ParseValue: func(value interface{}) interface{} {
+			if normalized, ok := normalizeTiDBYear(value); ok {
+				return normalized
+			}
+			return nil
+		},
+		ParseLiteral: func(valueAST ast.Value) interface{} {
+			switch v := valueAST.(type) {
+			case *ast.StringValue:
+				if normalized, ok := normalizeTiDBYear(v.Value); ok {
+					return normalized
+				}
+				return nil
+			case *ast.IntValue:
+				if normalized, ok := normalizeTiDBYear(v.Value); ok {
+					return normalized
+				}
+				return nil
+			default:
+				return nil
+			}
+		},
+	})
+}
+
 func coerceNonNegativeInt(value interface{}) (int, bool) {
 	switch v := value.(type) {
 	case int:
@@ -310,4 +400,172 @@ func coerceNonNegativeInt(value interface{}) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+var (
+	timeWithColonPattern    = regexp.MustCompile(`^(\d+):(\d{1,2})(?::(\d{1,2}))?(?:\.(\d{1,6}))?$`)
+	timeNoColonPattern      = regexp.MustCompile(`^(\d{1,6})(?:\.(\d{1,6}))?$`)
+	yearStringFormatPattern = regexp.MustCompile(`^\d{4}$`)
+)
+
+func normalizeTiDBTime(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", false
+	}
+
+	sign := ""
+	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "+") {
+		sign = s[:1]
+		s = s[1:]
+		if s == "" {
+			return "", false
+		}
+	}
+
+	hours, minutes, seconds, fraction, ok := parseTimeComponents(s)
+	if !ok {
+		return "", false
+	}
+	if minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59 {
+		return "", false
+	}
+	if hours > 838 || (hours == 838 && (minutes > 59 || seconds > 59)) {
+		return "", false
+	}
+	if hours == 0 && minutes == 0 && seconds == 0 && sign == "-" {
+		sign = ""
+	}
+
+	value := fmt.Sprintf("%s%02d:%02d:%02d", sign, hours, minutes, seconds)
+	if fraction != "" {
+		value += "." + fraction
+	}
+	return value, true
+}
+
+func parseTimeComponents(raw string) (int, int, int, string, bool) {
+	if matches := timeWithColonPattern.FindStringSubmatch(raw); matches != nil {
+		hours, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		minutes, err := strconv.Atoi(matches[2])
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		seconds := 0
+		if matches[3] != "" {
+			seconds, err = strconv.Atoi(matches[3])
+			if err != nil {
+				return 0, 0, 0, "", false
+			}
+		}
+		return hours, minutes, seconds, matches[4], true
+	}
+
+	matches := timeNoColonPattern.FindStringSubmatch(raw)
+	if matches == nil {
+		return 0, 0, 0, "", false
+	}
+	digits := matches[1]
+
+	var hours, minutes, seconds int
+	switch len(digits) {
+	case 1, 2:
+		parsed, err := strconv.Atoi(digits)
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		seconds = parsed
+	case 3, 4:
+		minVal, err := strconv.Atoi(digits[:len(digits)-2])
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		secVal, err := strconv.Atoi(digits[len(digits)-2:])
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		minutes = minVal
+		seconds = secVal
+	case 5, 6:
+		hourVal, err := strconv.Atoi(digits[:len(digits)-4])
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		minVal, err := strconv.Atoi(digits[len(digits)-4 : len(digits)-2])
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		secVal, err := strconv.Atoi(digits[len(digits)-2:])
+		if err != nil {
+			return 0, 0, 0, "", false
+		}
+		hours = hourVal
+		minutes = minVal
+		seconds = secVal
+	default:
+		return 0, 0, 0, "", false
+	}
+
+	return hours, minutes, seconds, matches[2], true
+}
+
+func normalizeTiDBYear(value interface{}) (string, bool) {
+	var year int
+
+	switch v := value.(type) {
+	case int:
+		year = v
+	case int8:
+		year = int(v)
+	case int16:
+		year = int(v)
+	case int32:
+		year = int(v)
+	case int64:
+		if v < math.MinInt32 || v > math.MaxInt32 {
+			return "", false
+		}
+		year = int(v)
+	case uint:
+		if v > math.MaxInt32 {
+			return "", false
+		}
+		year = int(v)
+	case uint8:
+		year = int(v)
+	case uint16:
+		year = int(v)
+	case uint32:
+		if v > math.MaxInt32 {
+			return "", false
+		}
+		year = int(v)
+	case uint64:
+		if v > math.MaxInt32 {
+			return "", false
+		}
+		year = int(v)
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if !yearStringFormatPattern.MatchString(trimmed) {
+			return "", false
+		}
+		parsed, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return "", false
+		}
+		year = parsed
+	case []byte:
+		return normalizeTiDBYear(string(v))
+	default:
+		return "", false
+	}
+
+	if year < 0 || year > 2155 {
+		return "", false
+	}
+	return fmt.Sprintf("%04d", year), true
 }

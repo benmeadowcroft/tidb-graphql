@@ -485,6 +485,48 @@ func TestDateFieldType(t *testing.T) {
 	assert.Equal(t, "Date", nonNull.OfType.Name())
 }
 
+func TestTimeFieldType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "event_time", DataType: "time", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	fields := objType.Fields()
+
+	nonNull, ok := fields["eventTime"].Type.(*graphql.NonNull)
+	require.True(t, ok)
+	_, ok = nonNull.OfType.(*graphql.Scalar)
+	require.True(t, ok)
+	assert.Equal(t, "Time", nonNull.OfType.Name())
+}
+
+func TestYearFieldType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "event_year", DataType: "year", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	fields := objType.Fields()
+
+	nonNull, ok := fields["eventYear"].Type.(*graphql.NonNull)
+	require.True(t, ok)
+	_, ok = nonNull.OfType.(*graphql.Scalar)
+	require.True(t, ok)
+	assert.Equal(t, "Year", nonNull.OfType.Name())
+}
+
 func TestDateTimeFilterType(t *testing.T) {
 	table := introspection.Table{
 		Name: "events",
@@ -516,6 +558,58 @@ func TestDateFilterType(t *testing.T) {
 		Name: "events",
 		Columns: []introspection.Column{
 			{Name: "event_date", DataType: "date", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	filterType := r.getFilterInputType(table, table.Columns[0])
+	require.NotNil(t, filterType)
+	fields := filterType.Fields()
+	assert.NotNil(t, fields["eq"])
+	assert.NotNil(t, fields["ne"])
+	assert.NotNil(t, fields["lt"])
+	assert.NotNil(t, fields["lte"])
+	assert.NotNil(t, fields["gt"])
+	assert.NotNil(t, fields["gte"])
+	assert.NotNil(t, fields["in"])
+	assert.NotNil(t, fields["notIn"])
+	assert.NotNil(t, fields["isNull"])
+	assert.Nil(t, fields["like"])
+	assert.Nil(t, fields["notLike"])
+}
+
+func TestTimeFilterType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "event_time", DataType: "time", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	filterType := r.getFilterInputType(table, table.Columns[0])
+	require.NotNil(t, filterType)
+	fields := filterType.Fields()
+	assert.NotNil(t, fields["eq"])
+	assert.NotNil(t, fields["ne"])
+	assert.NotNil(t, fields["lt"])
+	assert.NotNil(t, fields["lte"])
+	assert.NotNil(t, fields["gt"])
+	assert.NotNil(t, fields["gte"])
+	assert.NotNil(t, fields["in"])
+	assert.NotNil(t, fields["notIn"])
+	assert.NotNil(t, fields["isNull"])
+	assert.Nil(t, fields["like"])
+	assert.Nil(t, fields["notLike"])
+}
+
+func TestYearFilterType(t *testing.T) {
+	table := introspection.Table{
+		Name: "events",
+		Columns: []introspection.Column{
+			{Name: "event_year", DataType: "year", IsNullable: false},
 		},
 	}
 	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}

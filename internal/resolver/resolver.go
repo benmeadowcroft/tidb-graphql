@@ -54,6 +54,8 @@ type Resolver struct {
 	decimalType        *graphql.Scalar
 	jsonType           *graphql.Scalar
 	dateType           *graphql.Scalar
+	timeType           *graphql.Scalar
+	yearType           *graphql.Scalar
 	nodeInterface      *graphql.Interface
 	pageInfoType       *graphql.Object
 	edgeCache          map[string]*graphql.Object
@@ -1425,6 +1427,46 @@ func (r *Resolver) dateScalar() *graphql.Scalar {
 	return cached
 }
 
+func (r *Resolver) timeScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.timeType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Time()
+
+	r.mu.Lock()
+	if r.timeType == nil {
+		r.timeType = scalar
+	}
+	cached = r.timeType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) yearScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.yearType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Year()
+
+	r.mu.Lock()
+	if r.yearType == nil {
+		r.yearType = scalar
+	}
+	cached = r.yearType
+	r.mu.Unlock()
+
+	return cached
+}
+
 func (r *Resolver) nodeInterfaceType() *graphql.Interface {
 	r.mu.RLock()
 	cached := r.nodeInterface
@@ -2260,6 +2302,36 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 				"gte":    &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
 				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.DateTime))},
 				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.DateTime))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "TimeFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "TimeFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.timeScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.timeScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "YearFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "YearFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.yearScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.yearScalar()))},
 				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 			},
 		})
@@ -3734,6 +3806,10 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 		return r.dateScalar()
 	case sqltype.TypeDateTime:
 		return graphql.DateTime
+	case sqltype.TypeTime:
+		return r.timeScalar()
+	case sqltype.TypeYear:
+		return r.yearScalar()
 	default:
 		return graphql.String
 	}
@@ -3760,6 +3836,10 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 		return r.dateScalar()
 	case sqltype.TypeDateTime:
 		return graphql.DateTime
+	case sqltype.TypeTime:
+		return r.timeScalar()
+	case sqltype.TypeYear:
+		return r.yearScalar()
 	default:
 		return graphql.String
 	}

@@ -13,7 +13,6 @@ func TestMapToGraphQL_IntegerTypes(t *testing.T) {
 		"MEDIUMINT", "mediumint",
 		"INT", "int",
 		"INTEGER", "integer",
-		"BIGINT", "bigint",
 		"SERIAL", "serial",
 		"BIT", "bit",
 	}
@@ -23,6 +22,20 @@ func TestMapToGraphQL_IntegerTypes(t *testing.T) {
 			assert.Equal(t, TypeInt, MapToGraphQL(sqlType))
 			assert.Equal(t, "Int", MapToGraphQL(sqlType).String())
 			assert.Equal(t, "IntFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_BigIntTypes(t *testing.T) {
+	bigIntTypes := []string{
+		"BIGINT", "bigint",
+	}
+
+	for _, sqlType := range bigIntTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeBigInt, MapToGraphQL(sqlType))
+			assert.Equal(t, "BigInt", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "BigIntFilter", MapToGraphQL(sqlType).FilterTypeName())
 		})
 	}
 }
@@ -183,7 +196,7 @@ func TestMapToGraphQL_WithSizeSpecifiers(t *testing.T) {
 		{"DECIMAL(18,4)", TypeFloat, "Float"},
 		{"int(11)", TypeInt, "Int"},
 		{"INT(10)", TypeInt, "Int"},
-		{"bigint(20)", TypeInt, "Int"},
+		{"bigint(20)", TypeBigInt, "BigInt"},
 		{"tinyint(1)", TypeInt, "Int"},
 		{"enum('a','b','c')", TypeString, "String"},
 	}
@@ -202,6 +215,7 @@ func TestIsNumeric(t *testing.T) {
 		expected    bool
 	}{
 		{TypeInt, true},
+		{TypeBigInt, true},
 		{TypeFloat, true},
 		{TypeString, false},
 		{TypeBoolean, false},
@@ -223,6 +237,7 @@ func TestIsComparable(t *testing.T) {
 		expected    bool
 	}{
 		{TypeInt, true},
+		{TypeBigInt, true},
 		{TypeFloat, true},
 		{TypeString, true},
 		{TypeBoolean, true},

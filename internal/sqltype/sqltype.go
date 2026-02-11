@@ -12,6 +12,8 @@ const (
 	TypeString GraphQLType = iota
 	// TypeInt represents integer numeric types.
 	TypeInt
+	// TypeBigInt represents 64-bit integer numeric types.
+	TypeBigInt
 	// TypeFloat represents floating-point and fixed-point numeric types.
 	TypeFloat
 	// TypeBoolean represents boolean types.
@@ -35,8 +37,10 @@ func MapToGraphQL(sqlType string) GraphQLType {
 	switch strings.ToUpper(sqlType) {
 	// Integer Numeric Data Types
 	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT",
-		"INTEGER", "BIGINT", "SERIAL", "BIT":
+		"INTEGER", "SERIAL", "BIT":
 		return TypeInt
+	case "BIGINT":
+		return TypeBigInt
 	// Floating Point Numeric Data Types
 	case "FLOAT", "DOUBLE":
 		return TypeFloat
@@ -72,6 +76,8 @@ func (t GraphQLType) String() string {
 	switch t {
 	case TypeInt:
 		return "Int"
+	case TypeBigInt:
+		return "BigInt"
 	case TypeFloat:
 		return "Float"
 	case TypeBoolean:
@@ -92,6 +98,8 @@ func (t GraphQLType) FilterTypeName() string {
 	switch t {
 	case TypeInt:
 		return "IntFilter"
+	case TypeBigInt:
+		return "BigIntFilter"
 	case TypeFloat:
 		return "FloatFilter"
 	case TypeBoolean:
@@ -108,7 +116,7 @@ func (t GraphQLType) FilterTypeName() string {
 
 // IsNumeric returns true if the type can be used with AVG/SUM aggregations.
 func (t GraphQLType) IsNumeric() bool {
-	return t == TypeInt || t == TypeFloat
+	return t == TypeInt || t == TypeBigInt || t == TypeFloat
 }
 
 // IsComparable returns true if the type can be used with MIN/MAX aggregations.

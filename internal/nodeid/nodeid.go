@@ -57,7 +57,7 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 	}
 
 	switch sqltype.MapToGraphQL(col.DataType) {
-	case sqltype.TypeInt:
+	case sqltype.TypeInt, sqltype.TypeBigInt:
 		switch v := raw.(type) {
 		case float64:
 			if v != math.Trunc(v) {

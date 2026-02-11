@@ -157,6 +157,9 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 			recordSpanError(span, err)
 			return nil, fmt.Errorf("failed to get columns for %s: %w", tableInfo.Name, err)
 		}
+		if !tableInfo.IsView {
+			columns = applyAutoRandomColumns(ctx, db, tableInfo.Name, columns)
+		}
 
 		var primaryKeys []string
 		var foreignKeys []ForeignKey
@@ -366,6 +369,83 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		return nil, err
 	}
 	return columns, nil
+}
+
+func applyAutoRandomColumns(ctx context.Context, db Queryer, tableName string, columns []Column) []Column {
+	for _, col := range columns {
+		if col.IsAutoRandom {
+			return columns
+		}
+	}
+
+	createSQL, err := getCreateTableSQL(ctx, db, tableName)
+	if err != nil {
+		slog.Default().Warn("failed to load create table statement", slog.String("table", tableName), slog.String("error", err.Error()))
+		return columns
+	}
+
+	autoCols := extractAutoRandomColumns(createSQL)
+	if len(autoCols) == 0 {
+		return columns
+	}
+
+	for i := range columns {
+		if autoCols[columns[i].Name] {
+			columns[i].IsAutoRandom = true
+		}
+	}
+	return columns
+}
+
+func getCreateTableSQL(ctx context.Context, db Queryer, tableName string) (string, error) {
+	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", tableName)
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var createSQL string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name, &createSQL); err != nil {
+			return "", err
+		}
+		break
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if createSQL == "" {
+		return "", fmt.Errorf("empty create table statement for %s", tableName)
+	}
+	return createSQL, nil
+}
+
+func extractAutoRandomColumns(createSQL string) map[string]bool {
+	autoCols := make(map[string]bool)
+	for _, line := range strings.Split(createSQL, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "`") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "/*t![auto_rand]") || !strings.Contains(lower, "auto_random") {
+			continue
+		}
+		end := strings.Index(line[1:], "`")
+		if end == -1 {
+			continue
+		}
+		colName := line[1 : 1+end]
+		autoCols[colName] = true
+	}
+	return autoCols
 }
 
 func getPrimaryKeys(ctx context.Context, db Queryer, databaseName, tableName string) ([]string, error) {

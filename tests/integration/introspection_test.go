@@ -138,6 +138,40 @@ func TestIntrospectDatabase_EmptyDatabase(t *testing.T) {
 	assert.Empty(t, schema.Tables, "Empty database should have no tables")
 }
 
+func TestIntrospectDatabase_AutoRandomColumn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+
+	_, err := testDB.DB.Exec("CREATE TABLE auto_random_check (id BIGINT PRIMARY KEY /*T![auto_rand] AUTO_RANDOM(5) */, name VARCHAR(20))")
+	require.NoError(t, err, "failed to create auto_random_check table")
+
+	schema, err := introspection.IntrospectDatabase(testDB.DB, testDB.DatabaseName)
+	require.NoError(t, err, "IntrospectDatabase should not return an error")
+
+	var autoTable *introspection.Table
+	for i := range schema.Tables {
+		if schema.Tables[i].Name == "auto_random_check" {
+			autoTable = &schema.Tables[i]
+			break
+		}
+	}
+	require.NotNil(t, autoTable, "auto_random_check table should exist")
+
+	var idCol *introspection.Column
+	for i := range autoTable.Columns {
+		if autoTable.Columns[i].Name == "id" {
+			idCol = &autoTable.Columns[i]
+			break
+		}
+	}
+	require.NotNil(t, idCol, "id column should exist")
+	assert.True(t, idCol.IsAutoRandom, "id column should be detected as auto_random")
+	assert.False(t, idCol.IsAutoIncrement, "id column should not be auto_increment")
+}
+
 func TestIntrospectDatabase_TypeMapping(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

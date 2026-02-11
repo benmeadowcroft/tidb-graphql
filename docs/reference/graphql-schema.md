@@ -18,7 +18,7 @@ For each table `users`:
 - List query: `users(limit, offset, where, orderBy)` returns `[User!]!`.
 - Connection query: `usersConnection(first, after, where, orderBy)` returns `UserConnection`.
 - Primary key lookup: `user(id: ID!)` returns `User` (global Node ID).
-- Primary key raw lookup: `user_by_databaseId(databaseId: Int!)` returns `User` (name depends on PK column).
+- Primary key raw lookup: `user_by_databaseId(databaseId: BigInt!)` returns `User` (name depends on PK column).
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
 - Aggregate query: `users_aggregate(...)` returns `UsersAggregate`.
 
@@ -87,6 +87,7 @@ Connections are forward-only (`first`/`after`) and use stable ordering based on 
 SQL types are mapped to GraphQL scalars:
 
 - `int`, `serial` -> `Int`
+- `bigint` -> `BigInt` (custom scalar, serialized as a string)
 - `float`, `double`, `decimal` -> `Float`
 - `bool` -> `Boolean`
 - `json` -> `JSON` (custom scalar)

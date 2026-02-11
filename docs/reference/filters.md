@@ -24,7 +24,7 @@ Example:
 
 Supported operators depend on the column type:
 
-- Numeric: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
+- Numeric (`Int`, `BigInt`, `Float`): `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
 - String: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `like`, `notLike`, `isNull`
 - Boolean: `eq`, `ne`, `isNull`
 - Enum: `eq`, `ne`, `in`, `notIn`, `isNull`

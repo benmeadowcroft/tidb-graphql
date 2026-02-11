@@ -51,7 +51,7 @@ func TestUniqueKeyLookup_SingleColumn(t *testing.T) {
 	assert.EqualValues(t, 1, product["databaseId"])
 	assert.Equal(t, "WIDGET-001", product["sku"])
 	assert.Equal(t, "Blue Widget", product["name"])
-	assert.Equal(t, 29.99, product["price"])
+	assert.Equal(t, 29.99, requireDecimalAsFloat64(t, product["price"]))
 }
 
 func TestUniqueKeyLookup_CompositeKey(t *testing.T) {
@@ -209,7 +209,7 @@ func TestUniqueKeyLookup_WithRelationships(t *testing.T) {
 	assert.EqualValues(t, 1, order["databaseId"])
 	assert.Equal(t, "ORD-2023-0001", order["orderNumber"])
 	assert.Equal(t, "alice@example.com", order["customerEmail"])
-	assert.Equal(t, 59.98, order["totalPrice"])
+	assert.Equal(t, 59.98, requireDecimalAsFloat64(t, order["totalPrice"]))
 	assert.Equal(t, "delivered", order["status"])
 
 	// Check relationship

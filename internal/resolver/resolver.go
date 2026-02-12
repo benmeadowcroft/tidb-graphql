@@ -45,6 +45,7 @@ type Resolver struct {
 	deletePayloadCache map[string]*graphql.Object
 	enumCache          map[string]*graphql.Enum
 	enumFilterCache    map[string]*graphql.InputObject
+	setFilterCache     map[string]*graphql.InputObject
 	singularQueryCache map[string]string
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
@@ -86,6 +87,7 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		deletePayloadCache: make(map[string]*graphql.Object),
 		enumCache:          make(map[string]*graphql.Enum),
 		enumFilterCache:    make(map[string]*graphql.InputObject),
+		setFilterCache:     make(map[string]*graphql.InputObject),
 		singularQueryCache: make(map[string]string),
 		singularTypeCache:  make(map[string]string),
 		singularNamer:      naming.New(namingConfig, nil),
@@ -2171,9 +2173,49 @@ func (r *Resolver) enumFilterType(enumType *graphql.Enum) *graphql.InputObject {
 	return filterType
 }
 
+func (r *Resolver) setFilterType(enumType *graphql.Enum) *graphql.InputObject {
+	if enumType == nil {
+		return nil
+	}
+	filterName := enumType.Name() + "SetFilter"
+
+	r.mu.RLock()
+	cached := r.setFilterCache[filterName]
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	listEnumType := graphql.NewList(graphql.NewNonNull(enumType))
+	filterType := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: filterName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"has":       &graphql.InputObjectFieldConfig{Type: enumType},
+			"hasAnyOf":  &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"hasAllOf":  &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"hasNoneOf": &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"eq":        &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"ne":        &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"isNull":    &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+		},
+	})
+
+	r.mu.Lock()
+	if cached := r.setFilterCache[filterName]; cached != nil {
+		r.mu.Unlock()
+		return cached
+	}
+	r.setFilterCache[filterName] = filterType
+	r.mu.Unlock()
+
+	return filterType
+}
+
 func (r *Resolver) getFilterInputType(table introspection.Table, col introspection.Column) *graphql.InputObject {
-	// SET columns are represented as list-of-enum and are excluded from WHERE in phase 1.
 	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+		if enumType := r.enumTypeForColumn(table, &col); enumType != nil {
+			return r.setFilterType(enumType)
+		}
 		return nil
 	}
 	if enumType := r.enumTypeForColumn(table, &col); enumType != nil {

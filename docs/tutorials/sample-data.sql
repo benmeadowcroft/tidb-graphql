@@ -43,7 +43,8 @@ CREATE TABLE products (
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC).',
   last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Row update time (UTC).',
   UNIQUE KEY uq_products_sku (sku),
-  KEY idx_products_price (price)
+  KEY idx_products_price (price),
+  KEY idx_products_tags (tags)
 ) COMMENT='Products available for purchase.';
 
 CREATE TABLE product_categories (

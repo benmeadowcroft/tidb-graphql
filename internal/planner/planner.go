@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/setutil"
+	"tidb-graphql/internal/sqltype"
 	"tidb-graphql/internal/sqlutil"
 
 	sq "github.com/Masterminds/squirrel"
@@ -593,7 +595,7 @@ func buildWhereCondition(table introspection.Table, whereInput map[string]interf
 				return nil, nil, fmt.Errorf("filter for %s must be an object", key)
 			}
 
-			colConditions, err := buildColumnFilter(col.Name, filterMap)
+			colConditions, err := buildColumnFilter(*col, filterMap)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -678,7 +680,7 @@ func buildWhereConditionQualified(table introspection.Table, alias string, where
 				return nil, nil, fmt.Errorf("filter for %s must be an object", key)
 			}
 
-			colConditions, err := buildColumnFilterQualified(col.Name, alias, filterMap)
+			colConditions, err := buildColumnFilterQualified(*col, alias, filterMap)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -696,9 +698,13 @@ func buildWhereConditionQualified(table introspection.Table, alias string, where
 }
 
 // buildColumnFilter builds filter conditions for a specific column
-func buildColumnFilter(colName string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+func buildColumnFilter(col introspection.Column, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
 	conditions := []sq.Sqlizer{}
-	quotedColumn := sqlutil.QuoteIdentifier(colName)
+	quotedColumn := sqlutil.QuoteIdentifier(col.Name)
+
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+		return buildSetColumnFilter(col, quotedColumn, filterMap)
+	}
 
 	for op, value := range filterMap {
 		switch op {
@@ -749,11 +755,15 @@ func buildColumnFilter(colName string, filterMap map[string]interface{}) ([]sq.S
 	return conditions, nil
 }
 
-func buildColumnFilterQualified(colName, alias string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+func buildColumnFilterQualified(col introspection.Column, alias string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
 	conditions := []sq.Sqlizer{}
-	quotedColumn := sqlutil.QuoteIdentifier(colName)
+	quotedColumn := sqlutil.QuoteIdentifier(col.Name)
 	if alias != "" {
 		quotedColumn = fmt.Sprintf("%s.%s", sqlutil.QuoteIdentifier(alias), quotedColumn)
+	}
+
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+		return buildSetColumnFilter(col, quotedColumn, filterMap)
 	}
 
 	for op, value := range filterMap {
@@ -802,6 +812,124 @@ func buildColumnFilterQualified(colName, alias string, filterMap map[string]inte
 	}
 
 	return conditions, nil
+}
+
+func buildSetColumnFilter(col introspection.Column, quotedColumn string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+	conditions := []sq.Sqlizer{}
+
+	for op, value := range filterMap {
+		switch op {
+		case "has":
+			item, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("has operator requires a value")
+			}
+			csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) > 0", quotedColumn), csv))
+		case "hasAnyOf":
+			items, err := setArrayValues(value)
+			if err != nil {
+				return nil, fmt.Errorf("hasAnyOf must be an array")
+			}
+			if len(items) == 0 {
+				conditions = append(conditions, sq.Expr("1=0"))
+				continue
+			}
+			anyConds := make([]sq.Sqlizer, 0, len(items))
+			for _, item := range items {
+				csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+				if err != nil {
+					return nil, err
+				}
+				anyConds = append(anyConds, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) > 0", quotedColumn), csv))
+			}
+			conditions = append(conditions, sq.Or(anyConds))
+		case "hasAllOf":
+			items, err := setArrayValues(value)
+			if err != nil {
+				return nil, fmt.Errorf("hasAllOf must be an array")
+			}
+			if len(items) == 0 {
+				conditions = append(conditions, sq.Expr("1=1"))
+				continue
+			}
+			allConds := make([]sq.Sqlizer, 0, len(items))
+			for _, item := range items {
+				csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+				if err != nil {
+					return nil, err
+				}
+				allConds = append(allConds, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) > 0", quotedColumn), csv))
+			}
+			conditions = append(conditions, sq.And(allConds))
+		case "hasNoneOf":
+			items, err := setArrayValues(value)
+			if err != nil {
+				return nil, fmt.Errorf("hasNoneOf must be an array")
+			}
+			if len(items) == 0 {
+				conditions = append(conditions, sq.Expr("1=1"))
+				continue
+			}
+			noneConds := make([]sq.Sqlizer, 0, len(items))
+			for _, item := range items {
+				csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+				if err != nil {
+					return nil, err
+				}
+				noneConds = append(noneConds, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) = 0", quotedColumn), csv))
+			}
+			conditions = append(conditions, sq.And(noneConds))
+		case "eq":
+			csv, err := setutil.CanonicalizeAny(value, col.EnumValues)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: csv})
+		case "ne":
+			csv, err := setutil.CanonicalizeAny(value, col.EnumValues)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: csv})
+		case "isNull":
+			boolVal, ok := value.(bool)
+			if !ok {
+				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+			if boolVal {
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
+			} else {
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
+			}
+		default:
+			return nil, fmt.Errorf("unknown set filter operator: %s", op)
+		}
+	}
+
+	return conditions, nil
+}
+
+func setArrayValues(value interface{}) ([]string, error) {
+	switch v := value.(type) {
+	case []string:
+		return append([]string(nil), v...), nil
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			str, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("set list items must be strings")
+			}
+			out = append(out, str)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("set filter value must be an array")
+	}
 }
 
 // findColumnByGraphQLName finds a column in the table by its GraphQL field name

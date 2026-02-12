@@ -657,7 +657,44 @@ func TestYearFilterType(t *testing.T) {
 	assert.Nil(t, fields["notLike"])
 }
 
-func TestSetFilterTypeSkipped(t *testing.T) {
+func TestSetFilterType(t *testing.T) {
+	table := introspection.Table{
+		Name: "products",
+		Columns: []introspection.Column{
+			{Name: "tags", DataType: "set", EnumValues: []string{"featured", "sale"}},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	filterType := r.getFilterInputType(table, table.Columns[0])
+	require.NotNil(t, filterType)
+	fields := filterType.Fields()
+	assert.NotNil(t, fields["has"])
+	assert.NotNil(t, fields["hasAnyOf"])
+	assert.NotNil(t, fields["hasAllOf"])
+	assert.NotNil(t, fields["hasNoneOf"])
+	assert.NotNil(t, fields["eq"])
+	assert.NotNil(t, fields["ne"])
+	assert.NotNil(t, fields["isNull"])
+	assert.Nil(t, fields["in"])
+	assert.Nil(t, fields["notIn"])
+
+	_, ok := fields["has"].Type.(*graphql.Enum)
+	require.True(t, ok)
+
+	listHasAny, ok := fields["hasAnyOf"].Type.(*graphql.List)
+	require.True(t, ok)
+	_, ok = listHasAny.OfType.(*graphql.NonNull)
+	require.True(t, ok)
+
+	listEq, ok := fields["eq"].Type.(*graphql.List)
+	require.True(t, ok)
+	_, ok = listEq.OfType.(*graphql.NonNull)
+	require.True(t, ok)
+}
+
+func TestSetFilterAppearsInWhere(t *testing.T) {
 	table := introspection.Table{
 		Name: "products",
 		Columns: []introspection.Column{
@@ -671,7 +708,7 @@ func TestSetFilterTypeSkipped(t *testing.T) {
 	whereType := r.whereInput(table)
 	require.NotNil(t, whereType)
 	fields := whereType.Fields()
-	assert.Nil(t, fields["tags"])
+	assert.NotNil(t, fields["tags"])
 }
 
 func TestDateScalarSerialize(t *testing.T) {

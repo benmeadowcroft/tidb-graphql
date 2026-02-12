@@ -93,9 +93,12 @@ SQL types are mapped to GraphQL scalars:
 - `bool` -> `Boolean`
 - `json` -> `JSON` (custom scalar)
 - `enum` -> GraphQL enum named `<SingularTable><Column>` (e.g., `users.status` -> `UserStatus`)
+- `set` -> `[<SingularTable><Column>!]` (list of enum values)
 - `date` -> `Date` (YYYY-MM-DD, UTC)
 - `datetime`, `timestamp` -> `DateTime` (RFC 3339, UTC)
-- `char`, `text`, `blob`, `binary`, `time`, `year`, `set` -> `String`
+- `time` -> `Time` (HH:MM:SS[.fraction], TiDB range)
+- `year` -> `Year` (YYYY)
+- `char`, `text`, `blob`, `binary` -> `String`
 
 ## Descriptions
 

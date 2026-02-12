@@ -30,6 +30,7 @@ Supported operators depend on the column type:
 - Enum: `eq`, `ne`, `in`, `notIn`, `isNull`
 - Date: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
 - DateTime: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
+- Set: `has`, `hasAnyOf`, `hasAllOf`, `hasNoneOf`, `eq`, `ne`, `isNull`
 
 Example:
 
@@ -41,6 +42,44 @@ Example:
   }
 }
 ```
+
+Set examples:
+
+```graphql
+{
+  products(where: { tags: { has: FEATURED } }) {
+    id
+    name
+    tags
+  }
+}
+```
+
+```graphql
+{
+  products(where: { tags: { hasAnyOf: [FEATURED, SEASONAL] } }) {
+    id
+    name
+    tags
+  }
+}
+```
+
+```graphql
+{
+  products(where: { tags: { eq: [FEATURED, NEW] } }) {
+    id
+    name
+    tags
+  }
+}
+```
+
+Empty-list semantics for set operators:
+
+- `hasAnyOf([])` => matches no rows
+- `hasAllOf([])` => matches all rows
+- `hasNoneOf([])` => matches all rows
 
 ## Indexed column requirement
 

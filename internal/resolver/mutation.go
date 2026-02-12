@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
@@ -14,6 +13,7 @@ import (
 	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/planner"
 	"tidb-graphql/internal/schemafilter"
+	"tidb-graphql/internal/setutil"
 	"tidb-graphql/internal/sqltype"
 )
 
@@ -488,45 +488,11 @@ func normalizeSetInputValue(col introspection.Column, value interface{}) (interf
 	if value == nil {
 		return nil, nil
 	}
-
-	var provided []string
-	switch v := value.(type) {
-	case []interface{}:
-		provided = make([]string, 0, len(v))
-		for _, item := range v {
-			strVal, ok := item.(string)
-			if !ok {
-				return nil, newMutationError("set values must be strings", "invalid_input", 0)
-			}
-			provided = append(provided, strVal)
-		}
-	case []string:
-		provided = append([]string(nil), v...)
-	default:
-		return nil, newMutationError("set values must be a list", "invalid_input", 0)
+	csv, err := setutil.CanonicalizeAny(value, col.EnumValues)
+	if err != nil {
+		return nil, newMutationError(err.Error(), "invalid_input", 0)
 	}
-
-	allowed := make(map[string]struct{}, len(col.EnumValues))
-	for _, item := range col.EnumValues {
-		allowed[item] = struct{}{}
-	}
-
-	selected := make(map[string]struct{}, len(provided))
-	for _, item := range provided {
-		if _, ok := allowed[item]; !ok {
-			return nil, newMutationError("invalid set value: "+item, "invalid_input", 0)
-		}
-		selected[item] = struct{}{}
-	}
-
-	ordered := make([]string, 0, len(selected))
-	for _, option := range col.EnumValues {
-		if _, ok := selected[option]; ok {
-			ordered = append(ordered, option)
-		}
-	}
-
-	return strings.Join(ordered, ","), nil
+	return csv, nil
 }
 
 func pkValuesFromArgs(table introspection.Table, pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {

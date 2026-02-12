@@ -492,32 +492,24 @@ type WhereClause struct {
 	UsedColumns []string
 }
 
-// BuildWhereClause parses a GraphQL WHERE input into a SQL WHERE clause
-// Returns the condition and a list of columns used (for indexed validation)
+// BuildWhereClause parses a GraphQL WHERE input into a SQL WHERE clause.
+// Returns the condition and a list of columns used (for indexed validation).
 func BuildWhereClause(table introspection.Table, whereInput map[string]interface{}) (*WhereClause, error) {
-	if len(whereInput) == 0 {
-		return nil, nil
-	}
-
-	condition, usedCols, err := buildWhereCondition(table, whereInput)
-	if err != nil {
-		return nil, err
-	}
-
-	return &WhereClause{
-		Condition:   condition,
-		UsedColumns: usedCols,
-	}, nil
+	return buildWhereClauseWithAlias(table, "", whereInput)
 }
 
 // BuildWhereClauseQualified parses a GraphQL WHERE input into a SQL WHERE clause
 // with qualified column names (alias.column).
 func BuildWhereClauseQualified(table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
+	return buildWhereClauseWithAlias(table, alias, whereInput)
+}
+
+func buildWhereClauseWithAlias(table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
 	if len(whereInput) == 0 {
 		return nil, nil
 	}
 
-	condition, usedCols, err := buildWhereConditionQualified(table, alias, whereInput)
+	condition, usedCols, err := buildWhereCondition(table, alias, whereInput)
 	if err != nil {
 		return nil, err
 	}
@@ -528,96 +520,9 @@ func BuildWhereClauseQualified(table introspection.Table, alias string, whereInp
 	}, nil
 }
 
-// buildWhereCondition recursively builds WHERE conditions with AND/OR support
-func buildWhereCondition(table introspection.Table, whereInput map[string]interface{}) (sq.Sqlizer, []string, error) {
-	usedColumns := []string{}
-	conditions := []sq.Sqlizer{}
-
-	for key, value := range whereInput {
-		switch key {
-		case "AND":
-			// Handle AND array
-			andArray, ok := value.([]interface{})
-			if !ok {
-				return nil, nil, fmt.Errorf("AND must be an array")
-			}
-			andConditions := []sq.Sqlizer{}
-			for _, item := range andArray {
-				itemMap, ok := item.(map[string]interface{})
-				if !ok {
-					return nil, nil, fmt.Errorf("AND array items must be objects")
-				}
-				cond, cols, err := buildWhereCondition(table, itemMap)
-				if err != nil {
-					return nil, nil, err
-				}
-				if cond != nil {
-					andConditions = append(andConditions, cond)
-					usedColumns = append(usedColumns, cols...)
-				}
-			}
-			if len(andConditions) > 0 {
-				conditions = append(conditions, sq.And(andConditions))
-			}
-
-		case "OR":
-			// Handle OR array
-			orArray, ok := value.([]interface{})
-			if !ok {
-				return nil, nil, fmt.Errorf("OR must be an array")
-			}
-			orConditions := []sq.Sqlizer{}
-			for _, item := range orArray {
-				itemMap, ok := item.(map[string]interface{})
-				if !ok {
-					return nil, nil, fmt.Errorf("OR array items must be objects")
-				}
-				cond, cols, err := buildWhereCondition(table, itemMap)
-				if err != nil {
-					return nil, nil, err
-				}
-				if cond != nil {
-					orConditions = append(orConditions, cond)
-					usedColumns = append(usedColumns, cols...)
-				}
-			}
-			if len(orConditions) > 0 {
-				conditions = append(conditions, sq.Or(orConditions))
-			}
-
-		default:
-			// Handle regular column filters
-			col := findColumnByGraphQLName(table, key)
-			if col == nil {
-				return nil, nil, fmt.Errorf("unknown column: %s", key)
-			}
-			usedColumns = append(usedColumns, col.Name)
-
-			filterMap, ok := value.(map[string]interface{})
-			if !ok {
-				return nil, nil, fmt.Errorf("filter for %s must be an object", key)
-			}
-
-			colConditions, err := buildColumnFilter(*col, filterMap)
-			if err != nil {
-				return nil, nil, err
-			}
-			conditions = append(conditions, colConditions...)
-		}
-	}
-
-	if len(conditions) == 0 {
-		return nil, usedColumns, nil
-	}
-	if len(conditions) == 1 {
-		return conditions[0], usedColumns, nil
-	}
-	return sq.And(conditions), usedColumns, nil
-}
-
-// buildWhereConditionQualified recursively builds WHERE conditions with AND/OR support
-// using qualified column names (alias.column).
-func buildWhereConditionQualified(table introspection.Table, alias string, whereInput map[string]interface{}) (sq.Sqlizer, []string, error) {
+// buildWhereCondition recursively builds WHERE conditions with AND/OR support.
+// When alias is non-empty, column names are qualified as alias.column.
+func buildWhereCondition(table introspection.Table, alias string, whereInput map[string]interface{}) (sq.Sqlizer, []string, error) {
 	usedColumns := []string{}
 	conditions := []sq.Sqlizer{}
 
@@ -634,7 +539,7 @@ func buildWhereConditionQualified(table introspection.Table, alias string, where
 				if !ok {
 					return nil, nil, fmt.Errorf("AND array items must be objects")
 				}
-				cond, cols, err := buildWhereConditionQualified(table, alias, itemMap)
+				cond, cols, err := buildWhereCondition(table, alias, itemMap)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -658,7 +563,7 @@ func buildWhereConditionQualified(table introspection.Table, alias string, where
 				if !ok {
 					return nil, nil, fmt.Errorf("OR array items must be objects")
 				}
-				cond, cols, err := buildWhereConditionQualified(table, alias, itemMap)
+				cond, cols, err := buildWhereCondition(table, alias, itemMap)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -683,7 +588,7 @@ func buildWhereConditionQualified(table introspection.Table, alias string, where
 				return nil, nil, fmt.Errorf("filter for %s must be an object", key)
 			}
 
-			colConditions, err := buildColumnFilterQualified(*col, alias, filterMap)
+			colConditions, err := buildColumnFilter(*col, alias, filterMap)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -700,72 +605,9 @@ func buildWhereConditionQualified(table introspection.Table, alias string, where
 	return sq.And(conditions), usedColumns, nil
 }
 
-// buildColumnFilter builds filter conditions for a specific column
-func buildColumnFilter(col introspection.Column, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
-	conditions := []sq.Sqlizer{}
-	quotedColumn := sqlutil.QuoteIdentifier(col.Name)
-
-	effectiveType := introspection.EffectiveGraphQLType(col)
-	if effectiveType == sqltype.TypeSet {
-		return buildSetColumnFilter(col, quotedColumn, filterMap)
-	}
-	if effectiveType == sqltype.TypeBytes {
-		return buildBytesColumnFilter(quotedColumn, filterMap)
-	}
-	if effectiveType == sqltype.TypeUUID {
-		return buildUUIDColumnFilter(col, quotedColumn, filterMap)
-	}
-
-	for op, value := range filterMap {
-		switch op {
-		case "eq":
-			conditions = append(conditions, sq.Eq{quotedColumn: value})
-		case "ne":
-			conditions = append(conditions, sq.NotEq{quotedColumn: value})
-		case "lt":
-			conditions = append(conditions, sq.Lt{quotedColumn: value})
-		case "lte":
-			conditions = append(conditions, sq.LtOrEq{quotedColumn: value})
-		case "gt":
-			conditions = append(conditions, sq.Gt{quotedColumn: value})
-		case "gte":
-			conditions = append(conditions, sq.GtOrEq{quotedColumn: value})
-		case "in":
-			// Convert []interface{} to proper format
-			if arr, ok := value.([]interface{}); ok {
-				conditions = append(conditions, sq.Eq{quotedColumn: arr})
-			} else {
-				return nil, fmt.Errorf("in operator requires an array")
-			}
-		case "notIn":
-			if arr, ok := value.([]interface{}); ok {
-				conditions = append(conditions, sq.NotEq{quotedColumn: arr})
-			} else {
-				return nil, fmt.Errorf("notIn operator requires an array")
-			}
-		case "like":
-			conditions = append(conditions, sq.Like{quotedColumn: value})
-		case "notLike":
-			conditions = append(conditions, sq.NotLike{quotedColumn: value})
-		case "isNull":
-			if boolVal, ok := value.(bool); ok {
-				if boolVal {
-					conditions = append(conditions, sq.Eq{quotedColumn: nil})
-				} else {
-					conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-				}
-			} else {
-				return nil, fmt.Errorf("isNull must be a boolean")
-			}
-		default:
-			return nil, fmt.Errorf("unknown filter operator: %s", op)
-		}
-	}
-
-	return conditions, nil
-}
-
-func buildColumnFilterQualified(col introspection.Column, alias string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+// buildColumnFilter builds filter conditions for a specific column.
+// When alias is non-empty, the column name is qualified as alias.column.
+func buildColumnFilter(col introspection.Column, alias string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
 	conditions := []sq.Sqlizer{}
 	quotedColumn := sqlutil.QuoteIdentifier(col.Name)
 	if alias != "" {
@@ -819,12 +661,12 @@ func buildColumnFilterQualified(col introspection.Column, alias string, filterMa
 				return nil, fmt.Errorf("isNull must be a boolean")
 			}
 			if boolVal {
-				conditions = append(conditions, sq.Expr(fmt.Sprintf("%s IS NULL", quotedColumn)))
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
 			} else {
-				conditions = append(conditions, sq.Expr(fmt.Sprintf("%s IS NOT NULL", quotedColumn)))
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
 			}
 		default:
-			return nil, fmt.Errorf("unsupported operator: %s", op)
+			return nil, fmt.Errorf("unknown filter operator: %s", op)
 		}
 	}
 

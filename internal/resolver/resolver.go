@@ -984,7 +984,8 @@ func (r *Resolver) makeNodeResolver() graphql.FieldResolveFn {
 			id = fmt.Sprint(rawID)
 		}
 
-		typeName, rawValues, err := nodeid.Decode(id)
+		// Peek at type name to find the table dynamically
+		typeName, values, err := nodeid.Decode(id)
 		if err != nil {
 			return nil, err
 		}
@@ -997,17 +998,10 @@ func (r *Resolver) makeNodeResolver() graphql.FieldResolveFn {
 		if len(pkCols) == 0 {
 			return nil, fmt.Errorf("table %s has no primary key", table.Name)
 		}
-		if len(rawValues) != len(pkCols) {
-			return nil, fmt.Errorf("invalid id for %s", typeName)
-		}
 
-		pkValues := make(map[string]interface{}, len(pkCols))
-		for i, col := range pkCols {
-			parsed, err := nodeid.ParsePKValue(col, rawValues[i])
-			if err != nil {
-				return nil, err
-			}
-			pkValues[col.Name] = parsed
+		pkValues, err := r.pkValuesFromDecodedNodeID(table, pkCols, typeName, values)
+		if err != nil {
+			return nil, err
 		}
 
 		field := firstFieldAST(p.Info.FieldASTs)
@@ -1060,20 +1054,24 @@ func (r *Resolver) planFromParams(p graphql.ResolveParams) (*planner.Plan, error
 }
 
 func (r *Resolver) pkValuesFromNodeID(table introspection.Table, pkCols []introspection.Column, id string) (map[string]interface{}, error) {
-	typeName, values, err := nodeid.Decode(id)
+	decodedType, decodedValues, err := nodeid.Decode(id)
 	if err != nil {
 		return nil, err
 	}
+	return r.pkValuesFromDecodedNodeID(table, pkCols, decodedType, decodedValues)
+}
+
+func (r *Resolver) pkValuesFromDecodedNodeID(table introspection.Table, pkCols []introspection.Column, decodedType string, decodedValues []interface{}) (map[string]interface{}, error) {
 	expectedType := introspection.GraphQLTypeName(table)
-	if typeName != expectedType {
+	if decodedType != expectedType {
 		return nil, fmt.Errorf("invalid id for %s", expectedType)
 	}
-	if len(values) != len(pkCols) {
+	if len(decodedValues) != len(pkCols) {
 		return nil, fmt.Errorf("invalid id for %s", expectedType)
 	}
 	pkValues := make(map[string]interface{}, len(pkCols))
 	for i, col := range pkCols {
-		parsed, err := nodeid.ParsePKValue(col, values[i])
+		parsed, err := nodeid.ParsePKValue(col, decodedValues[i])
 		if err != nil {
 			return nil, err
 		}

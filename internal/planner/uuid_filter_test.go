@@ -19,7 +19,7 @@ func TestBuildColumnFilter_UUIDBinaryEq(t *testing.T) {
 		OverrideType:    sqltype.TypeUUID,
 		HasOverrideType: true,
 	}
-	conds, err := buildColumnFilter(col, map[string]interface{}{
+	conds, err := buildColumnFilter(col, "", map[string]interface{}{
 		"eq": "550E8400-E29B-41D4-A716-446655440000",
 	})
 	require.NoError(t, err)
@@ -40,7 +40,7 @@ func TestBuildColumnFilter_UUIDTextIn(t *testing.T) {
 		OverrideType:    sqltype.TypeUUID,
 		HasOverrideType: true,
 	}
-	conds, err := buildColumnFilter(col, map[string]interface{}{
+	conds, err := buildColumnFilter(col, "", map[string]interface{}{
 		"in": []interface{}{
 			"550E8400-E29B-41D4-A716-446655440000",
 			"123e4567-e89b-12d3-a456-426614174000",
@@ -64,7 +64,7 @@ func TestBuildColumnFilter_UUIDTextNe(t *testing.T) {
 		OverrideType:    sqltype.TypeUUID,
 		HasOverrideType: true,
 	}
-	conds, err := buildColumnFilter(col, map[string]interface{}{
+	conds, err := buildColumnFilter(col, "", map[string]interface{}{
 		"ne": "550E8400-E29B-41D4-A716-446655440000",
 	})
 	require.NoError(t, err)
@@ -84,7 +84,7 @@ func TestBuildColumnFilter_UUIDTextNotIn(t *testing.T) {
 		OverrideType:    sqltype.TypeUUID,
 		HasOverrideType: true,
 	}
-	conds, err := buildColumnFilter(col, map[string]interface{}{
+	conds, err := buildColumnFilter(col, "", map[string]interface{}{
 		"notIn": []interface{}{
 			"550E8400-E29B-41D4-A716-446655440000",
 			"123e4567-e89b-12d3-a456-426614174000",
@@ -108,7 +108,7 @@ func TestBuildColumnFilter_UUIDUnsupportedOperator(t *testing.T) {
 		OverrideType:    sqltype.TypeUUID,
 		HasOverrideType: true,
 	}
-	_, err := buildColumnFilter(col, map[string]interface{}{
+	_, err := buildColumnFilter(col, "", map[string]interface{}{
 		"like": "550e8400-e29b-41d4-a716-446655440000",
 	})
 	require.Error(t, err)
@@ -123,7 +123,7 @@ func TestBuildColumnFilter_UUIDInvalidValue(t *testing.T) {
 		OverrideType:    sqltype.TypeUUID,
 		HasOverrideType: true,
 	}
-	_, err := buildColumnFilter(col, map[string]interface{}{
+	_, err := buildColumnFilter(col, "", map[string]interface{}{
 		"eq": "not-a-uuid",
 	})
 	require.Error(t, err)

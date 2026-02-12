@@ -250,6 +250,40 @@ func TestNodeResolver(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPKValuesFromDecodedNodeID(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	pkCols := introspection.PrimaryKeyColumns(users)
+
+	t.Run("success", func(t *testing.T) {
+		values := []interface{}{float64(1)}
+		got, err := r.pkValuesFromDecodedNodeID(users, pkCols, introspection.GraphQLTypeName(users), values)
+		require.NoError(t, err)
+		require.EqualValues(t, int64(1), got["id"])
+	})
+
+	t.Run("type mismatch", func(t *testing.T) {
+		_, err := r.pkValuesFromDecodedNodeID(users, pkCols, "Orders", []interface{}{float64(1)})
+		require.EqualError(t, err, "invalid id for Users")
+	})
+
+	t.Run("wrong arity", func(t *testing.T) {
+		_, err := r.pkValuesFromDecodedNodeID(users, pkCols, introspection.GraphQLTypeName(users), []interface{}{})
+		require.EqualError(t, err, "invalid id for Users")
+	})
+
+	t.Run("parse failure", func(t *testing.T) {
+		_, err := r.pkValuesFromDecodedNodeID(users, pkCols, introspection.GraphQLTypeName(users), []interface{}{"not-an-int"})
+		require.Error(t, err)
+	})
+}
+
 func TestRelationshipConnectionFields_Wiring(t *testing.T) {
 	users := introspection.Table{
 		Name: "users",

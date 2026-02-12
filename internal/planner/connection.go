@@ -32,19 +32,34 @@ type ConnectionPlan struct {
 	HasCursor     bool // whether an after cursor was provided
 }
 
-// PlanConnection plans a root connection query.
-func PlanConnection(
-	schema *introspection.Schema,
+// connectionArgs holds the parsed common arguments for connection queries.
+type connectionArgs struct {
+	first         int
+	orderBy       *OrderBy
+	orderByKey    string
+	typeName      string
+	cursorCols    []introspection.Column
+	seekCondition sq.Sqlizer
+	hasCursor     bool
+	whereClause   *WhereClause
+	selected      []introspection.Column
+}
+
+// seekBuilder builds a cursor seek condition from column names, values, and direction.
+type seekBuilder func(colNames []string, values []interface{}, direction string) sq.Sqlizer
+
+// whereBuilder builds a WHERE clause for a table from a filter input map.
+type whereBuilder func(table introspection.Table, whereMap map[string]interface{}) (*WhereClause, error)
+
+// parseConnectionArgs parses the common arguments shared by all connection planning functions.
+func parseConnectionArgs(
 	table introspection.Table,
 	field *ast.Field,
 	args map[string]interface{},
-	opts ...PlanOption,
-) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
-
+	buildSeek seekBuilder,
+	buildWhere whereBuilder,
+	options *planOptions,
+) (*connectionArgs, error) {
 	defaultLimit := DefaultConnectionLimit
 	if options.defaultLimit > 0 {
 		defaultLimit = options.defaultLimit
@@ -74,8 +89,6 @@ func PlanConnection(
 
 	orderByKey := OrderByKey(table, orderBy.Columns)
 	typeName := introspection.GraphQLTypeName(table)
-
-	// Identify cursor columns (the columns encoded in the cursor).
 	cursorCols := CursorColumns(table, orderBy)
 
 	// Parse after cursor
@@ -101,7 +114,7 @@ func PlanConnection(
 		for i, c := range cursorCols {
 			colNames[i] = c.Name
 		}
-		seekCondition = BuildSeekCondition(colNames, parsedValues, orderBy.Direction)
+		seekCondition = buildSeek(colNames, parsedValues, orderBy.Direction)
 		hasCursor = true
 	}
 
@@ -109,7 +122,7 @@ func PlanConnection(
 	var whereClause *WhereClause
 	if whereArg, ok := args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = BuildWhereClause(table, whereMap)
+			whereClause, err = buildWhere(table, whereMap)
 			if err != nil {
 				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
 			}
@@ -124,14 +137,45 @@ func PlanConnection(
 	// Resolve selected columns from connection selection set
 	selected := SelectedColumnsForConnection(table, field, options.fragments, orderBy)
 
+	return &connectionArgs{
+		first:         first,
+		orderBy:       orderBy,
+		orderByKey:    orderByKey,
+		typeName:      typeName,
+		cursorCols:    cursorCols,
+		seekCondition: seekCondition,
+		hasCursor:     hasCursor,
+		whereClause:   whereClause,
+		selected:      selected,
+	}, nil
+}
+
+// PlanConnection plans a root connection query.
+func PlanConnection(
+	schema *introspection.Schema,
+	table introspection.Table,
+	field *ast.Field,
+	args map[string]interface{},
+	opts ...PlanOption,
+) (*ConnectionPlan, error) {
+	options := &planOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, BuildWhereClause, options)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build root SQL: SELECT columns WHERE (filter AND seek) ORDER BY LIMIT first+1
-	rootSQL, err := buildConnectionSQL(table, selected, whereClause, seekCondition, orderBy, first+1)
+	rootSQL, err := buildConnectionSQL(table, ca.selected, ca.whereClause, ca.seekCondition, ca.orderBy, ca.first+1)
 	if err != nil {
 		return nil, err
 	}
 
 	// Build count SQL: SELECT COUNT(*) WHERE (filter only)
-	countSQL, err := buildCountSQL(table, whereClause)
+	countSQL, err := buildCountSQL(table, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -140,12 +184,12 @@ func PlanConnection(
 		Root:          rootSQL,
 		Count:         countSQL,
 		Table:         table,
-		Columns:       selected,
-		OrderBy:       orderBy,
-		OrderByKey:    orderByKey,
-		CursorColumns: cursorCols,
-		First:         first,
-		HasCursor:     hasCursor,
+		Columns:       ca.selected,
+		OrderBy:       ca.orderBy,
+		OrderByKey:    ca.orderByKey,
+		CursorColumns: ca.cursorCols,
+		First:         ca.first,
+		HasCursor:     ca.hasCursor,
 	}, nil
 }
 
@@ -163,101 +207,28 @@ func PlanOneToManyConnection(
 		opt(options)
 	}
 
-	defaultLimit := DefaultConnectionLimit
-	if options.defaultLimit > 0 {
-		defaultLimit = options.defaultLimit
-	}
-
-	if options.limits != nil {
-		cost := EstimateCost(field, args, defaultLimit, options.fragments)
-		if err := validateLimits(cost, *options.limits); err != nil {
-			return nil, err
-		}
-	}
-
-	pkCols := introspection.PrimaryKeyColumns(table)
-	if len(pkCols) == 0 {
-		return nil, fmt.Errorf("connections require a primary key on table %s", table.Name)
-	}
-
-	first, err := ParseFirst(args)
+	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, BuildWhereClause, options)
 	if err != nil {
 		return nil, err
-	}
-
-	orderBy, err := parseConnectionOrderBy(table, args, pkCols)
-	if err != nil {
-		return nil, err
-	}
-
-	orderByKey := OrderByKey(table, orderBy.Columns)
-	typeName := introspection.GraphQLTypeName(table)
-
-	cursorCols := CursorColumns(table, orderBy)
-
-	// Parse after cursor
-	var seekCondition sq.Sqlizer
-	hasCursor := false
-	if afterRaw, ok := args["after"]; ok && afterRaw != nil {
-		afterStr, ok := afterRaw.(string)
-		if !ok {
-			return nil, fmt.Errorf("after must be a string")
-		}
-		cType, cKey, cDir, cVals, err := cursor.DecodeCursor(afterStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Direction, cType, cKey, cDir); err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		parsedValues, err := cursor.ParseCursorValues(cVals, cursorCols)
-		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		colNames := make([]string, len(cursorCols))
-		for i, c := range cursorCols {
-			colNames[i] = c.Name
-		}
-		seekCondition = BuildSeekCondition(colNames, parsedValues, orderBy.Direction)
-		hasCursor = true
-	}
-
-	// Parse WHERE clause
-	var whereClause *WhereClause
-	if whereArg, ok := args["where"]; ok {
-		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = BuildWhereClause(table, whereMap)
-			if err != nil {
-				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
-			}
-			if whereClause != nil {
-				if err := ValidateIndexedColumns(table, whereClause.UsedColumns); err != nil {
-					return nil, err
-				}
-			}
-		}
 	}
 
 	// FK filter: WHERE remoteColumn = fkValue
 	fkCondition := sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue}
 
-	// Resolve selected columns
-	selected := SelectedColumnsForConnection(table, field, options.fragments, orderBy)
-
 	// Build root SQL with FK + seek
-	builder := sq.Select(columnNames(table, selected)...).
+	builder := sq.Select(columnNames(table, ca.selected)...).
 		From(sqlutil.QuoteIdentifier(table.Name)).
 		Where(fkCondition)
 
-	if whereClause != nil && whereClause.Condition != nil {
-		builder = builder.Where(whereClause.Condition)
+	if ca.whereClause != nil && ca.whereClause.Condition != nil {
+		builder = builder.Where(ca.whereClause.Condition)
 	}
-	if seekCondition != nil {
-		builder = builder.Where(seekCondition)
+	if ca.seekCondition != nil {
+		builder = builder.Where(ca.seekCondition)
 	}
 
-	builder = builder.OrderBy(orderByClauses(orderBy)...).
-		Limit(uint64(first + 1)).
+	builder = builder.OrderBy(orderByClauses(ca.orderBy)...).
+		Limit(uint64(ca.first + 1)).
 		PlaceholderFormat(sq.Question)
 
 	query, sqlArgs, err := builder.ToSql()
@@ -269,8 +240,8 @@ func PlanOneToManyConnection(
 	countBuilder := sq.Select("COUNT(*)").
 		From(sqlutil.QuoteIdentifier(table.Name)).
 		Where(fkCondition)
-	if whereClause != nil && whereClause.Condition != nil {
-		countBuilder = countBuilder.Where(whereClause.Condition)
+	if ca.whereClause != nil && ca.whereClause.Condition != nil {
+		countBuilder = countBuilder.Where(ca.whereClause.Condition)
 	}
 	countBuilder = countBuilder.PlaceholderFormat(sq.Question)
 
@@ -283,12 +254,12 @@ func PlanOneToManyConnection(
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         SQLQuery{SQL: countQuery, Args: countArgs},
 		Table:         table,
-		Columns:       selected,
-		OrderBy:       orderBy,
-		OrderByKey:    orderByKey,
-		CursorColumns: cursorCols,
-		First:         first,
-		HasCursor:     hasCursor,
+		Columns:       ca.selected,
+		OrderBy:       ca.orderBy,
+		OrderByKey:    ca.orderByKey,
+		CursorColumns: ca.cursorCols,
+		First:         ca.first,
+		HasCursor:     ca.hasCursor,
 	}, nil
 }
 
@@ -309,81 +280,17 @@ func PlanManyToManyConnection(
 		opt(options)
 	}
 
-	defaultLimit := DefaultConnectionLimit
-	if options.defaultLimit > 0 {
-		defaultLimit = options.defaultLimit
+	buildSeek := func(colNames []string, values []interface{}, direction string) sq.Sqlizer {
+		return BuildSeekConditionQualified(targetTable.Name, colNames, values, direction)
+	}
+	buildWhere := func(table introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
+		return BuildWhereClauseQualified(table, table.Name, whereMap)
 	}
 
-	if options.limits != nil {
-		cost := EstimateCost(field, args, defaultLimit, options.fragments)
-		if err := validateLimits(cost, *options.limits); err != nil {
-			return nil, err
-		}
-	}
-
-	pkCols := introspection.PrimaryKeyColumns(targetTable)
-	if len(pkCols) == 0 {
-		return nil, fmt.Errorf("connections require a primary key on table %s", targetTable.Name)
-	}
-
-	first, err := ParseFirst(args)
+	ca, err := parseConnectionArgs(targetTable, field, args, buildSeek, buildWhere, options)
 	if err != nil {
 		return nil, err
 	}
-
-	orderBy, err := parseConnectionOrderBy(targetTable, args, pkCols)
-	if err != nil {
-		return nil, err
-	}
-
-	orderByKey := OrderByKey(targetTable, orderBy.Columns)
-	typeName := introspection.GraphQLTypeName(targetTable)
-	cursorCols := CursorColumns(targetTable, orderBy)
-
-	// Parse after cursor
-	var seekCondition sq.Sqlizer
-	hasCursor := false
-	if afterRaw, ok := args["after"]; ok && afterRaw != nil {
-		afterStr, ok := afterRaw.(string)
-		if !ok {
-			return nil, fmt.Errorf("after must be a string")
-		}
-		cType, cKey, cDir, cVals, err := cursor.DecodeCursor(afterStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Direction, cType, cKey, cDir); err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		parsedValues, err := cursor.ParseCursorValues(cVals, cursorCols)
-		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		colNames := make([]string, len(cursorCols))
-		for i, c := range cursorCols {
-			colNames[i] = c.Name
-		}
-		seekCondition = BuildSeekConditionQualified(targetTable.Name, colNames, parsedValues, orderBy.Direction)
-		hasCursor = true
-	}
-
-	// Parse WHERE clause (target table only)
-	var whereClause *WhereClause
-	if whereArg, ok := args["where"]; ok {
-		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = BuildWhereClauseQualified(targetTable, targetTable.Name, whereMap)
-			if err != nil {
-				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
-			}
-			if whereClause != nil {
-				if err := ValidateIndexedColumns(targetTable, whereClause.UsedColumns); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	selected := SelectedColumnsForConnection(targetTable, field, options.fragments, orderBy)
 
 	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
 	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
@@ -391,20 +298,20 @@ func PlanManyToManyConnection(
 	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
 	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
 
-	builder := sq.Select(columnNamesQualified(targetTable.Name, selected)...).
+	builder := sq.Select(columnNamesQualified(targetTable.Name, ca.selected)...).
 		From(quotedTarget).
 		Join(fmt.Sprintf("%s ON %s.%s = %s.%s", quotedJunction, quotedJunction, quotedRemoteFK, quotedTarget, quotedTargetPK)).
 		Where(sq.Eq{fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK): fkValue})
 
-	if whereClause != nil && whereClause.Condition != nil {
-		builder = builder.Where(whereClause.Condition)
+	if ca.whereClause != nil && ca.whereClause.Condition != nil {
+		builder = builder.Where(ca.whereClause.Condition)
 	}
-	if seekCondition != nil {
-		builder = builder.Where(seekCondition)
+	if ca.seekCondition != nil {
+		builder = builder.Where(ca.seekCondition)
 	}
 
-	builder = builder.OrderBy(orderByClausesQualified(targetTable.Name, orderBy)...).
-		Limit(uint64(first + 1)).
+	builder = builder.OrderBy(orderByClausesQualified(targetTable.Name, ca.orderBy)...).
+		Limit(uint64(ca.first + 1)).
 		PlaceholderFormat(sq.Question)
 
 	query, sqlArgs, err := builder.ToSql()
@@ -412,7 +319,7 @@ func PlanManyToManyConnection(
 		return nil, err
 	}
 
-	countQuery, err := BuildManyToManyCountSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, whereClause)
+	countQuery, err := BuildManyToManyCountSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -421,12 +328,12 @@ func PlanManyToManyConnection(
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
 		Table:         targetTable,
-		Columns:       selected,
-		OrderBy:       orderBy,
-		OrderByKey:    orderByKey,
-		CursorColumns: cursorCols,
-		First:         first,
-		HasCursor:     hasCursor,
+		Columns:       ca.selected,
+		OrderBy:       ca.orderBy,
+		OrderByKey:    ca.orderByKey,
+		CursorColumns: ca.cursorCols,
+		First:         ca.first,
+		HasCursor:     ca.hasCursor,
 	}, nil
 }
 
@@ -444,96 +351,25 @@ func PlanEdgeListConnection(
 		opt(options)
 	}
 
-	defaultLimit := DefaultConnectionLimit
-	if options.defaultLimit > 0 {
-		defaultLimit = options.defaultLimit
-	}
-
-	if options.limits != nil {
-		cost := EstimateCost(field, args, defaultLimit, options.fragments)
-		if err := validateLimits(cost, *options.limits); err != nil {
-			return nil, err
-		}
-	}
-
-	pkCols := introspection.PrimaryKeyColumns(junctionTable)
-	if len(pkCols) == 0 {
-		return nil, fmt.Errorf("connections require a primary key on table %s", junctionTable.Name)
-	}
-
-	first, err := ParseFirst(args)
+	ca, err := parseConnectionArgs(junctionTable, field, args, BuildSeekCondition, BuildWhereClause, options)
 	if err != nil {
 		return nil, err
 	}
-
-	orderBy, err := parseConnectionOrderBy(junctionTable, args, pkCols)
-	if err != nil {
-		return nil, err
-	}
-
-	orderByKey := OrderByKey(junctionTable, orderBy.Columns)
-	typeName := introspection.GraphQLTypeName(junctionTable)
-	cursorCols := CursorColumns(junctionTable, orderBy)
-
-	// Parse after cursor
-	var seekCondition sq.Sqlizer
-	hasCursor := false
-	if afterRaw, ok := args["after"]; ok && afterRaw != nil {
-		afterStr, ok := afterRaw.(string)
-		if !ok {
-			return nil, fmt.Errorf("after must be a string")
-		}
-		cType, cKey, cDir, cVals, err := cursor.DecodeCursor(afterStr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Direction, cType, cKey, cDir); err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		parsedValues, err := cursor.ParseCursorValues(cVals, cursorCols)
-		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
-		}
-		colNames := make([]string, len(cursorCols))
-		for i, c := range cursorCols {
-			colNames[i] = c.Name
-		}
-		seekCondition = BuildSeekCondition(colNames, parsedValues, orderBy.Direction)
-		hasCursor = true
-	}
-
-	// Parse WHERE clause (junction table only)
-	var whereClause *WhereClause
-	if whereArg, ok := args["where"]; ok {
-		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = BuildWhereClause(junctionTable, whereMap)
-			if err != nil {
-				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
-			}
-			if whereClause != nil {
-				if err := ValidateIndexedColumns(junctionTable, whereClause.UsedColumns); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	selected := SelectedColumnsForConnection(junctionTable, field, options.fragments, orderBy)
 
 	fkCondition := sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): fkValue}
-	builder := sq.Select(columnNames(junctionTable, selected)...).
+	builder := sq.Select(columnNames(junctionTable, ca.selected)...).
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
 		Where(fkCondition)
 
-	if whereClause != nil && whereClause.Condition != nil {
-		builder = builder.Where(whereClause.Condition)
+	if ca.whereClause != nil && ca.whereClause.Condition != nil {
+		builder = builder.Where(ca.whereClause.Condition)
 	}
-	if seekCondition != nil {
-		builder = builder.Where(seekCondition)
+	if ca.seekCondition != nil {
+		builder = builder.Where(ca.seekCondition)
 	}
 
-	builder = builder.OrderBy(orderByClauses(orderBy)...).
-		Limit(uint64(first + 1)).
+	builder = builder.OrderBy(orderByClauses(ca.orderBy)...).
+		Limit(uint64(ca.first + 1)).
 		PlaceholderFormat(sq.Question)
 
 	query, sqlArgs, err := builder.ToSql()
@@ -541,7 +377,7 @@ func PlanEdgeListConnection(
 		return nil, err
 	}
 
-	countQuery, err := BuildEdgeListCountSQL(junctionTable, junctionLocalFK, fkValue, whereClause)
+	countQuery, err := BuildEdgeListCountSQL(junctionTable, junctionLocalFK, fkValue, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -550,12 +386,12 @@ func PlanEdgeListConnection(
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
 		Table:         junctionTable,
-		Columns:       selected,
-		OrderBy:       orderBy,
-		OrderByKey:    orderByKey,
-		CursorColumns: cursorCols,
-		First:         first,
-		HasCursor:     hasCursor,
+		Columns:       ca.selected,
+		OrderBy:       ca.orderBy,
+		OrderByKey:    ca.orderByKey,
+		CursorColumns: ca.cursorCols,
+		First:         ca.first,
+		HasCursor:     ca.hasCursor,
 	}, nil
 }
 
@@ -786,8 +622,6 @@ func parseConnectionOrderBy(table introspection.Table, args map[string]interface
 	}, nil
 }
 
-// cursorColumns returns the columns that make up the cursor value.
-// This is the orderBy columns (which already include PK tie-breaker from ParseOrderBy).
 // CursorColumns returns the columns that make up the cursor value.
 // This is the orderBy columns (which already include PK tie-breaker from ParseOrderBy).
 func CursorColumns(table introspection.Table, orderBy *OrderBy) []introspection.Column {

@@ -1,6 +1,7 @@
 package scalars
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -120,4 +121,23 @@ func TestYearScalar(t *testing.T) {
 	assert.Nil(t, scalar.ParseValue(2156))
 	assert.Nil(t, scalar.ParseValue(-1))
 	assert.Nil(t, scalar.ParseValue("abcd"))
+}
+
+func TestBytesScalar(t *testing.T) {
+	scalar := Bytes()
+
+	serialized := scalar.Serialize([]byte("hello"))
+	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("hello")), serialized)
+
+	parsed := scalar.ParseValue(base64.StdEncoding.EncodeToString([]byte("world")))
+	require.IsType(t, []byte{}, parsed)
+	assert.Equal(t, []byte("world"), parsed)
+
+	assert.Equal(t, "", scalar.Serialize([]byte{}))
+	require.IsType(t, []byte{}, scalar.ParseValue(""))
+	assert.Equal(t, []byte{}, scalar.ParseValue(""))
+
+	assert.Nil(t, scalar.ParseValue("not-base64@@"))
+	assert.Nil(t, scalar.ParseLiteral(&ast.StringValue{Value: "not-base64@@"}))
+	assert.Equal(t, []byte("ok"), scalar.ParseLiteral(&ast.StringValue{Value: base64.StdEncoding.EncodeToString([]byte("ok"))}))
 }

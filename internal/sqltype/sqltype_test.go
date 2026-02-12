@@ -92,12 +92,6 @@ func TestMapToGraphQL_StringTypes(t *testing.T) {
 		"TEXT", "text",
 		"MEDIUMTEXT", "mediumtext",
 		"LONGTEXT", "longtext",
-		"BLOB", "blob",
-		"TINYBLOB", "tinyblob",
-		"MEDIUMBLOB", "mediumblob",
-		"LONGBLOB", "longblob",
-		"BINARY", "binary",
-		"VARBINARY", "varbinary",
 		"ENUM", "enum",
 	}
 
@@ -106,6 +100,25 @@ func TestMapToGraphQL_StringTypes(t *testing.T) {
 			assert.Equal(t, TypeString, MapToGraphQL(sqlType))
 			assert.Equal(t, "String", MapToGraphQL(sqlType).String())
 			assert.Equal(t, "StringFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_BytesTypes(t *testing.T) {
+	bytesTypes := []string{
+		"BLOB", "blob",
+		"TINYBLOB", "tinyblob",
+		"MEDIUMBLOB", "mediumblob",
+		"LONGBLOB", "longblob",
+		"BINARY", "binary",
+		"VARBINARY", "varbinary",
+	}
+
+	for _, sqlType := range bytesTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeBytes, MapToGraphQL(sqlType))
+			assert.Equal(t, "Bytes", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "BytesFilter", MapToGraphQL(sqlType).FilterTypeName())
 		})
 	}
 }
@@ -277,6 +290,7 @@ func TestIsNumeric(t *testing.T) {
 		{TypeTime, false},
 		{TypeYear, false},
 		{TypeSet, false},
+		{TypeBytes, false},
 	}
 
 	for _, tc := range testCases {
@@ -303,6 +317,7 @@ func TestIsComparable(t *testing.T) {
 		{TypeTime, true},
 		{TypeYear, true},
 		{TypeSet, true},
+		{TypeBytes, true},
 	}
 
 	for _, tc := range testCases {

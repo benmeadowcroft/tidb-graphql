@@ -98,7 +98,8 @@ SQL types are mapped to GraphQL scalars:
 - `datetime`, `timestamp` -> `DateTime` (RFC 3339, UTC)
 - `time` -> `Time` (HH:MM:SS[.fraction], TiDB range)
 - `year` -> `Year` (YYYY)
-- `char`, `text`, `blob`, `binary` -> `String`
+- `blob`, `binary`, `varbinary` -> `Bytes` (RFC4648 base64, padded)
+- `char`, `text` -> `String`
 
 ## Descriptions
 

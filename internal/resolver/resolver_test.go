@@ -657,6 +657,49 @@ func TestYearFilterType(t *testing.T) {
 	assert.Nil(t, fields["notLike"])
 }
 
+func TestBytesFieldType(t *testing.T) {
+	table := introspection.Table{
+		Name: "files",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "payload", DataType: "blob", IsNullable: false},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	fields := objType.Fields()
+
+	nonNull, ok := fields["payload"].Type.(*graphql.NonNull)
+	require.True(t, ok)
+	_, ok = nonNull.OfType.(*graphql.Scalar)
+	require.True(t, ok)
+	assert.Equal(t, "Bytes", nonNull.OfType.Name())
+}
+
+func TestBytesFilterType(t *testing.T) {
+	table := introspection.Table{
+		Name: "files",
+		Columns: []introspection.Column{
+			{Name: "payload", DataType: "blob", IsNullable: true},
+		},
+	}
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	filterType := r.getFilterInputType(table, table.Columns[0])
+	require.NotNil(t, filterType)
+	fields := filterType.Fields()
+	assert.NotNil(t, fields["eq"])
+	assert.NotNil(t, fields["ne"])
+	assert.NotNil(t, fields["in"])
+	assert.NotNil(t, fields["notIn"])
+	assert.NotNil(t, fields["isNull"])
+	assert.Nil(t, fields["lt"])
+	assert.Nil(t, fields["like"])
+}
+
 func TestSetFilterType(t *testing.T) {
 	table := introspection.Table{
 		Name: "products",
@@ -729,6 +772,14 @@ func TestConvertValue_PreservesTime(t *testing.T) {
 	assert.Equal(t, now, converted)
 }
 
+func TestConvertColumnValue_BytesPreserved(t *testing.T) {
+	col := introspection.Column{Name: "payload", DataType: "blob"}
+	raw := []byte{0x01, 0x02, 0x03}
+	converted := convertColumnValue(col, raw)
+	require.IsType(t, []byte{}, converted)
+	assert.Equal(t, raw, converted)
+}
+
 func TestParseSetColumnValue(t *testing.T) {
 	assert.Equal(t, []string{"featured", "sale"}, parseSetColumnValue("featured,sale"))
 	assert.Equal(t, []string{}, parseSetColumnValue(""))
@@ -751,6 +802,24 @@ func TestMapInputColumns_SetValueNormalization(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"tags"}, cols)
 	require.Equal(t, []interface{}{"featured,sale"}, vals)
+}
+
+func TestMapInputColumns_BytesPreserved(t *testing.T) {
+	table := introspection.Table{
+		Name: "files",
+		Columns: []introspection.Column{
+			{Name: "payload", DataType: "blob"},
+		},
+	}
+	input := map[string]interface{}{
+		"payload": []byte{0xDE, 0xAD, 0xBE, 0xEF},
+	}
+	allowed := map[string]bool{"payload": true}
+
+	cols, vals, err := mapInputColumns(table, input, allowed)
+	require.NoError(t, err)
+	require.Equal(t, []string{"payload"}, cols)
+	require.Equal(t, []interface{}{[]byte{0xDE, 0xAD, 0xBE, 0xEF}}, vals)
 }
 
 func TestManyToOneResolver(t *testing.T) {

@@ -1,6 +1,7 @@
 package nodeid
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -77,5 +78,16 @@ func TestParsePKValue_DateTime(t *testing.T) {
 	assert.Equal(t, time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC), value)
 
 	_, err = ParsePKValue(col, "2024-01-15")
+	require.Error(t, err)
+}
+
+func TestParsePKValue_Bytes(t *testing.T) {
+	col := introspection.Column{Name: "key", DataType: "blob"}
+	encoded := base64.StdEncoding.EncodeToString([]byte("abc"))
+	value, err := ParsePKValue(col, encoded)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("abc"), value)
+
+	_, err = ParsePKValue(col, "%%%")
 	require.Error(t, err)
 }

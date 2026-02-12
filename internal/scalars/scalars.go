@@ -1,6 +1,7 @@
 package scalars
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -365,6 +366,49 @@ func Year() *graphql.Scalar {
 			default:
 				return nil
 			}
+		},
+	})
+}
+
+func Bytes() *graphql.Scalar {
+	return graphql.NewScalar(graphql.ScalarConfig{
+		Name:        "Bytes",
+		Description: "Binary data serialized as RFC4648 base64 (standard alphabet with padding).",
+		Serialize: func(value interface{}) interface{} {
+			switch v := value.(type) {
+			case []byte:
+				return base64.StdEncoding.EncodeToString(v)
+			case string:
+				decoded, err := base64.StdEncoding.DecodeString(v)
+				if err != nil {
+					return nil
+				}
+				return base64.StdEncoding.EncodeToString(decoded)
+			default:
+				return nil
+			}
+		},
+		ParseValue: func(value interface{}) interface{} {
+			s, ok := value.(string)
+			if !ok {
+				return nil
+			}
+			decoded, err := base64.StdEncoding.DecodeString(s)
+			if err != nil {
+				return nil
+			}
+			return decoded
+		},
+		ParseLiteral: func(valueAST ast.Value) interface{} {
+			sv, ok := valueAST.(*ast.StringValue)
+			if !ok {
+				return nil
+			}
+			decoded, err := base64.StdEncoding.DecodeString(sv.Value)
+			if err != nil {
+				return nil
+			}
+			return decoded
 		},
 	})
 }

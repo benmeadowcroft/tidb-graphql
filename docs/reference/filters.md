@@ -30,6 +30,7 @@ Supported operators depend on the column type:
 - Enum: `eq`, `ne`, `in`, `notIn`, `isNull`
 - Date: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
 - DateTime: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
+- Bytes: `eq`, `ne`, `in`, `notIn`, `isNull` (base64 values)
 - Set: `has`, `hasAnyOf`, `hasAllOf`, `hasNoneOf`, `eq`, `ne`, `isNull`
 
 Example:
@@ -39,6 +40,17 @@ Example:
   users(where: { email: { like: "%@example.com" }, status: { ne: INACTIVE } }) {
     id
     email
+  }
+}
+```
+
+Bytes example:
+
+```graphql
+{
+  files(where: { payload: { eq: "SGVsbG8=" } }) {
+    id
+    payload
   }
 }
 ```

@@ -159,6 +159,19 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		default:
 			return nil, fmt.Errorf("invalid datetime value for %s", col.Name)
 		}
+	case sqltype.TypeBytes:
+		switch v := raw.(type) {
+		case string:
+			decoded, err := base64.StdEncoding.DecodeString(v)
+			if err != nil {
+				return nil, fmt.Errorf("invalid bytes value for %s", col.Name)
+			}
+			return decoded, nil
+		case []byte:
+			return v, nil
+		default:
+			return nil, fmt.Errorf("invalid bytes value for %s", col.Name)
+		}
 	default:
 		switch v := raw.(type) {
 		case string:

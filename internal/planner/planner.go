@@ -4,6 +4,7 @@
 package planner
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -705,6 +706,9 @@ func buildColumnFilter(col introspection.Column, filterMap map[string]interface{
 	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
 		return buildSetColumnFilter(col, quotedColumn, filterMap)
 	}
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeBytes {
+		return buildBytesColumnFilter(quotedColumn, filterMap)
+	}
 
 	for op, value := range filterMap {
 		switch op {
@@ -764,6 +768,9 @@ func buildColumnFilterQualified(col introspection.Column, alias string, filterMa
 
 	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
 		return buildSetColumnFilter(col, quotedColumn, filterMap)
+	}
+	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeBytes {
+		return buildBytesColumnFilter(quotedColumn, filterMap)
 	}
 
 	for op, value := range filterMap {
@@ -930,6 +937,87 @@ func setArrayValues(value interface{}) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("set filter value must be an array")
 	}
+}
+
+func buildBytesColumnFilter(quotedColumn string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+	conditions := []sq.Sqlizer{}
+
+	for op, value := range filterMap {
+		switch op {
+		case "eq":
+			decoded, err := decodeBase64Bytes(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: decoded})
+		case "ne":
+			decoded, err := decodeBase64Bytes(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: decoded})
+		case "in":
+			decoded, err := decodeBase64BytesList(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: decoded})
+		case "notIn":
+			decoded, err := decodeBase64BytesList(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: decoded})
+		case "isNull":
+			boolVal, ok := value.(bool)
+			if !ok {
+				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+			if boolVal {
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
+			} else {
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
+			}
+		case "lt", "lte", "gt", "gte", "like", "notLike":
+			return nil, fmt.Errorf("operator %s is not supported for bytes columns", op)
+		default:
+			return nil, fmt.Errorf("unknown bytes filter operator: %s", op)
+		}
+	}
+
+	return conditions, nil
+}
+
+func decodeBase64Bytes(value interface{}) ([]byte, error) {
+	switch v := value.(type) {
+	case []byte:
+		// Bytes scalar ParseValue/ParseLiteral already decoded base64 for us.
+		return v, nil
+	case string:
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 value")
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("bytes filter value must be bytes or a base64 string")
+	}
+}
+
+func decodeBase64BytesList(value interface{}) ([]interface{}, error) {
+	arr, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("bytes filter value must be an array")
+	}
+	out := make([]interface{}, 0, len(arr))
+	for _, item := range arr {
+		decoded, err := decodeBase64Bytes(item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, decoded)
+	}
+	return out, nil
 }
 
 // findColumnByGraphQLName finds a column in the table by its GraphQL field name

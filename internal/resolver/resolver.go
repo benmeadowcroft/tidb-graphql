@@ -57,6 +57,7 @@ type Resolver struct {
 	dateType           *graphql.Scalar
 	timeType           *graphql.Scalar
 	yearType           *graphql.Scalar
+	bytesType          *graphql.Scalar
 	nodeInterface      *graphql.Interface
 	pageInfoType       *graphql.Object
 	edgeCache          map[string]*graphql.Object
@@ -1469,6 +1470,26 @@ func (r *Resolver) yearScalar() *graphql.Scalar {
 	return cached
 }
 
+func (r *Resolver) bytesScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.bytesType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Bytes()
+
+	r.mu.Lock()
+	if r.bytesType == nil {
+		r.bytesType = scalar
+	}
+	cached = r.bytesType
+	r.mu.Unlock()
+
+	return cached
+}
+
 func (r *Resolver) nodeInterfaceType() *graphql.Interface {
 	r.mu.RLock()
 	cached := r.nodeInterface
@@ -2318,6 +2339,17 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 			Fields: graphql.InputObjectConfigFieldMap{
 				"eq":     &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 				"ne":     &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "BytesFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "BytesFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.bytesScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.bytesScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bytesScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bytesScalar()))},
 				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 			},
 		})
@@ -3832,10 +3864,14 @@ func convertValue(val interface{}) interface{} {
 }
 
 func convertColumnValue(col introspection.Column, val interface{}) interface{} {
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+	switch sqltype.MapToGraphQL(col.DataType) {
+	case sqltype.TypeSet:
 		return parseSetColumnValue(val)
+	case sqltype.TypeBytes:
+		return val
+	default:
+		return convertValue(val)
 	}
-	return convertValue(val)
 }
 
 func parseSetColumnValue(val interface{}) interface{} {
@@ -3900,6 +3936,8 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 		return r.timeScalar()
 	case sqltype.TypeYear:
 		return r.yearScalar()
+	case sqltype.TypeBytes:
+		return r.bytesScalar()
 	case sqltype.TypeSet:
 		return graphql.NewList(graphql.NewNonNull(graphql.String))
 	default:
@@ -3938,6 +3976,8 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 		return r.timeScalar()
 	case sqltype.TypeYear:
 		return r.yearScalar()
+	case sqltype.TypeBytes:
+		return r.bytesScalar()
 	case sqltype.TypeSet:
 		return graphql.NewList(graphql.NewNonNull(graphql.String))
 	default:

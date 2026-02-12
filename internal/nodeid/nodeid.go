@@ -59,12 +59,31 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 
 	switch introspection.EffectiveGraphQLType(col) {
 	case sqltype.TypeInt, sqltype.TypeBigInt:
-		switch v := raw.(type) {
-		case float64:
-			if v != math.Trunc(v) {
-				return nil, fmt.Errorf("invalid integer value for %s", col.Name)
+		// Node IDs decode numeric JSON values as float64/uint64. Keep explicit range
+		// checks here so PK coercion cannot overflow when converting to int64.
+		parseUint := func(v uint64) (int64, error) {
+			if v > math.MaxInt64 {
+				return 0, fmt.Errorf("invalid integer value for %s", col.Name)
 			}
 			return int64(v), nil
+		}
+		parseFloat := func(v float64) (int64, error) {
+			if v != math.Trunc(v) {
+				return 0, fmt.Errorf("invalid integer value for %s", col.Name)
+			}
+			if v < float64(math.MinInt64) || v > float64(math.MaxInt64) {
+				return 0, fmt.Errorf("invalid integer value for %s", col.Name)
+			}
+			return int64(v), nil
+		}
+
+		switch v := raw.(type) {
+		case float64:
+			parsed, err := parseFloat(v)
+			if err != nil {
+				return nil, err
+			}
+			return parsed, nil
 		case int:
 			return int64(v), nil
 		case int32:
@@ -72,11 +91,23 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		case int64:
 			return v, nil
 		case uint:
-			return int64(v), nil
+			parsed, err := parseUint(uint64(v))
+			if err != nil {
+				return nil, err
+			}
+			return parsed, nil
 		case uint32:
-			return int64(v), nil
+			parsed, err := parseUint(uint64(v))
+			if err != nil {
+				return nil, err
+			}
+			return parsed, nil
 		case uint64:
-			return int64(v), nil
+			parsed, err := parseUint(v)
+			if err != nil {
+				return nil, err
+			}
+			return parsed, nil
 		case string:
 			parsed, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {

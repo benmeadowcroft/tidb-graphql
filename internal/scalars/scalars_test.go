@@ -3,6 +3,7 @@ package scalars
 import (
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -23,6 +24,9 @@ func TestBigIntScalar(t *testing.T) {
 
 	invalid := scalar.ParseValue("not-a-number")
 	assert.Nil(t, invalid)
+
+	assert.Nil(t, scalar.Serialize(float64(math.MaxInt64)*2))
+	assert.Nil(t, scalar.ParseValue(float64(math.MaxInt64)*2))
 }
 
 func TestDecimalScalar(t *testing.T) {

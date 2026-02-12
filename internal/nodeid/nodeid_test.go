@@ -2,6 +2,7 @@ package nodeid
 
 import (
 	"encoding/base64"
+	"math"
 	"testing"
 	"time"
 
@@ -48,6 +49,12 @@ func TestParsePKValue_Int(t *testing.T) {
 	assert.EqualValues(t, 12, value)
 
 	_, err = ParsePKValue(col, 12.5)
+	require.Error(t, err)
+
+	_, err = ParsePKValue(col, float64(math.MaxInt64)*2)
+	require.Error(t, err)
+
+	_, err = ParsePKValue(col, uint64(math.MaxInt64)+1)
 	require.Error(t, err)
 }
 

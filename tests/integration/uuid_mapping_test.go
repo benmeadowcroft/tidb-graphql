@@ -19,6 +19,10 @@ var uuidMappingPatterns = map[string][]string{
 }
 
 func TestUUIDMapping_QueryAndFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/uuid_mapping_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/uuid_mapping_seed.sql")
@@ -46,6 +50,10 @@ func TestUUIDMapping_QueryAndFilter(t *testing.T) {
 }
 
 func TestUUIDMapping_MutationRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/uuid_mapping_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/uuid_mapping_seed.sql")
@@ -74,6 +82,10 @@ func TestUUIDMapping_MutationRoundTrip(t *testing.T) {
 }
 
 func TestUUIDMapping_InvalidStoredValueReturnsError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/uuid_mapping_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/uuid_mapping_seed.sql")

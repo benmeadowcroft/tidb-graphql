@@ -47,6 +47,46 @@ func TestApplyUUIDTypeOverrides(t *testing.T) {
 	assert.Equal(t, sqltype.TypeUUID, events.Columns[0].OverrideType)
 }
 
+func TestApplyUUIDTypeOverrides_TablePatternCaseInsensitive(t *testing.T) {
+	schema := &Schema{
+		Tables: []Table{
+			{
+				Name: "Orders",
+				Columns: []Column{
+					{Name: "id", DataType: "binary", ColumnType: "binary(16)"},
+				},
+			},
+		},
+	}
+
+	err := ApplyUUIDTypeOverrides(schema, map[string][]string{
+		"orders": {"id"},
+	})
+	require.NoError(t, err)
+	require.True(t, schema.Tables[0].Columns[0].HasOverrideType)
+	assert.Equal(t, sqltype.TypeUUID, schema.Tables[0].Columns[0].OverrideType)
+}
+
+func TestApplyUUIDTypeOverrides_TableGlobPattern(t *testing.T) {
+	schema := &Schema{
+		Tables: []Table{
+			{
+				Name: "order_events",
+				Columns: []Column{
+					{Name: "event_uuid", DataType: "char", ColumnType: "char(36)"},
+				},
+			},
+		},
+	}
+
+	err := ApplyUUIDTypeOverrides(schema, map[string][]string{
+		"order_*": {"*_uuid"},
+	})
+	require.NoError(t, err)
+	require.True(t, schema.Tables[0].Columns[0].HasOverrideType)
+	assert.Equal(t, sqltype.TypeUUID, schema.Tables[0].Columns[0].OverrideType)
+}
+
 func TestApplyUUIDTypeOverrides_InvalidType(t *testing.T) {
 	schema := &Schema{
 		Tables: []Table{

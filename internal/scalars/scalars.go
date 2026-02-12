@@ -84,6 +84,26 @@ func JSON() *graphql.Scalar {
 }
 
 func BigInt() *graphql.Scalar {
+	// GraphQL inputs may arrive as float64; guard bounds before int64 conversion
+	// to avoid silent overflow on large numeric values.
+	parseFloatInt := func(v float64) (int64, bool) {
+		if v != math.Trunc(v) {
+			return 0, false
+		}
+		if v < float64(math.MinInt64) || v > float64(math.MaxInt64) {
+			return 0, false
+		}
+		return int64(v), true
+	}
+
+	// Unsigned JSON numbers can exceed signed 64-bit range.
+	parseUint := func(v uint64) (int64, bool) {
+		if v > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	}
+
 	return graphql.NewScalar(graphql.ScalarConfig{
 		Name:        "BigInt",
 		Description: "64-bit integer value serialized as a string.",
@@ -110,10 +130,11 @@ func BigInt() *graphql.Scalar {
 			case uint64:
 				return strconv.FormatUint(v, 10)
 			case float64:
-				if v != math.Trunc(v) {
+				parsed, ok := parseFloatInt(v)
+				if !ok {
 					return nil
 				}
-				return strconv.FormatInt(int64(v), 10)
+				return strconv.FormatInt(parsed, 10)
 			case string:
 				if _, err := strconv.ParseInt(v, 10, 64); err == nil {
 					return v
@@ -142,7 +163,11 @@ func BigInt() *graphql.Scalar {
 			case int64:
 				return v
 			case uint:
-				return int64(v)
+				parsed, ok := parseUint(uint64(v))
+				if !ok {
+					return nil
+				}
+				return parsed
 			case uint8:
 				return int64(v)
 			case uint16:
@@ -150,15 +175,17 @@ func BigInt() *graphql.Scalar {
 			case uint32:
 				return int64(v)
 			case uint64:
-				if v > math.MaxInt64 {
+				parsed, ok := parseUint(v)
+				if !ok {
 					return nil
 				}
-				return int64(v)
+				return parsed
 			case float64:
-				if v != math.Trunc(v) {
+				parsed, ok := parseFloatInt(v)
+				if !ok {
 					return nil
 				}
-				return int64(v)
+				return parsed
 			case string:
 				parsed, err := strconv.ParseInt(v, 10, 64)
 				if err != nil {

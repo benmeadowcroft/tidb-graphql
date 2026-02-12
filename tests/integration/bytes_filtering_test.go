@@ -16,6 +16,10 @@ import (
 )
 
 func TestBytesFiltering_QueryAndFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/bytes_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/bytes_filtering_seed.sql")
@@ -41,6 +45,10 @@ func TestBytesFiltering_QueryAndFilter(t *testing.T) {
 }
 
 func TestBytesFiltering_MutationRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/bytes_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/bytes_filtering_seed.sql")
@@ -68,6 +76,10 @@ func TestBytesFiltering_MutationRoundTrip(t *testing.T) {
 }
 
 func TestBytesFiltering_InvalidBase64Rejected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/bytes_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/bytes_filtering_seed.sql")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -50,8 +51,27 @@ func mergePatterns(patterns map[string][]string, table string) []string {
 	if patterns == nil {
 		return nil
 	}
-	combined := append([]string{}, patterns["*"]...)
-	combined = append(combined, patterns[table]...)
+	tableLower := strings.ToLower(table)
+	keys := make([]string, 0, len(patterns))
+	for key := range patterns {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	combined := make([]string, 0)
+	for _, key := range keys {
+		// Table keys are glob patterns over SQL table names (case-insensitive),
+		// so "*" and specific patterns can contribute column patterns.
+		pattern := strings.ToLower(strings.TrimSpace(key))
+		if pattern == "" {
+			continue
+		}
+		matched, err := path.Match(pattern, tableLower)
+		if err != nil || !matched {
+			continue
+		}
+		combined = append(combined, patterns[key]...)
+	}
 	return slices.Compact(combined)
 }
 

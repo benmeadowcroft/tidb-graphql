@@ -435,33 +435,53 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 	}
 
 	selected := make(map[string]struct{})
+	visitedFragments := make(map[string]struct{})
 
-	// Walk connection-level selections looking for "nodes" and "edges"
-	for _, sel := range field.SelectionSet.Selections {
-		subField, ok := sel.(*ast.Field)
-		if !ok || subField.Name == nil {
-			continue
-		}
-
-		switch subField.Name.Value {
-		case "nodes":
-			// nodes { name email } -> extract column fields directly
-			collectColumnFields(subField, columnByField, selected, fragments)
-		case "edges":
-			// edges { node { name email } } -> find "node" inside edges
-			if subField.SelectionSet != nil {
-				for _, edgeSel := range subField.SelectionSet.Selections {
-					nodeField, ok := edgeSel.(*ast.Field)
-					if !ok || nodeField.Name == nil {
-						continue
-					}
-					if nodeField.Name.Value == "node" {
-						collectColumnFields(nodeField, columnByField, selected, fragments)
+	var visitConnectionSelections func(selections []ast.Selection)
+	visitConnectionSelections = func(selections []ast.Selection) {
+		for _, selection := range selections {
+			switch sel := selection.(type) {
+			case *ast.Field:
+				if sel.Name == nil {
+					continue
+				}
+				switch sel.Name.Value {
+				case "nodes", "node":
+					collectColumnFields(sel, columnByField, selected, fragments)
+				case "edges":
+					if sel.SelectionSet != nil {
+						visitConnectionSelections(sel.SelectionSet.Selections)
 					}
 				}
+			case *ast.InlineFragment:
+				if sel.SelectionSet != nil {
+					visitConnectionSelections(sel.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || sel.Name == nil {
+					continue
+				}
+				fragmentName := sel.Name.Value
+				// Connection selections commonly route through shared fragments.
+				// Track visited names to avoid cycles and duplicate traversal.
+				if _, seen := visitedFragments[fragmentName]; seen {
+					continue
+				}
+				def, ok := fragments[fragmentName]
+				if !ok {
+					continue
+				}
+				fragment, ok := def.(*ast.FragmentDefinition)
+				if !ok || fragment.SelectionSet == nil {
+					continue
+				}
+				visitedFragments[fragmentName] = struct{}{}
+				visitConnectionSelections(fragment.SelectionSet.Selections)
 			}
 		}
 	}
+
+	visitConnectionSelections(field.SelectionSet.Selections)
 
 	if len(selected) == 0 {
 		return EnsureColumns(table, table.Columns, orderBy.Columns)

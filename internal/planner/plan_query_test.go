@@ -415,3 +415,90 @@ func TestPlanQuery_RelationshipOneToMany(t *testing.T) {
 	)
 	assertWhereLimitOffsetArgs(t, plan.Root.SQL, plan.Root.Args, []interface{}{7}, 12, 4)
 }
+
+func TestSelectedColumnsForConnection_RootFragmentSpread(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "email"},
+			{Name: "created_at"},
+		},
+	}
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "usersConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.FragmentSpread{Name: &ast.Name{Value: "ConnFields"}},
+		}},
+	}
+	fragments := map[string]ast.Definition{
+		"ConnFields": &ast.FragmentDefinition{
+			Name: &ast.Name{Value: "ConnFields"},
+			SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+						&ast.Field{Name: &ast.Name{Value: "email"}},
+					}},
+				},
+			}},
+		},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Direction: "ASC"}
+	cols := SelectedColumnsForConnection(table, field, fragments, orderBy)
+	names := columnNamesOnly(cols)
+
+	assert.Equal(t, []string{"id", "email", "created_at"}, names)
+}
+
+func TestSelectedColumnsForConnection_EdgesNodeViaFragment(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "email"},
+			{Name: "created_at"},
+		},
+	}
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "usersConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "edges"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.FragmentSpread{Name: &ast.Name{Value: "EdgeBits"}},
+				}},
+			},
+		}},
+	}
+	fragments := map[string]ast.Definition{
+		"EdgeBits": &ast.FragmentDefinition{
+			Name: &ast.Name{Value: "EdgeBits"},
+			SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "node"},
+					SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+						&ast.Field{Name: &ast.Name{Value: "createdAt"}},
+					}},
+				},
+			}},
+		},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	cols := SelectedColumnsForConnection(table, field, fragments, orderBy)
+	names := columnNamesOnly(cols)
+
+	assert.Equal(t, []string{"id", "created_at"}, names)
+}
+
+func columnNamesOnly(cols []introspection.Column) []string {
+	names := make([]string, 0, len(cols))
+	for _, c := range cols {
+		names = append(names, c.Name)
+	}
+	return names
+}

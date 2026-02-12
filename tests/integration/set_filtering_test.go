@@ -16,6 +16,10 @@ import (
 )
 
 func TestSetFiltering_Has(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/set_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/set_filtering_seed.sql")
@@ -43,6 +47,10 @@ func TestSetFiltering_Has(t *testing.T) {
 }
 
 func TestSetFiltering_HasAnyAllNoneOf(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/set_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/set_filtering_seed.sql")
@@ -94,6 +102,10 @@ func TestSetFiltering_HasAnyAllNoneOf(t *testing.T) {
 }
 
 func TestSetFiltering_ExactEqAndNe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/set_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/set_filtering_seed.sql")
@@ -128,6 +140,10 @@ func TestSetFiltering_ExactEqAndNe(t *testing.T) {
 }
 
 func TestSetFiltering_EmptyListSemantics(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/set_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/set_filtering_seed.sql")
@@ -162,6 +178,10 @@ func TestSetFiltering_EmptyListSemantics(t *testing.T) {
 }
 
 func TestSetFiltering_MutationRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
 	testDB := tidbcloud.NewTestDB(t)
 	testDB.LoadSchema(t, "../fixtures/set_filtering_schema.sql")
 	testDB.LoadFixtures(t, "../fixtures/set_filtering_seed.sql")

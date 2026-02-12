@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"reflect"
 	"strings"
 	"sync"
@@ -32,7 +33,14 @@ type Config struct {
 	Server        ServerConfig        `mapstructure:"server"`
 	Observability ObservabilityConfig `mapstructure:"observability"`
 	SchemaFilters schemafilter.Config `mapstructure:"schema_filters"`
+	TypeMappings  TypeMappingsConfig  `mapstructure:"type_mappings"`
 	Naming        naming.Config       `mapstructure:"naming"`
+}
+
+// TypeMappingsConfig controls explicit SQL-to-GraphQL type overrides.
+type TypeMappingsConfig struct {
+	// UUIDColumns maps table glob patterns to column glob patterns that should be treated as UUID.
+	UUIDColumns map[string][]string `mapstructure:"uuid_columns"`
 }
 
 // PoolConfig holds connection pool parameters.
@@ -87,13 +95,13 @@ type DatabaseConfig struct {
 	ConnectionStringFile string `mapstructure:"dsn_file"`
 
 	// Discrete connection fields (used when DSN is not set)
-	Host                    string `mapstructure:"host"`
-	Port                    int    `mapstructure:"port"`
-	User                    string `mapstructure:"user"`
-	Password                string `mapstructure:"password"`
-	PasswordFile            string `mapstructure:"password_file"`
-	PasswordPrompt          bool   `mapstructure:"password_prompt"`
-	Database                string `mapstructure:"database"`
+	Host           string `mapstructure:"host"`
+	Port           int    `mapstructure:"port"`
+	User           string `mapstructure:"user"`
+	Password       string `mapstructure:"password"`
+	PasswordFile   string `mapstructure:"password_file"`
+	PasswordPrompt bool   `mapstructure:"password_prompt"`
+	Database       string `mapstructure:"database"`
 
 	// TLS holds the TLS/SSL configuration for database connections.
 	TLS DatabaseTLSConfig `mapstructure:"tls"`
@@ -109,15 +117,15 @@ type DatabaseConfig struct {
 
 // AuthConfig holds authentication and authorization parameters.
 type AuthConfig struct {
-	OIDCEnabled              bool          `mapstructure:"oidc_enabled"`
-	OIDCIssuerURL            string        `mapstructure:"oidc_issuer_url"`
-	OIDCAudience             string        `mapstructure:"oidc_audience"`
-	OIDCClockSkew            time.Duration `mapstructure:"oidc_clock_skew"`
-	OIDCSkipTLSVerify        bool          `mapstructure:"oidc_skip_tls_verify"`
-	DBRoleEnabled            bool          `mapstructure:"db_role_enabled"`
-	DBRoleClaimName          string        `mapstructure:"db_role_claim_name"`
-	DBRoleValidationEnabled  bool          `mapstructure:"db_role_validation_enabled"`
-	DBRoleIntrospectionRole  string        `mapstructure:"db_role_introspection_role"`
+	OIDCEnabled             bool          `mapstructure:"oidc_enabled"`
+	OIDCIssuerURL           string        `mapstructure:"oidc_issuer_url"`
+	OIDCAudience            string        `mapstructure:"oidc_audience"`
+	OIDCClockSkew           time.Duration `mapstructure:"oidc_clock_skew"`
+	OIDCSkipTLSVerify       bool          `mapstructure:"oidc_skip_tls_verify"`
+	DBRoleEnabled           bool          `mapstructure:"db_role_enabled"`
+	DBRoleClaimName         string        `mapstructure:"db_role_claim_name"`
+	DBRoleValidationEnabled bool          `mapstructure:"db_role_validation_enabled"`
+	DBRoleIntrospectionRole string        `mapstructure:"db_role_introspection_role"`
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -148,9 +156,9 @@ type ServerConfig struct {
 	HealthCheckTimeout       time.Duration `mapstructure:"health_check_timeout"`
 
 	// TLS Configuration
-	TLSMode       string `mapstructure:"tls_mode"`         // "off", "auto", or "file" (default: "off")
-	TLSCertFile   string `mapstructure:"tls_cert_file"`    // Path to certificate file (for "file" mode)
-	TLSKeyFile    string `mapstructure:"tls_key_file"`     // Path to private key file (for "file" mode)
+	TLSMode        string `mapstructure:"tls_mode"`          // "off", "auto", or "file" (default: "off")
+	TLSCertFile    string `mapstructure:"tls_cert_file"`     // Path to certificate file (for "file" mode)
+	TLSKeyFile     string `mapstructure:"tls_key_file"`      // Path to private key file (for "file" mode)
 	TLSAutoCertDir string `mapstructure:"tls_auto_cert_dir"` // Directory for auto-generated certs (default: ".tls")
 }
 
@@ -621,6 +629,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("schema_filters.deny_mutation_tables", []string{})
 	v.SetDefault("schema_filters.deny_mutation_columns", map[string][]string{})
 
+	// Explicit type mapping defaults.
+	v.SetDefault("type_mappings.uuid_columns", map[string][]string{})
+
 	// Naming defaults
 	v.SetDefault("naming.plural_overrides", map[string]string{})
 	v.SetDefault("naming.singular_overrides", map[string]string{})
@@ -729,7 +740,47 @@ func (c *Config) Validate() *ValidationResult {
 	// Validate observability config
 	c.Observability.validate(result)
 
+	// Validate explicit type mappings
+	c.TypeMappings.validate(result)
+
 	return result
+}
+
+func (t *TypeMappingsConfig) validate(result *ValidationResult) {
+	validatePatternMap(result, "type_mappings.uuid_columns", t.UUIDColumns)
+}
+
+func validatePatternMap(result *ValidationResult, field string, patternMap map[string][]string) {
+	for tablePattern, columnPatterns := range patternMap {
+		if strings.TrimSpace(tablePattern) == "" {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   field,
+				Message: "table pattern cannot be empty",
+			})
+			continue
+		}
+		if _, err := path.Match(strings.ToLower(tablePattern), "probe"); err != nil {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   field,
+				Message: fmt.Sprintf("invalid table glob pattern %q: %v", tablePattern, err),
+			})
+		}
+		for _, columnPattern := range columnPatterns {
+			if strings.TrimSpace(columnPattern) == "" {
+				result.Errors = append(result.Errors, ValidationError{
+					Field:   field,
+					Message: fmt.Sprintf("column pattern for table pattern %q cannot be empty", tablePattern),
+				})
+				continue
+			}
+			if _, err := path.Match(strings.ToLower(columnPattern), "probe"); err != nil {
+				result.Errors = append(result.Errors, ValidationError{
+					Field:   field,
+					Message: fmt.Sprintf("invalid column glob pattern %q for table pattern %q: %v", columnPattern, tablePattern, err),
+				})
+			}
+		}
+	}
 }
 
 func (d *DatabaseConfig) validate(result *ValidationResult) {

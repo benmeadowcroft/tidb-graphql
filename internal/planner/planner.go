@@ -7,12 +7,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/setutil"
 	"tidb-graphql/internal/sqltype"
 	"tidb-graphql/internal/sqlutil"
+	"tidb-graphql/internal/uuidutil"
 
 	sq "github.com/Masterminds/squirrel"
 )
@@ -703,11 +705,15 @@ func buildColumnFilter(col introspection.Column, filterMap map[string]interface{
 	conditions := []sq.Sqlizer{}
 	quotedColumn := sqlutil.QuoteIdentifier(col.Name)
 
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+	effectiveType := introspection.EffectiveGraphQLType(col)
+	if effectiveType == sqltype.TypeSet {
 		return buildSetColumnFilter(col, quotedColumn, filterMap)
 	}
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeBytes {
+	if effectiveType == sqltype.TypeBytes {
 		return buildBytesColumnFilter(quotedColumn, filterMap)
+	}
+	if effectiveType == sqltype.TypeUUID {
+		return buildUUIDColumnFilter(col, quotedColumn, filterMap)
 	}
 
 	for op, value := range filterMap {
@@ -766,11 +772,15 @@ func buildColumnFilterQualified(col introspection.Column, alias string, filterMa
 		quotedColumn = fmt.Sprintf("%s.%s", sqlutil.QuoteIdentifier(alias), quotedColumn)
 	}
 
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+	effectiveType := introspection.EffectiveGraphQLType(col)
+	if effectiveType == sqltype.TypeSet {
 		return buildSetColumnFilter(col, quotedColumn, filterMap)
 	}
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeBytes {
+	if effectiveType == sqltype.TypeBytes {
 		return buildBytesColumnFilter(quotedColumn, filterMap)
+	}
+	if effectiveType == sqltype.TypeUUID {
+		return buildUUIDColumnFilter(col, quotedColumn, filterMap)
 	}
 
 	for op, value := range filterMap {
@@ -824,7 +834,14 @@ func buildColumnFilterQualified(col introspection.Column, alias string, filterMa
 func buildSetColumnFilter(col introspection.Column, quotedColumn string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
 	conditions := []sq.Sqlizer{}
 
-	for op, value := range filterMap {
+	ops := make([]string, 0, len(filterMap))
+	for op := range filterMap {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+
+	for _, op := range ops {
+		value := filterMap[op]
 		switch op {
 		case "has":
 			item, ok := value.(string)
@@ -1016,6 +1033,92 @@ func decodeBase64BytesList(value interface{}) ([]interface{}, error) {
 			return nil, err
 		}
 		out = append(out, decoded)
+	}
+	return out, nil
+}
+
+func buildUUIDColumnFilter(col introspection.Column, quotedColumn string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+	conditions := []sq.Sqlizer{}
+	binaryStorage := uuidutil.IsBinaryStorageType(col.DataType)
+
+	for op, value := range filterMap {
+		switch op {
+		case "eq":
+			parsed, err := parseUUIDFilterValue(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: parsed})
+		case "ne":
+			parsed, err := parseUUIDFilterValue(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: parsed})
+		case "in":
+			parsed, err := parseUUIDFilterValueList(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: parsed})
+		case "notIn":
+			parsed, err := parseUUIDFilterValueList(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: parsed})
+		case "isNull":
+			boolVal, ok := value.(bool)
+			if !ok {
+				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+			if boolVal {
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
+			} else {
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
+			}
+		case "lt", "lte", "gt", "gte", "like", "notLike":
+			return nil, fmt.Errorf("operator %s is not supported for UUID columns", op)
+		default:
+			return nil, fmt.Errorf("unknown UUID filter operator: %s", op)
+		}
+	}
+
+	return conditions, nil
+}
+
+func parseUUIDFilterValue(value interface{}, binaryStorage bool) (interface{}, error) {
+	var raw string
+	switch v := value.(type) {
+	case string:
+		raw = v
+	case []byte:
+		raw = string(v)
+	default:
+		return nil, fmt.Errorf("UUID filter value must be a string")
+	}
+	parsed, canonical, err := uuidutil.ParseString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid UUID value")
+	}
+	if binaryStorage {
+		return uuidutil.ToBytes(parsed), nil
+	}
+	return canonical, nil
+}
+
+func parseUUIDFilterValueList(value interface{}, binaryStorage bool) ([]interface{}, error) {
+	arr, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("UUID filter value must be an array")
+	}
+	out := make([]interface{}, 0, len(arr))
+	for _, item := range arr {
+		parsed, err := parseUUIDFilterValue(item, binaryStorage)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, parsed)
 	}
 	return out, nil
 }

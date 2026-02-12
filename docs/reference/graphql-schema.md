@@ -101,6 +101,8 @@ SQL types are mapped to GraphQL scalars:
 - `blob`, `binary`, `varbinary` -> `Bytes` (RFC4648 base64, padded)
 - `char`, `text` -> `String`
 
+UUID mapping is explicit via config (`type_mappings.uuid_columns`): matched SQL columns are exposed as `UUID` (canonical lowercase hyphenated form). For binary storage, canonical RFC byte order (`UUID_TO_BIN(x,0)`) is assumed.
+
 ## Descriptions
 
 Table and column comments are emitted as GraphQL descriptions on the corresponding types and fields when present.

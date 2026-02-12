@@ -71,3 +71,6 @@ schema_filters:
     "*": ["*"]
   deny_columns: {}
   deny_mutation_columns: {}
+
+type_mappings:
+  uuid_columns: {}

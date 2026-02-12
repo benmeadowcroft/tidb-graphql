@@ -101,19 +101,19 @@ func TestLoad_WithEnvVars(t *testing.T) {
 func TestConfig_Validate(t *testing.T) {
 	// Helper to create a valid base config
 	validConfig := func() *Config {
-			return &Config{
-				Database: DatabaseConfig{
-					Host:     "localhost",
-					Port:     4000,
-					User:     "root",
-					Database: "test",
-					TLS: DatabaseTLSConfig{
-						Mode: "off",
-					},
-					Pool: PoolConfig{
-						MaxOpen: 25,
-						MaxIdle: 5,
-					},
+		return &Config{
+			Database: DatabaseConfig{
+				Host:     "localhost",
+				Port:     4000,
+				User:     "root",
+				Database: "test",
+				TLS: DatabaseTLSConfig{
+					Mode: "off",
+				},
+				Pool: PoolConfig{
+					MaxOpen: 25,
+					MaxIdle: 5,
+				},
 			},
 			Server: ServerConfig{
 				Port: 8080,
@@ -168,6 +168,36 @@ func TestConfig_Validate(t *testing.T) {
 		result := cfg.Validate()
 		assert.True(t, result.HasErrors())
 		assert.Contains(t, result.Error(), "database.tls.mode")
+	})
+
+	t.Run("valid uuid column mapping patterns", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.TypeMappings.UUIDColumns = map[string][]string{
+			"*":      {"*_uuid"},
+			"orders": {"id"},
+		}
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+	})
+
+	t.Run("invalid uuid table glob pattern", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.TypeMappings.UUIDColumns = map[string][]string{
+			"[bad": {"id"},
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "type_mappings.uuid_columns")
+	})
+
+	t.Run("invalid uuid column glob pattern", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.TypeMappings.UUIDColumns = map[string][]string{
+			"orders": {"[bad"},
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "type_mappings.uuid_columns")
 	})
 
 	t.Run("valid TLS modes", func(t *testing.T) {

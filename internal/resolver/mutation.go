@@ -15,6 +15,7 @@ import (
 	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/setutil"
 	"tidb-graphql/internal/sqltype"
+	"tidb-graphql/internal/uuidutil"
 )
 
 func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.Table) graphql.Fields {
@@ -478,10 +479,14 @@ func collectInputColumns(table introspection.Table, input map[string]interface{}
 }
 
 func normalizeMutationInputValue(col introspection.Column, value interface{}) (interface{}, error) {
-	if sqltype.MapToGraphQL(col.DataType) != sqltype.TypeSet {
+	switch introspection.EffectiveGraphQLType(col) {
+	case sqltype.TypeSet:
+		return normalizeSetInputValue(col, value)
+	case sqltype.TypeUUID:
+		return normalizeUUIDInputValue(col, value)
+	default:
 		return value, nil
 	}
-	return normalizeSetInputValue(col, value)
 }
 
 func normalizeSetInputValue(col introspection.Column, value interface{}) (interface{}, error) {
@@ -493,6 +498,27 @@ func normalizeSetInputValue(col introspection.Column, value interface{}) (interf
 		return nil, newMutationError(err.Error(), "invalid_input", 0)
 	}
 	return csv, nil
+}
+
+func normalizeUUIDInputValue(col introspection.Column, value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	raw, ok := value.(string)
+	if !ok {
+		return nil, newMutationError("uuid value must be a string", "invalid_input", 0)
+	}
+
+	parsed, canonical, err := uuidutil.ParseString(raw)
+	if err != nil {
+		return nil, newMutationError(err.Error(), "invalid_input", 0)
+	}
+
+	if uuidutil.IsBinaryStorageType(col.DataType) {
+		return uuidutil.ToBytes(parsed), nil
+	}
+	return canonical, nil
 }
 
 func pkValuesFromArgs(table introspection.Table, pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {

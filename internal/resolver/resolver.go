@@ -24,6 +24,7 @@ import (
 	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/schemanaming"
 	"tidb-graphql/internal/sqltype"
+	"tidb-graphql/internal/uuidutil"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
@@ -58,6 +59,7 @@ type Resolver struct {
 	timeType           *graphql.Scalar
 	yearType           *graphql.Scalar
 	bytesType          *graphql.Scalar
+	uuidType           *graphql.Scalar
 	nodeInterface      *graphql.Interface
 	pageInfoType       *graphql.Object
 	edgeCache          map[string]*graphql.Object
@@ -432,10 +434,14 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			fieldType = graphql.NewNonNull(fieldType)
 		}
 
-		fields[introspection.GraphQLFieldName(col)] = &graphql.Field{
+		field := &graphql.Field{
 			Type:        fieldType,
 			Description: col.Comment,
 		}
+		if introspection.EffectiveGraphQLType(col) == sqltype.TypeUUID {
+			field.Resolve = r.uuidColumnResolver(col)
+		}
+		fields[introspection.GraphQLFieldName(col)] = field
 	}
 
 	pkCols := introspection.PrimaryKeyColumns(table)
@@ -1490,6 +1496,26 @@ func (r *Resolver) bytesScalar() *graphql.Scalar {
 	return cached
 }
 
+func (r *Resolver) uuidScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.uuidType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.UUID()
+
+	r.mu.Lock()
+	if r.uuidType == nil {
+		r.uuidType = scalar
+	}
+	cached = r.uuidType
+	r.mu.Unlock()
+
+	return cached
+}
+
 func (r *Resolver) nodeInterfaceType() *graphql.Interface {
 	r.mu.RLock()
 	cached := r.nodeInterface
@@ -2017,7 +2043,7 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 
 	for _, col := range table.Columns {
 		// Skip JSON columns
-		if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeJSON {
+		if introspection.EffectiveGraphQLType(col) == sqltype.TypeJSON {
 			continue
 		}
 
@@ -2233,7 +2259,8 @@ func (r *Resolver) setFilterType(enumType *graphql.Enum) *graphql.InputObject {
 }
 
 func (r *Resolver) getFilterInputType(table introspection.Table, col introspection.Column) *graphql.InputObject {
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+	effectiveType := introspection.EffectiveGraphQLType(col)
+	if effectiveType == sqltype.TypeSet {
 		if enumType := r.enumTypeForColumn(table, &col); enumType != nil {
 			return r.setFilterType(enumType)
 		}
@@ -2243,7 +2270,7 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 		return r.enumFilterType(enumType)
 	}
 
-	filterName := sqltype.MapToGraphQL(col.DataType).FilterTypeName()
+	filterName := effectiveType.FilterTypeName()
 
 	// Check cache
 	r.mu.RLock()
@@ -2350,6 +2377,17 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 				"ne":     &graphql.InputObjectFieldConfig{Type: r.bytesScalar()},
 				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bytesScalar()))},
 				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bytesScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "UUIDFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "UUIDFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.uuidScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.uuidScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.uuidScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.uuidScalar()))},
 				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 			},
 		})
@@ -3850,6 +3888,51 @@ func columnsForPlan(plan *planner.Plan) []introspection.Column {
 	return plan.Table.Columns
 }
 
+func (r *Resolver) uuidColumnResolver(col introspection.Column) graphql.FieldResolveFn {
+	fieldName := introspection.GraphQLFieldName(col)
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type for UUID field %s", fieldName)
+		}
+		raw := source[fieldName]
+		if raw == nil {
+			return nil, nil
+		}
+		normalized, err := normalizeUUIDResultValue(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid UUID value for field %s: %w", fieldName, err)
+		}
+		return normalized, nil
+	}
+}
+
+func normalizeUUIDResultValue(raw interface{}) (string, error) {
+	switch v := raw.(type) {
+	case string:
+		_, canonical, err := uuidutil.ParseString(v)
+		if err != nil {
+			return "", err
+		}
+		return canonical, nil
+	case []byte:
+		if len(v) == 16 {
+			_, canonical, err := uuidutil.ParseBytes(v)
+			if err != nil {
+				return "", err
+			}
+			return canonical, nil
+		}
+		_, canonical, err := uuidutil.ParseString(string(v))
+		if err != nil {
+			return "", err
+		}
+		return canonical, nil
+	default:
+		return "", fmt.Errorf("unsupported UUID value type %T", raw)
+	}
+}
+
 func convertValue(val interface{}) interface{} {
 	if val == nil {
 		return nil
@@ -3864,10 +3947,14 @@ func convertValue(val interface{}) interface{} {
 }
 
 func convertColumnValue(col introspection.Column, val interface{}) interface{} {
-	switch sqltype.MapToGraphQL(col.DataType) {
+	switch introspection.EffectiveGraphQLType(col) {
 	case sqltype.TypeSet:
 		return parseSetColumnValue(val)
 	case sqltype.TypeBytes:
+		return val
+	case sqltype.TypeUUID:
+		// UUID normalization/validation is enforced by uuidColumnResolver so it can
+		// return field-level GraphQL errors on malformed stored values.
 		return val
 	default:
 		return convertValue(val)
@@ -3906,7 +3993,11 @@ func parseSetColumnValue(val interface{}) interface{} {
 }
 
 func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *introspection.Column) graphql.Output {
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+	effectiveType := introspection.EffectiveGraphQLType(*col)
+	if effectiveType == sqltype.TypeUUID {
+		return r.uuidScalar()
+	}
+	if effectiveType == sqltype.TypeSet {
 		if enumType := r.enumTypeForColumn(table, col); enumType != nil {
 			return graphql.NewList(graphql.NewNonNull(enumType))
 		}
@@ -3915,7 +4006,7 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
 		return enumType
 	}
-	switch sqltype.MapToGraphQL(col.DataType) {
+	switch effectiveType {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()
 	case sqltype.TypeInt:
@@ -3946,7 +4037,11 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 }
 
 func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *introspection.Column) graphql.Input {
-	if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeSet {
+	effectiveType := introspection.EffectiveGraphQLType(*col)
+	if effectiveType == sqltype.TypeUUID {
+		return r.uuidScalar()
+	}
+	if effectiveType == sqltype.TypeSet {
 		if enumType := r.enumTypeForColumn(table, col); enumType != nil {
 			return graphql.NewList(graphql.NewNonNull(enumType))
 		}
@@ -3955,7 +4050,7 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
 		return enumType
 	}
-	switch sqltype.MapToGraphQL(col.DataType) {
+	switch effectiveType {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()
 	case sqltype.TypeInt:

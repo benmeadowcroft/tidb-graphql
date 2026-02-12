@@ -53,6 +53,7 @@ type Config struct {
 	MaxInterval       time.Duration
 	GraphiQL          bool
 	Filters           schemafilter.Config
+	UUIDColumns       map[string][]string
 	Naming            naming.Config
 	Executor          dbexec.QueryExecutor
 	IntrospectionRole string
@@ -70,6 +71,7 @@ type Manager struct {
 	maxInterval       time.Duration
 	graphiQL          bool
 	filters           schemafilter.Config
+	uuidColumns       map[string][]string
 	namingConfig      naming.Config
 	executor          dbexec.QueryExecutor
 	introspectionRole string
@@ -110,6 +112,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		maxInterval:       maxInterval,
 		graphiQL:          cfg.GraphiQL,
 		filters:           cfg.Filters,
+		uuidColumns:       cfg.UUIDColumns,
 		namingConfig:      cfg.Naming,
 		executor:          cfg.Executor,
 		introspectionRole: cfg.IntrospectionRole,
@@ -303,6 +306,9 @@ func (m *Manager) buildSnapshot(ctx context.Context, fingerprint string) (*Snaps
 		return nil, fmt.Errorf("failed to introspect database: %w", err)
 	}
 	schemafilter.Apply(dbSchema, m.filters)
+	if err := introspection.ApplyUUIDTypeOverrides(dbSchema, m.uuidColumns); err != nil {
+		return nil, fmt.Errorf("failed to apply UUID type mappings: %w", err)
+	}
 	junctions := junction.ClassifyJunctions(dbSchema)
 	dbSchema.Junctions = junctions.ToIntrospectionMap()
 	namer := naming.New(m.namingConfig, m.logger.Logger)

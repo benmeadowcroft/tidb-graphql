@@ -31,6 +31,7 @@ Supported operators depend on the column type:
 - Date: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
 - DateTime: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `in`, `notIn`, `isNull`
 - Bytes: `eq`, `ne`, `in`, `notIn`, `isNull` (base64 values)
+- UUID: `eq`, `ne`, `in`, `notIn`, `isNull`
 - Set: `has`, `hasAnyOf`, `hasAllOf`, `hasNoneOf`, `eq`, `ne`, `isNull`
 
 Example:

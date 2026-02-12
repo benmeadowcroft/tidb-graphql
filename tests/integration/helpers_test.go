@@ -125,6 +125,35 @@ func buildGraphQLSchema(t *testing.T, testDB *tidbcloud.TestDB) graphql.Schema {
 	return schema
 }
 
+func buildGraphQLSchemaWithUUIDMappings(t *testing.T, testDB *tidbcloud.TestDB, uuidColumns map[string][]string) graphql.Schema {
+	t.Helper()
+
+	dbSchema, err := introspection.IntrospectDatabase(testDB.DB, testDB.DatabaseName)
+	require.NoError(t, err)
+	require.NoError(t, introspection.ApplyUUIDTypeOverrides(dbSchema, uuidColumns))
+
+	res := resolver.NewResolver(dbexec.NewStandardExecutor(testDB.DB), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	schema, err := res.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	return schema
+}
+
+func buildMutationSchemaWithUUIDMappings(t *testing.T, testDB *tidbcloud.TestDB, uuidColumns map[string][]string) (graphql.Schema, *dbexec.StandardExecutor) {
+	t.Helper()
+
+	dbSchema, err := introspection.IntrospectDatabase(testDB.DB, testDB.DatabaseName)
+	require.NoError(t, err)
+	require.NoError(t, introspection.ApplyUUIDTypeOverrides(dbSchema, uuidColumns))
+
+	executor := dbexec.NewStandardExecutor(testDB.DB)
+	res := resolver.NewResolver(executor, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	schema, err := res.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	return schema, executor
+}
+
 func mergeEnv(base []string, overrides ...string) []string {
 	if len(overrides) == 0 {
 		return base

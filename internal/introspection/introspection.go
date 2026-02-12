@@ -22,6 +22,7 @@ import (
 type Column struct {
 	Name            string
 	DataType        string
+	ColumnType      string
 	IsNullable      bool
 	IsPrimaryKey    bool
 	IsGenerated     bool
@@ -31,6 +32,9 @@ type Column struct {
 	ColumnDefault   string
 	EnumValues      []string
 	Comment         string
+	// OverrideType is an explicit GraphQL type override resolved during schema preparation.
+	OverrideType    sqltype.GraphQLType
+	HasOverrideType bool
 	// GraphQLFieldName is the resolved GraphQL field name for this column.
 	GraphQLFieldName string
 }
@@ -341,6 +345,7 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 			recordSpanError(span, err)
 			return nil, err
 		}
+		col.ColumnType = columnType
 		if columnComment.Valid {
 			col.Comment = strings.TrimSpace(columnComment.String)
 		}
@@ -804,7 +809,7 @@ func getPKColumn(table *Table) string {
 func NumericColumns(table Table) []Column {
 	var cols []Column
 	for _, col := range table.Columns {
-		if sqltype.MapToGraphQL(col.DataType).IsNumeric() {
+		if EffectiveGraphQLType(col).IsNumeric() {
 			cols = append(cols, col)
 		}
 	}
@@ -815,7 +820,7 @@ func NumericColumns(table Table) []Column {
 func ComparableColumns(table Table) []Column {
 	var cols []Column
 	for _, col := range table.Columns {
-		if sqltype.MapToGraphQL(col.DataType).IsComparable() {
+		if EffectiveGraphQLType(col).IsComparable() {
 			cols = append(cols, col)
 		}
 	}

@@ -12,6 +12,7 @@ import (
 
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/sqltype"
+	"tidb-graphql/internal/uuidutil"
 )
 
 const (
@@ -56,7 +57,7 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		return nil, fmt.Errorf("missing primary key value for %s", col.Name)
 	}
 
-	switch sqltype.MapToGraphQL(col.DataType) {
+	switch introspection.EffectiveGraphQLType(col) {
 	case sqltype.TypeInt, sqltype.TypeBigInt:
 		switch v := raw.(type) {
 		case float64:
@@ -172,6 +173,24 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		default:
 			return nil, fmt.Errorf("invalid bytes value for %s", col.Name)
 		}
+	case sqltype.TypeUUID:
+		var rawStr string
+		switch v := raw.(type) {
+		case string:
+			rawStr = v
+		case []byte:
+			rawStr = string(v)
+		default:
+			return nil, fmt.Errorf("invalid UUID value for %s", col.Name)
+		}
+		parsed, canonical, err := uuidutil.ParseString(rawStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid UUID value for %s", col.Name)
+		}
+		if uuidutil.IsBinaryStorageType(col.DataType) {
+			return uuidutil.ToBytes(parsed), nil
+		}
+		return canonical, nil
 	default:
 		switch v := raw.(type) {
 		case string:

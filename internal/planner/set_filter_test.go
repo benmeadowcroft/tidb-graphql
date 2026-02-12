@@ -55,7 +55,7 @@ func TestBuildWhereClause_SetHasAnyOfAndHasAllOf(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, sql, "FIND_IN_SET(?, `tags`) > 0")
 	assert.Len(t, args, 4)
-	assert.Equal(t, []interface{}{"featured", "seasonal", "featured", "new"}, args)
+	assert.Equal(t, []interface{}{"featured", "new", "featured", "seasonal"}, args)
 }
 
 func TestBuildWhereClause_SetHasNoneOf(t *testing.T) {

@@ -207,6 +207,13 @@ func TestMapToGraphQL_JSONType(t *testing.T) {
 	}
 }
 
+func TestGraphQLType_UUID(t *testing.T) {
+	assert.Equal(t, "UUID", TypeUUID.String())
+	assert.Equal(t, "UUIDFilter", TypeUUID.FilterTypeName())
+	assert.False(t, TypeUUID.IsNumeric())
+	assert.True(t, TypeUUID.IsComparable())
+}
+
 func TestMapToGraphQL_UnknownTypesDefaultToString(t *testing.T) {
 	unknownTypes := []string{
 		"GEOMETRY",
@@ -291,6 +298,7 @@ func TestIsNumeric(t *testing.T) {
 		{TypeYear, false},
 		{TypeSet, false},
 		{TypeBytes, false},
+		{TypeUUID, false},
 	}
 
 	for _, tc := range testCases {
@@ -318,6 +326,7 @@ func TestIsComparable(t *testing.T) {
 		{TypeYear, true},
 		{TypeSet, true},
 		{TypeBytes, true},
+		{TypeUUID, true},
 	}
 
 	for _, tc := range testCases {

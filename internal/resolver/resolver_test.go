@@ -15,6 +15,7 @@ import (
 	"tidb-graphql/internal/planner"
 	"tidb-graphql/internal/scalars"
 	"tidb-graphql/internal/schemafilter"
+	"tidb-graphql/internal/sqltype"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/graphql-go/graphql"
@@ -700,6 +701,37 @@ func TestBytesFilterType(t *testing.T) {
 	assert.Nil(t, fields["like"])
 }
 
+func TestUUIDFieldAndFilterType(t *testing.T) {
+	table := introspection.Table{
+		Name: "orders",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "binary", ColumnType: "binary(16)", HasOverrideType: true, OverrideType: sqltype.TypeUUID, IsPrimaryKey: true, IsNullable: false},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	objType := r.buildGraphQLType(table)
+	fields := objType.Fields()
+	nonNull, ok := fields["databaseId"].Type.(*graphql.NonNull)
+	require.True(t, ok)
+	scalarType, ok := nonNull.OfType.(*graphql.Scalar)
+	require.True(t, ok)
+	assert.Equal(t, "UUID", scalarType.Name())
+
+	filterType := r.getFilterInputType(table, table.Columns[0])
+	require.NotNil(t, filterType)
+	filterFields := filterType.Fields()
+	assert.NotNil(t, filterFields["eq"])
+	assert.NotNil(t, filterFields["ne"])
+	assert.NotNil(t, filterFields["in"])
+	assert.NotNil(t, filterFields["notIn"])
+	assert.NotNil(t, filterFields["isNull"])
+	assert.Nil(t, filterFields["like"])
+	assert.Nil(t, filterFields["lt"])
+}
+
 func TestSetFilterType(t *testing.T) {
 	table := introspection.Table{
 		Name: "products",
@@ -780,6 +812,69 @@ func TestConvertColumnValue_BytesPreserved(t *testing.T) {
 	assert.Equal(t, raw, converted)
 }
 
+func TestUUIDColumnResolver_NormalizesBinaryValue(t *testing.T) {
+	col := introspection.Column{
+		Name:             "id",
+		DataType:         "binary",
+		ColumnType:       "binary(16)",
+		GraphQLFieldName: "databaseId",
+		HasOverrideType:  true,
+		OverrideType:     sqltype.TypeUUID,
+	}
+	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	resolve := r.uuidColumnResolver(col)
+
+	resolved, err := resolve(graphql.ResolveParams{
+		Source: map[string]interface{}{
+			"databaseId": []byte{0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", resolved)
+}
+
+func TestUUIDColumnResolver_NormalizesStringValue(t *testing.T) {
+	col := introspection.Column{
+		Name:             "uuid_text",
+		DataType:         "char",
+		ColumnType:       "char(36)",
+		GraphQLFieldName: "uuidText",
+		HasOverrideType:  true,
+		OverrideType:     sqltype.TypeUUID,
+	}
+	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	resolve := r.uuidColumnResolver(col)
+
+	resolved, err := resolve(graphql.ResolveParams{
+		Source: map[string]interface{}{
+			"uuidText": "550E8400-E29B-41D4-A716-446655440000",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", resolved)
+}
+
+func TestUUIDColumnResolver_NormalizesByteStringValue(t *testing.T) {
+	col := introspection.Column{
+		Name:             "uuid_text",
+		DataType:         "char",
+		ColumnType:       "char(36)",
+		GraphQLFieldName: "uuidText",
+		HasOverrideType:  true,
+		OverrideType:     sqltype.TypeUUID,
+	}
+	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	resolve := r.uuidColumnResolver(col)
+
+	resolved, err := resolve(graphql.ResolveParams{
+		Source: map[string]interface{}{
+			"uuidText": []byte("550E8400-E29B-41D4-A716-446655440000"),
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", resolved)
+}
+
 func TestParseSetColumnValue(t *testing.T) {
 	assert.Equal(t, []string{"featured", "sale"}, parseSetColumnValue("featured,sale"))
 	assert.Equal(t, []string{}, parseSetColumnValue(""))
@@ -820,6 +915,26 @@ func TestMapInputColumns_BytesPreserved(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"payload"}, cols)
 	require.Equal(t, []interface{}{[]byte{0xDE, 0xAD, 0xBE, 0xEF}}, vals)
+}
+
+func TestMapInputColumns_UUIDBinaryNormalization(t *testing.T) {
+	table := introspection.Table{
+		Name: "orders",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "binary", ColumnType: "binary(16)", HasOverrideType: true, OverrideType: sqltype.TypeUUID},
+		},
+	}
+	input := map[string]interface{}{
+		"id": "550E8400-E29B-41D4-A716-446655440000",
+	}
+	allowed := map[string]bool{"id": true}
+
+	cols, vals, err := mapInputColumns(table, input, allowed)
+	require.NoError(t, err)
+	require.Equal(t, []string{"id"}, cols)
+	require.Len(t, vals, 1)
+	require.IsType(t, []byte{}, vals[0])
+	require.Len(t, vals[0].([]byte), 16)
 }
 
 func TestManyToOneResolver(t *testing.T) {

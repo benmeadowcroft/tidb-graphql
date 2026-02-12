@@ -34,6 +34,8 @@ const (
 	TypeSet
 	// TypeBytes represents binary/blob SQL data types.
 	TypeBytes
+	// TypeUUID represents UUID values mapped explicitly via configuration.
+	TypeUUID
 )
 
 // MapToGraphQL converts a SQL data type string to its corresponding GraphQL type category.
@@ -112,6 +114,8 @@ func (t GraphQLType) String() string {
 		return "Set"
 	case TypeBytes:
 		return "Bytes"
+	case TypeUUID:
+		return "UUID"
 	default:
 		return "String"
 	}
@@ -142,6 +146,8 @@ func (t GraphQLType) FilterTypeName() string {
 		return "StringFilter"
 	case TypeBytes:
 		return "BytesFilter"
+	case TypeUUID:
+		return "UUIDFilter"
 	default:
 		// JSON and String both use StringFilter (JSON columns are skipped in WHERE)
 		return "StringFilter"

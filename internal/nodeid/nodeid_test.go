@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/sqltype"
 )
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
@@ -90,4 +91,65 @@ func TestParsePKValue_Bytes(t *testing.T) {
 
 	_, err = ParsePKValue(col, "%%%")
 	require.Error(t, err)
+}
+
+func TestParsePKValue_UUIDText(t *testing.T) {
+	col := introspection.Column{
+		Name:            "id",
+		DataType:        "char",
+		ColumnType:      "char(36)",
+		OverrideType:    sqltype.TypeUUID,
+		HasOverrideType: true,
+	}
+
+	value, err := ParsePKValue(col, "550E8400-E29B-41D4-A716-446655440000")
+	require.NoError(t, err)
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", value)
+}
+
+func TestParsePKValue_UUIDBinary(t *testing.T) {
+	col := introspection.Column{
+		Name:            "id",
+		DataType:        "binary",
+		ColumnType:      "binary(16)",
+		OverrideType:    sqltype.TypeUUID,
+		HasOverrideType: true,
+	}
+
+	value, err := ParsePKValue(col, "550e8400-e29b-41d4-a716-446655440000")
+	require.NoError(t, err)
+	require.IsType(t, []byte{}, value)
+	assert.Len(t, value.([]byte), 16)
+}
+
+func TestEncodeDecodeRoundTrip_UUIDPK(t *testing.T) {
+	colText := introspection.Column{
+		Name:            "id",
+		DataType:        "char",
+		ColumnType:      "char(36)",
+		OverrideType:    sqltype.TypeUUID,
+		HasOverrideType: true,
+	}
+
+	id := Encode("Order", "550e8400-e29b-41d4-a716-446655440000")
+	typeName, values, err := Decode(id)
+	require.NoError(t, err)
+	assert.Equal(t, "Order", typeName)
+	require.Len(t, values, 1)
+
+	parsed, err := ParsePKValue(colText, values[0])
+	require.NoError(t, err)
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", parsed)
+
+	colBinary := introspection.Column{
+		Name:            "id",
+		DataType:        "binary",
+		ColumnType:      "binary(16)",
+		OverrideType:    sqltype.TypeUUID,
+		HasOverrideType: true,
+	}
+	parsedBinary, err := ParsePKValue(colBinary, values[0])
+	require.NoError(t, err)
+	require.IsType(t, []byte{}, parsedBinary)
+	assert.Len(t, parsedBinary.([]byte), 16)
 }

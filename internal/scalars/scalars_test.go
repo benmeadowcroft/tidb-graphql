@@ -141,3 +141,20 @@ func TestBytesScalar(t *testing.T) {
 	assert.Nil(t, scalar.ParseLiteral(&ast.StringValue{Value: "not-base64@@"}))
 	assert.Equal(t, []byte("ok"), scalar.ParseLiteral(&ast.StringValue{Value: base64.StdEncoding.EncodeToString([]byte("ok"))}))
 }
+
+func TestUUIDScalar(t *testing.T) {
+	scalar := UUID()
+
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", scalar.ParseValue("550E8400-E29B-41D4-A716-446655440000"))
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", scalar.ParseLiteral(&ast.StringValue{Value: "550E8400-E29B-41D4-A716-446655440000"}))
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", scalar.Serialize("550E8400-E29B-41D4-A716-446655440000"))
+
+	assert.Equal(t,
+		"550e8400-e29b-41d4-a716-446655440000",
+		scalar.Serialize([]byte{0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00}),
+	)
+
+	assert.Nil(t, scalar.ParseValue("not-a-uuid"))
+	assert.Nil(t, scalar.Serialize([]byte{0x01, 0x02}))
+	assert.Nil(t, scalar.ParseLiteral(&ast.IntValue{Value: "42"}))
+}

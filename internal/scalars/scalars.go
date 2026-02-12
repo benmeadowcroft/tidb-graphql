@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"tidb-graphql/internal/uuidutil"
+
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/language/ast"
 )
@@ -409,6 +411,53 @@ func Bytes() *graphql.Scalar {
 				return nil
 			}
 			return decoded
+		},
+	})
+}
+
+func UUID() *graphql.Scalar {
+	return graphql.NewScalar(graphql.ScalarConfig{
+		Name:        "UUID",
+		Description: "UUID value serialized as lowercase canonical RFC4122 string.",
+		Serialize: func(value interface{}) interface{} {
+			switch v := value.(type) {
+			case string:
+				_, canonical, err := uuidutil.ParseString(v)
+				if err != nil {
+					return nil
+				}
+				return canonical
+			case []byte:
+				_, canonical, err := uuidutil.ParseBytes(v)
+				if err != nil {
+					return nil
+				}
+				return canonical
+			default:
+				return nil
+			}
+		},
+		ParseValue: func(value interface{}) interface{} {
+			s, ok := value.(string)
+			if !ok {
+				return nil
+			}
+			_, canonical, err := uuidutil.ParseString(s)
+			if err != nil {
+				return nil
+			}
+			return canonical
+		},
+		ParseLiteral: func(valueAST ast.Value) interface{} {
+			sv, ok := valueAST.(*ast.StringValue)
+			if !ok {
+				return nil
+			}
+			_, canonical, err := uuidutil.ParseString(sv.Value)
+			if err != nil {
+				return nil
+			}
+			return canonical
 		},
 	})
 }

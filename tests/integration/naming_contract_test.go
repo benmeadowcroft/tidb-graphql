@@ -52,6 +52,8 @@ func TestNamingContract_ListQueriesPluralized(t *testing.T) {
 	if _, ok := fieldNames["people"]; !ok {
 		t.Fatalf("expected list field 'people' to exist on Query")
 	}
+	// generated_columns_schema defines table `products_computeds`; the pluralized
+	// GraphQL list field intentionally resolves to `productsComputeds`.
 	if _, ok := fieldNames["productsComputeds"]; !ok {
 		t.Fatalf("expected list field 'productsComputeds' to exist on Query")
 	}

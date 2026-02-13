@@ -204,3 +204,52 @@ func TestSetFiltering_MutationRoundTrip(t *testing.T) {
 	// GraphQL enum fields serialize as enum names, not underlying lowercase SQL values.
 	assert.Equal(t, []interface{}{"FEATURED", "SEASONAL"}, record["tags"])
 }
+
+func TestSetFiltering_MutationUpdateAndDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/set_filtering_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/set_filtering_seed.sql")
+
+	schema, executor := buildMutationSchema(t, testDB)
+
+	lookup := `
+		{
+			products(where: { name: { eq: "Green Widget" } }, limit: 1) {
+				id
+			}
+		}
+	`
+	lookupResult := graphql.Do(graphql.Params{Schema: schema, RequestString: lookup, Context: context.Background()})
+	require.Empty(t, lookupResult.Errors)
+	products := lookupResult.Data.(map[string]interface{})["products"].([]interface{})
+	require.Len(t, products, 1)
+	productID := products[0].(map[string]interface{})["id"].(string)
+
+	update := `
+		mutation {
+			updateProduct(id: "` + productID + `", set: { tags: [LIMITED, FEATURED] }) {
+				name
+				tags
+			}
+		}
+	`
+	updateResult := executeMutation(t, schema, executor, update, nil)
+	require.Empty(t, updateResult.Errors)
+	updated := updateResult.Data.(map[string]interface{})["updateProduct"].(map[string]interface{})
+	assert.Equal(t, "Green Widget", updated["name"])
+	assert.Equal(t, []interface{}{"FEATURED", "LIMITED"}, updated["tags"])
+
+	del := `
+		mutation {
+			deleteProduct(id: "` + productID + `") {
+				id
+			}
+		}
+	`
+	deleteResult := executeMutation(t, schema, executor, del, nil)
+	require.Empty(t, deleteResult.Errors)
+}

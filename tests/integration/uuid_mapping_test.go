@@ -115,3 +115,25 @@ func TestUUIDMapping_InvalidStoredValueReturnsError(t *testing.T) {
 	assert.Equal(t, "invalid", rows[2].(map[string]interface{})["label"])
 	assert.Nil(t, rows[2].(map[string]interface{})["uuidText"])
 }
+
+func TestUUIDMapping_InvalidFilterValueRejected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/uuid_mapping_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/uuid_mapping_seed.sql")
+
+	schema := buildGraphQLSchemaWithUUIDMappings(t, testDB, uuidMappingPatterns)
+	query := `
+		{
+			uuidRecords(where: { uuidBin: { eq: "not-a-uuid" } }) {
+				label
+			}
+		}
+	`
+
+	result := graphql.Do(graphql.Params{Schema: schema, RequestString: query, Context: context.Background()})
+	require.NotEmpty(t, result.Errors)
+}

@@ -96,3 +96,80 @@ func TestBytesFiltering_InvalidBase64Rejected(t *testing.T) {
 	result := graphql.Do(graphql.Params{Schema: schema, RequestString: query, Context: context.Background()})
 	require.NotEmpty(t, result.Errors)
 }
+
+func TestBytesFiltering_NullPayloadQuery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/bytes_filtering_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/bytes_filtering_seed.sql")
+	_, err := testDB.DB.Exec("INSERT INTO files (name, payload, hash) VALUES ('null-payload', NULL, x'0102')")
+	require.NoError(t, err)
+
+	schema := buildGraphQLSchema(t, testDB)
+	query := `
+		{
+			file_by_name(name: "null-payload") {
+				name
+				payload
+			}
+		}
+	`
+
+	result := graphql.Do(graphql.Params{Schema: schema, RequestString: query, Context: context.Background()})
+	require.Empty(t, result.Errors)
+
+	file := result.Data.(map[string]interface{})["file_by_name"].(map[string]interface{})
+	assert.Equal(t, "null-payload", file["name"])
+	assert.Nil(t, file["payload"])
+}
+
+func TestBytesFiltering_MutationUpdateAndDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/bytes_filtering_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/bytes_filtering_seed.sql")
+
+	schema, executor := buildMutationSchema(t, testDB)
+
+	lookup := `
+		{
+			file_by_name(name: "alpha") {
+				id
+			}
+		}
+	`
+	lookupResult := graphql.Do(graphql.Params{Schema: schema, RequestString: lookup, Context: context.Background()})
+	require.Empty(t, lookupResult.Errors)
+	fileID := lookupResult.Data.(map[string]interface{})["file_by_name"].(map[string]interface{})["id"].(string)
+
+	newPayload := base64.StdEncoding.EncodeToString([]byte("updated-bytes"))
+	update := `
+		mutation {
+			updateFile(id: "` + fileID + `", set: { payload: "` + newPayload + `" }) {
+				name
+				payload
+			}
+		}
+	`
+	updateResult := executeMutation(t, schema, executor, update, nil)
+	require.Empty(t, updateResult.Errors)
+	updated := updateResult.Data.(map[string]interface{})["updateFile"].(map[string]interface{})
+	assert.Equal(t, "alpha", updated["name"])
+	assert.Equal(t, newPayload, updated["payload"])
+
+	del := `
+		mutation {
+			deleteFile(id: "` + fileID + `") {
+				id
+			}
+		}
+	`
+	deleteResult := executeMutation(t, schema, executor, del, nil)
+	require.Empty(t, deleteResult.Errors)
+}

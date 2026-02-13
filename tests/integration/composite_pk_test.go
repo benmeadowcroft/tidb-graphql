@@ -248,3 +248,41 @@ func TestCompositePK_ListQuery(t *testing.T) {
 
 	assert.Len(t, items, 3, "Order 100 should have 3 items")
 }
+
+func TestCompositePK_GlobalIDLookup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/composite_pk_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/composite_pk_seed.sql")
+
+	schema := buildGraphQLSchema(t, testDB)
+	nodeID := nodeIDForTable("order_items", 100, 2)
+	query := `
+		{
+			orderItem(id: "` + nodeID + `") {
+				id
+				orderId
+				productId
+				quantity
+			}
+		}
+	`
+
+	result := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: query,
+		Context:       context.Background(),
+	})
+	require.Empty(t, result.Errors, "Query should not return errors: %v", result.Errors)
+	require.NotNil(t, result.Data, "Result data should not be nil")
+
+	data := result.Data.(map[string]interface{})
+	item := data["orderItem"].(map[string]interface{})
+	assert.Equal(t, nodeID, item["id"])
+	assert.EqualValues(t, 100, item["orderId"])
+	assert.EqualValues(t, 2, item["productId"])
+	assert.EqualValues(t, 1, item["quantity"])
+}

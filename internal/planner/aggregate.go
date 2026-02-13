@@ -8,7 +8,6 @@ import (
 	"github.com/graphql-go/graphql/language/ast"
 
 	"tidb-graphql/internal/introspection"
-	"tidb-graphql/internal/sqltype"
 	"tidb-graphql/internal/sqlutil"
 )
 
@@ -341,7 +340,7 @@ func extractColumnNames(field *ast.Field, table introspection.Table, numericOnly
 		// Find the actual column name from GraphQL field name
 		for _, col := range table.Columns {
 			if introspection.GraphQLFieldName(col) == fieldName {
-				if numericOnly && !sqltype.MapToGraphQL(col.DataType).IsNumeric() {
+				if numericOnly && !introspection.EffectiveGraphQLType(col).IsNumeric() {
 					continue
 				}
 				columns = append(columns, col.Name)

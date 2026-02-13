@@ -7,11 +7,6 @@ import (
 	"context"
 	"testing"
 
-	"tidb-graphql/internal/dbexec"
-	"tidb-graphql/internal/introspection"
-	"tidb-graphql/internal/naming"
-	"tidb-graphql/internal/resolver"
-	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/testutil/tidbcloud"
 
 	"github.com/graphql-go/graphql"
@@ -42,7 +37,7 @@ func TestOrderByIndexedPrefix(t *testing.T) {
 	query := `
 		{
 			posts(orderBy: { userId_createdAt: ASC }, limit: 10) {
-				id
+				databaseId
 			}
 		}
 	`
@@ -57,10 +52,10 @@ func TestOrderByIndexedPrefix(t *testing.T) {
 	posts := data["posts"].([]interface{})
 	require.Len(t, posts, 4)
 
-	require.EqualValues(t, 1, posts[0].(map[string]interface{})["id"])
-	require.EqualValues(t, 2, posts[1].(map[string]interface{})["id"])
-	require.EqualValues(t, 3, posts[2].(map[string]interface{})["id"])
-	require.EqualValues(t, 4, posts[3].(map[string]interface{})["id"])
+	require.EqualValues(t, 1, posts[0].(map[string]interface{})["databaseId"])
+	require.EqualValues(t, 2, posts[1].(map[string]interface{})["databaseId"])
+	require.EqualValues(t, 3, posts[2].(map[string]interface{})["databaseId"])
+	require.EqualValues(t, 4, posts[3].(map[string]interface{})["databaseId"])
 }
 
 func TestOrderByNonLeftmostRejected(t *testing.T) {
@@ -87,17 +82,4 @@ func TestOrderByNonLeftmostRejected(t *testing.T) {
 		Context:       context.Background(),
 	})
 	require.NotEmpty(t, result.Errors)
-}
-
-func buildGraphQLSchema(t *testing.T, testDB *tidbcloud.TestDB) graphql.Schema {
-	t.Helper()
-
-	dbSchema, err := introspection.IntrospectDatabase(testDB.DB, testDB.DatabaseName)
-	require.NoError(t, err)
-
-	res := resolver.NewResolver(dbexec.NewStandardExecutor(testDB.DB), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
-	schema, err := res.BuildGraphQLSchema()
-	require.NoError(t, err)
-
-	return schema
 }

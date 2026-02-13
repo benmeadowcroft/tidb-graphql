@@ -3,6 +3,8 @@ package schemanaming
 
 import (
 	"fmt"
+	"log/slog"
+	"strings"
 
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
@@ -12,6 +14,9 @@ import (
 // It resets collision state to ensure deterministic naming per schema build.
 func Apply(schema *introspection.Schema, namer *naming.Namer) {
 	if schema == nil {
+		return
+	}
+	if schema.NamesApplied {
 		return
 	}
 	if namer == nil {
@@ -26,7 +31,8 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 
 		typeName := namer.RegisterType(table.Name)
 		table.GraphQLTypeName = typeName
-		table.GraphQLQueryName = namer.RegisterQueryField(table.Name)
+		pluralTableName := namer.Pluralize(table.Name)
+		table.GraphQLQueryName = namer.RegisterQueryField(pluralTableName)
 		singularTableName := singularNamer.Singularize(table.Name)
 		table.GraphQLSingleQueryName = singularNamer.RegisterQueryField(singularTableName)
 		table.GraphQLSingleTypeName = singularNamer.RegisterType(singularTableName)
@@ -34,6 +40,21 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 		for ci := range table.Columns {
 			col := &table.Columns[ci]
 			col.GraphQLFieldName = namer.RegisterColumnField(typeName, col.Name)
+		}
+
+		for ci := range table.Columns {
+			col := &table.Columns[ci]
+			if col.IsPrimaryKey && strings.EqualFold(col.Name, "id") {
+				desiredName := uniqueDatabaseIDName(table.Columns, ci)
+				if desiredName != "databaseId" {
+					slog.Default().Warn("GraphQL name collision for databaseId; using fallback name",
+						"table", table.Name,
+						"column", col.Name,
+						"resolved_name", desiredName,
+					)
+				}
+				col.GraphQLFieldName = desiredName
+			}
 		}
 
 		for ri := range table.Relationships {
@@ -48,4 +69,33 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 			rel.GraphQLFieldName = namer.RegisterRelationshipField(typeName, baseName, source, useRefSuffix)
 		}
 	}
+
+	schema.NamesApplied = true
+}
+
+func hasColumnFieldName(columns []introspection.Column, name string, skipIndex int) bool {
+	for i := range columns {
+		if i == skipIndex {
+			continue
+		}
+		if columns[i].GraphQLFieldName == name {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueDatabaseIDName(columns []introspection.Column, skipIndex int) string {
+	if !hasColumnFieldName(columns, "databaseId", skipIndex) {
+		return "databaseId"
+	}
+
+	base := "databaseId_raw"
+	candidate := base
+	suffix := 2
+	for hasColumnFieldName(columns, candidate, skipIndex) {
+		candidate = fmt.Sprintf("%s%d", base, suffix)
+		suffix++
+	}
+	return candidate
 }

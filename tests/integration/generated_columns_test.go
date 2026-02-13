@@ -333,9 +333,9 @@ func TestGenCol_ComputedNumeric(t *testing.T) {
 	for _, p := range products {
 		product := p.(map[string]interface{})
 		name := product["name"].(string)
-		price := product["price"].(float64)
+		price := requireDecimalAsFloat64(t, product["price"])
 		quantity := product["quantity"].(int)
-		totalValue := product["totalValue"].(float64)
+		totalValue := requireDecimalAsFloat64(t, product["totalValue"])
 
 		expectedTotal := price * float64(quantity)
 		assert.InDelta(t, expectedTotal, totalValue, 0.01,

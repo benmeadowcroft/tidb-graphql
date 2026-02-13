@@ -4,12 +4,17 @@
 package planner
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/setutil"
+	"tidb-graphql/internal/sqltype"
 	"tidb-graphql/internal/sqlutil"
+	"tidb-graphql/internal/uuidutil"
 
 	sq "github.com/Masterminds/squirrel"
 )
@@ -269,6 +274,7 @@ func PlanManyToManyBatch(
 	values []interface{},
 	limit, offset int,
 	orderBy *OrderBy,
+	where *WhereClause,
 ) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
@@ -296,8 +302,19 @@ func PlanManyToManyBatch(
 	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
 	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, partitionColumn, BatchParentAlias)
 
+	whereSQL := ""
+	var whereArgs []interface{}
+	if where != nil && where.Condition != nil {
+		condSQL, condArgs, err := where.Condition.ToSql()
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		whereSQL = " AND " + condSQL
+		whereArgs = condArgs
+	}
+
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
 		partitionColumn,
@@ -308,10 +325,13 @@ func PlanManyToManyBatch(
 		quotedTarget, quotedTargetPK,
 		quotedJunction, quotedLocalFK,
 		placeholders,
+		whereSQL,
 		BatchParentAlias,
 	)
 
-	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	args := append([]interface{}{}, values...)
+	args = append(args, whereArgs...)
+	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
@@ -323,6 +343,7 @@ func PlanEdgeListBatch(
 	values []interface{},
 	limit, offset int,
 	orderBy *OrderBy,
+	where *WhereClause,
 ) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
@@ -343,10 +364,21 @@ func PlanEdgeListBatch(
 	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
 	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
 
+	whereSQL := ""
+	var whereArgs []interface{}
+	if where != nil && where.Condition != nil {
+		condSQL, condArgs, err := where.Condition.ToSql()
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		whereSQL = " AND " + condSQL
+		whereArgs = condArgs
+	}
+
 	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
 	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedLocalFK, BatchParentAlias)
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
 		quotedLocalFK,
@@ -354,15 +386,26 @@ func PlanEdgeListBatch(
 		quotedTable,
 		quotedLocalFK,
 		placeholders,
+		whereSQL,
 		BatchParentAlias,
 	)
 
-	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	args := append([]interface{}{}, values...)
+	args = append(args, whereArgs...)
+	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
 // PlanOneToManyBatch builds a batched SQL query with per-parent limits.
-func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, values []interface{}, limit, offset int, orderBy *OrderBy) (SQLQuery, error) {
+func PlanOneToManyBatch(
+	relatedTable introspection.Table,
+	columns []introspection.Column,
+	remoteColumn string,
+	values []interface{},
+	limit, offset int,
+	orderBy *OrderBy,
+	where *WhereClause,
+) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
 	}
@@ -391,12 +434,23 @@ func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspectio
 
 	quotedRemoteColumn := sqlutil.QuoteIdentifier(remoteColumn)
 	quotedTable := sqlutil.QuoteIdentifier(relatedTable.Name)
+
+	whereSQL := ""
+	var whereArgs []interface{}
+	if where != nil && where.Condition != nil {
+		condSQL, condArgs, err := where.Condition.ToSql()
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		whereSQL = " AND " + condSQL
+		whereArgs = condArgs
+	}
 	// Unfortunately as these are column lists, we can't use Squirrel to build
 	// the query so need to create it directly.
 	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
 	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedRemoteColumn, BatchParentAlias)
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
 		quotedRemoteColumn,
@@ -404,10 +458,13 @@ func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspectio
 		quotedTable,
 		quotedRemoteColumn,
 		placeholders,
+		whereSQL,
 		BatchParentAlias,
 	)
 
-	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	args := append([]interface{}{}, values...)
+	args = append(args, whereArgs...)
+	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
@@ -457,14 +514,24 @@ type WhereClause struct {
 	UsedColumns []string
 }
 
-// BuildWhereClause parses a GraphQL WHERE input into a SQL WHERE clause
-// Returns the condition and a list of columns used (for indexed validation)
+// BuildWhereClause parses a GraphQL WHERE input into a SQL WHERE clause.
+// Returns the condition and a list of columns used (for indexed validation).
 func BuildWhereClause(table introspection.Table, whereInput map[string]interface{}) (*WhereClause, error) {
+	return buildWhereClauseWithAlias(table, "", whereInput)
+}
+
+// BuildWhereClauseQualified parses a GraphQL WHERE input into a SQL WHERE clause
+// with qualified column names (alias.column).
+func BuildWhereClauseQualified(table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
+	return buildWhereClauseWithAlias(table, alias, whereInput)
+}
+
+func buildWhereClauseWithAlias(table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
 	if len(whereInput) == 0 {
 		return nil, nil
 	}
 
-	condition, usedCols, err := buildWhereCondition(table, whereInput)
+	condition, usedCols, err := buildWhereCondition(table, alias, whereInput)
 	if err != nil {
 		return nil, err
 	}
@@ -475,15 +542,15 @@ func BuildWhereClause(table introspection.Table, whereInput map[string]interface
 	}, nil
 }
 
-// buildWhereCondition recursively builds WHERE conditions with AND/OR support
-func buildWhereCondition(table introspection.Table, whereInput map[string]interface{}) (sq.Sqlizer, []string, error) {
+// buildWhereCondition recursively builds WHERE conditions with AND/OR support.
+// When alias is non-empty, column names are qualified as alias.column.
+func buildWhereCondition(table introspection.Table, alias string, whereInput map[string]interface{}) (sq.Sqlizer, []string, error) {
 	usedColumns := []string{}
 	conditions := []sq.Sqlizer{}
 
 	for key, value := range whereInput {
 		switch key {
 		case "AND":
-			// Handle AND array
 			andArray, ok := value.([]interface{})
 			if !ok {
 				return nil, nil, fmt.Errorf("AND must be an array")
@@ -494,7 +561,7 @@ func buildWhereCondition(table introspection.Table, whereInput map[string]interf
 				if !ok {
 					return nil, nil, fmt.Errorf("AND array items must be objects")
 				}
-				cond, cols, err := buildWhereCondition(table, itemMap)
+				cond, cols, err := buildWhereCondition(table, alias, itemMap)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -508,7 +575,6 @@ func buildWhereCondition(table introspection.Table, whereInput map[string]interf
 			}
 
 		case "OR":
-			// Handle OR array
 			orArray, ok := value.([]interface{})
 			if !ok {
 				return nil, nil, fmt.Errorf("OR must be an array")
@@ -519,7 +585,7 @@ func buildWhereCondition(table introspection.Table, whereInput map[string]interf
 				if !ok {
 					return nil, nil, fmt.Errorf("OR array items must be objects")
 				}
-				cond, cols, err := buildWhereCondition(table, itemMap)
+				cond, cols, err := buildWhereCondition(table, alias, itemMap)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -533,7 +599,6 @@ func buildWhereCondition(table introspection.Table, whereInput map[string]interf
 			}
 
 		default:
-			// Handle regular column filters
 			col := findColumnByGraphQLName(table, key)
 			if col == nil {
 				return nil, nil, fmt.Errorf("unknown column: %s", key)
@@ -545,7 +610,7 @@ func buildWhereCondition(table introspection.Table, whereInput map[string]interf
 				return nil, nil, fmt.Errorf("filter for %s must be an object", key)
 			}
 
-			colConditions, err := buildColumnFilter(col.Name, filterMap)
+			colConditions, err := buildColumnFilter(*col, alias, filterMap)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -562,10 +627,25 @@ func buildWhereCondition(table introspection.Table, whereInput map[string]interf
 	return sq.And(conditions), usedColumns, nil
 }
 
-// buildColumnFilter builds filter conditions for a specific column
-func buildColumnFilter(colName string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+// buildColumnFilter builds filter conditions for a specific column.
+// When alias is non-empty, the column name is qualified as alias.column.
+func buildColumnFilter(col introspection.Column, alias string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
 	conditions := []sq.Sqlizer{}
-	quotedColumn := sqlutil.QuoteIdentifier(colName)
+	quotedColumn := sqlutil.QuoteIdentifier(col.Name)
+	if alias != "" {
+		quotedColumn = fmt.Sprintf("%s.%s", sqlutil.QuoteIdentifier(alias), quotedColumn)
+	}
+
+	effectiveType := introspection.EffectiveGraphQLType(col)
+	if effectiveType == sqltype.TypeSet {
+		return buildSetColumnFilter(col, quotedColumn, filterMap)
+	}
+	if effectiveType == sqltype.TypeBytes {
+		return buildBytesColumnFilter(quotedColumn, filterMap)
+	}
+	if effectiveType == sqltype.TypeUUID {
+		return buildUUIDColumnFilter(col, quotedColumn, filterMap)
+	}
 
 	for op, value := range filterMap {
 		switch op {
@@ -582,7 +662,6 @@ func buildColumnFilter(colName string, filterMap map[string]interface{}) ([]sq.S
 		case "gte":
 			conditions = append(conditions, sq.GtOrEq{quotedColumn: value})
 		case "in":
-			// Convert []interface{} to proper format
 			if arr, ok := value.([]interface{}); ok {
 				conditions = append(conditions, sq.Eq{quotedColumn: arr})
 			} else {
@@ -599,14 +678,14 @@ func buildColumnFilter(colName string, filterMap map[string]interface{}) ([]sq.S
 		case "notLike":
 			conditions = append(conditions, sq.NotLike{quotedColumn: value})
 		case "isNull":
-			if boolVal, ok := value.(bool); ok {
-				if boolVal {
-					conditions = append(conditions, sq.Eq{quotedColumn: nil})
-				} else {
-					conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-				}
-			} else {
+			boolVal, ok := value.(bool)
+			if !ok {
 				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+			if boolVal {
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
+			} else {
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
 			}
 		default:
 			return nil, fmt.Errorf("unknown filter operator: %s", op)
@@ -614,6 +693,298 @@ func buildColumnFilter(colName string, filterMap map[string]interface{}) ([]sq.S
 	}
 
 	return conditions, nil
+}
+
+func buildSetColumnFilter(col introspection.Column, quotedColumn string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+	conditions := []sq.Sqlizer{}
+
+	ops := make([]string, 0, len(filterMap))
+	for op := range filterMap {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+
+	for _, op := range ops {
+		value := filterMap[op]
+		switch op {
+		case "has":
+			item, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("has operator requires a value")
+			}
+			csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) > 0", quotedColumn), csv))
+		case "hasAnyOf":
+			items, err := setArrayValues(value)
+			if err != nil {
+				return nil, fmt.Errorf("hasAnyOf must be an array")
+			}
+			if len(items) == 0 {
+				conditions = append(conditions, sq.Expr("1=0"))
+				continue
+			}
+			anyConds := make([]sq.Sqlizer, 0, len(items))
+			for _, item := range items {
+				csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+				if err != nil {
+					return nil, err
+				}
+				anyConds = append(anyConds, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) > 0", quotedColumn), csv))
+			}
+			conditions = append(conditions, sq.Or(anyConds))
+		case "hasAllOf":
+			items, err := setArrayValues(value)
+			if err != nil {
+				return nil, fmt.Errorf("hasAllOf must be an array")
+			}
+			if len(items) == 0 {
+				conditions = append(conditions, sq.Expr("1=1"))
+				continue
+			}
+			allConds := make([]sq.Sqlizer, 0, len(items))
+			for _, item := range items {
+				csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+				if err != nil {
+					return nil, err
+				}
+				allConds = append(allConds, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) > 0", quotedColumn), csv))
+			}
+			conditions = append(conditions, sq.And(allConds))
+		case "hasNoneOf":
+			items, err := setArrayValues(value)
+			if err != nil {
+				return nil, fmt.Errorf("hasNoneOf must be an array")
+			}
+			if len(items) == 0 {
+				conditions = append(conditions, sq.Expr("1=1"))
+				continue
+			}
+			noneConds := make([]sq.Sqlizer, 0, len(items))
+			for _, item := range items {
+				csv, err := setutil.Canonicalize([]string{item}, col.EnumValues)
+				if err != nil {
+					return nil, err
+				}
+				noneConds = append(noneConds, sq.Expr(fmt.Sprintf("FIND_IN_SET(?, %s) = 0", quotedColumn), csv))
+			}
+			conditions = append(conditions, sq.And(noneConds))
+		case "eq":
+			csv, err := setutil.CanonicalizeAny(value, col.EnumValues)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: csv})
+		case "ne":
+			csv, err := setutil.CanonicalizeAny(value, col.EnumValues)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: csv})
+		case "isNull":
+			boolVal, ok := value.(bool)
+			if !ok {
+				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+			if boolVal {
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
+			} else {
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
+			}
+		default:
+			return nil, fmt.Errorf("unknown set filter operator: %s", op)
+		}
+	}
+
+	return conditions, nil
+}
+
+func setArrayValues(value interface{}) ([]string, error) {
+	switch v := value.(type) {
+	case []string:
+		return append([]string(nil), v...), nil
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			str, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("set list items must be strings")
+			}
+			out = append(out, str)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("set filter value must be an array")
+	}
+}
+
+func buildBytesColumnFilter(quotedColumn string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+	conditions := []sq.Sqlizer{}
+
+	for op, value := range filterMap {
+		switch op {
+		case "eq":
+			decoded, err := decodeBase64Bytes(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: decoded})
+		case "ne":
+			decoded, err := decodeBase64Bytes(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: decoded})
+		case "in":
+			decoded, err := decodeBase64BytesList(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: decoded})
+		case "notIn":
+			decoded, err := decodeBase64BytesList(value)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: decoded})
+		case "isNull":
+			boolVal, ok := value.(bool)
+			if !ok {
+				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+			if boolVal {
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
+			} else {
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
+			}
+		case "lt", "lte", "gt", "gte", "like", "notLike":
+			return nil, fmt.Errorf("operator %s is not supported for bytes columns", op)
+		default:
+			return nil, fmt.Errorf("unknown bytes filter operator: %s", op)
+		}
+	}
+
+	return conditions, nil
+}
+
+func decodeBase64Bytes(value interface{}) ([]byte, error) {
+	switch v := value.(type) {
+	case []byte:
+		// Bytes scalar ParseValue/ParseLiteral already decoded base64 for us.
+		return v, nil
+	case string:
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 value")
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("bytes filter value must be bytes or a base64 string")
+	}
+}
+
+func decodeBase64BytesList(value interface{}) ([]interface{}, error) {
+	arr, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("bytes filter value must be an array")
+	}
+	out := make([]interface{}, 0, len(arr))
+	for _, item := range arr {
+		decoded, err := decodeBase64Bytes(item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, decoded)
+	}
+	return out, nil
+}
+
+func buildUUIDColumnFilter(col introspection.Column, quotedColumn string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
+	conditions := []sq.Sqlizer{}
+	binaryStorage := uuidutil.IsBinaryStorageType(col.DataType)
+
+	for op, value := range filterMap {
+		switch op {
+		case "eq":
+			parsed, err := parseUUIDFilterValue(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: parsed})
+		case "ne":
+			parsed, err := parseUUIDFilterValue(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: parsed})
+		case "in":
+			parsed, err := parseUUIDFilterValueList(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.Eq{quotedColumn: parsed})
+		case "notIn":
+			parsed, err := parseUUIDFilterValueList(value, binaryStorage)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, sq.NotEq{quotedColumn: parsed})
+		case "isNull":
+			boolVal, ok := value.(bool)
+			if !ok {
+				return nil, fmt.Errorf("isNull must be a boolean")
+			}
+			if boolVal {
+				conditions = append(conditions, sq.Eq{quotedColumn: nil})
+			} else {
+				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
+			}
+		case "lt", "lte", "gt", "gte", "like", "notLike":
+			return nil, fmt.Errorf("operator %s is not supported for UUID columns", op)
+		default:
+			return nil, fmt.Errorf("unknown UUID filter operator: %s", op)
+		}
+	}
+
+	return conditions, nil
+}
+
+func parseUUIDFilterValue(value interface{}, binaryStorage bool) (interface{}, error) {
+	var raw string
+	switch v := value.(type) {
+	case string:
+		raw = v
+	case []byte:
+		raw = string(v)
+	default:
+		return nil, fmt.Errorf("UUID filter value must be a string")
+	}
+	parsed, canonical, err := uuidutil.ParseString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid UUID value")
+	}
+	if binaryStorage {
+		return uuidutil.ToBytes(parsed), nil
+	}
+	return canonical, nil
+}
+
+func parseUUIDFilterValueList(value interface{}, binaryStorage bool) ([]interface{}, error) {
+	arr, ok := value.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("UUID filter value must be an array")
+	}
+	out := make([]interface{}, 0, len(arr))
+	for _, item := range arr {
+		parsed, err := parseUUIDFilterValue(item, binaryStorage)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, parsed)
+	}
+	return out, nil
 }
 
 // findColumnByGraphQLName finds a column in the table by its GraphQL field name

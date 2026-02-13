@@ -40,6 +40,7 @@ func TestUniqueKeyLookups(t *testing.T) {
 			},
 		},
 	}
+	renamePrimaryKeyID(&schema.Tables[0])
 
 	// Test 1: Verify single-column unique key query is generated
 	t.Run("SingleColumnUniqueKeyQuery", func(t *testing.T) {
@@ -107,12 +108,12 @@ func TestUniqueKeyLookups(t *testing.T) {
 		queryType := graphqlSchema.QueryType()
 		fields := queryType.Fields()
 
-		// Should have product (PK lookup) but not product_by_id (from PRIMARY index)
+		// Should have product (PK lookup) and product_by_databaseId for raw PK lookup
 		if _, ok := fields["product"]; !ok {
 			t.Error("product PK query not found")
 		}
-		if _, ok := fields["product_by_id"]; ok {
-			t.Error("product_by_id query generated (PRIMARY should be skipped)")
+		if _, ok := fields["product_by_databaseId"]; !ok {
+			t.Error("product_by_databaseId query not generated for primary key lookup")
 		}
 	})
 }

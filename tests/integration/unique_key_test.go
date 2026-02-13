@@ -30,7 +30,7 @@ func TestUniqueKeyLookup_SingleColumn(t *testing.T) {
 	query := `
 		{
 			product_by_sku(sku: "WIDGET-001") {
-				id
+				databaseId
 				sku
 				name
 				price
@@ -48,10 +48,10 @@ func TestUniqueKeyLookup_SingleColumn(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	product := data["product_by_sku"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, product["id"])
+	assert.EqualValues(t, 1, product["databaseId"])
 	assert.Equal(t, "WIDGET-001", product["sku"])
 	assert.Equal(t, "Blue Widget", product["name"])
-	assert.Equal(t, 29.99, product["price"])
+	assert.Equal(t, 29.99, requireDecimalAsFloat64(t, product["price"]))
 }
 
 func TestUniqueKeyLookup_CompositeKey(t *testing.T) {
@@ -69,7 +69,7 @@ func TestUniqueKeyLookup_CompositeKey(t *testing.T) {
 	query := `
 		{
 			product_by_manufacturerId_sku(manufacturerId: 1, sku: "WIDGET-001") {
-				id
+				databaseId
 				sku
 				name
 				manufacturerId
@@ -87,7 +87,7 @@ func TestUniqueKeyLookup_CompositeKey(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	product := data["product_by_manufacturerId_sku"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, product["id"])
+	assert.EqualValues(t, 1, product["databaseId"])
 	assert.Equal(t, "WIDGET-001", product["sku"])
 	assert.Equal(t, "Blue Widget", product["name"])
 	assert.EqualValues(t, 1, product["manufacturerId"])
@@ -108,7 +108,7 @@ func TestUniqueKeyLookup_NotFound(t *testing.T) {
 	query := `
 		{
 			product_by_sku(sku: "NONEXISTENT") {
-				id
+				databaseId
 				sku
 				name
 			}
@@ -144,7 +144,7 @@ func TestUniqueKeyLookup_Nullable(t *testing.T) {
 	query := `
 		{
 			manufacturer_by_email(email: "contact@acme.com") {
-				id
+				databaseId
 				name
 				email
 				country
@@ -162,7 +162,7 @@ func TestUniqueKeyLookup_Nullable(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	manufacturer := data["manufacturer_by_email"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, manufacturer["id"])
+	assert.EqualValues(t, 1, manufacturer["databaseId"])
 	assert.Equal(t, "Acme Corp", manufacturer["name"])
 	assert.Equal(t, "contact@acme.com", manufacturer["email"])
 	assert.Equal(t, "USA", manufacturer["country"])
@@ -183,7 +183,7 @@ func TestUniqueKeyLookup_WithRelationships(t *testing.T) {
 	query := `
 		{
 			order_by_orderNumber(orderNumber: "ORD-2023-0001") {
-				id
+				databaseId
 				orderNumber
 				customerEmail
 				totalPrice
@@ -206,10 +206,10 @@ func TestUniqueKeyLookup_WithRelationships(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	order := data["order_by_orderNumber"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, order["id"])
+	assert.EqualValues(t, 1, order["databaseId"])
 	assert.Equal(t, "ORD-2023-0001", order["orderNumber"])
 	assert.Equal(t, "alice@example.com", order["customerEmail"])
-	assert.Equal(t, 59.98, order["totalPrice"])
+	assert.Equal(t, 59.98, requireDecimalAsFloat64(t, order["totalPrice"]))
 	assert.Equal(t, "delivered", order["status"])
 
 	// Check relationship
@@ -233,15 +233,15 @@ func TestUniqueKeyLookup_MultipleQueries(t *testing.T) {
 	query := `
 		{
 			widget1: product_by_sku(sku: "WIDGET-001") {
-				id
+				databaseId
 				name
 			}
 			widget2: product_by_sku(sku: "WIDGET-002") {
-				id
+				databaseId
 				name
 			}
 			acme: manufacturer_by_name(name: "Acme Corp") {
-				id
+				databaseId
 				name
 				country
 			}
@@ -258,15 +258,15 @@ func TestUniqueKeyLookup_MultipleQueries(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 
 	widget1 := data["widget1"].(map[string]interface{})
-	assert.EqualValues(t, 1, widget1["id"])
+	assert.EqualValues(t, 1, widget1["databaseId"])
 	assert.Equal(t, "Blue Widget", widget1["name"])
 
 	widget2 := data["widget2"].(map[string]interface{})
-	assert.EqualValues(t, 2, widget2["id"])
+	assert.EqualValues(t, 2, widget2["databaseId"])
 	assert.Equal(t, "Red Widget", widget2["name"])
 
 	acme := data["acme"].(map[string]interface{})
-	assert.EqualValues(t, 1, acme["id"])
+	assert.EqualValues(t, 1, acme["databaseId"])
 	assert.Equal(t, "Acme Corp", acme["name"])
 	assert.Equal(t, "USA", acme["country"])
 }
@@ -286,7 +286,7 @@ func TestUniqueKeyLookup_CategorySlug(t *testing.T) {
 	query := `
 		{
 			category_by_slug(slug: "electronics") {
-				id
+				databaseId
 				slug
 				name
 				isVisible
@@ -304,7 +304,7 @@ func TestUniqueKeyLookup_CategorySlug(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	category := data["category_by_slug"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, category["id"])
+	assert.EqualValues(t, 1, category["databaseId"])
 	assert.Equal(t, "electronics", category["slug"])
 	assert.Equal(t, "Electronics", category["name"])
 	// TiDB returns TINYINT(1) as int, not bool

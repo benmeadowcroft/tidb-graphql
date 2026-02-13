@@ -159,8 +159,8 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 		WillReturnRows(mockFingerprintRows)
 
 	// Introspection getTables query.
-	mockTables := sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE"})
-	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE\\s+FROM INFORMATION_SCHEMA.TABLES").
+	mockTables := sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"})
+	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
 		WithArgs("testdb").
 		WillReturnRows(mockTables)
 

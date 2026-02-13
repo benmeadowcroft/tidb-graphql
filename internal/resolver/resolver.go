@@ -6,26 +6,29 @@ package resolver
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/go-sql-driver/mysql"
-	"github.com/graphql-go/graphql"
-	"github.com/graphql-go/graphql/language/ast"
+	"tidb-graphql/internal/cursor"
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
+	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/observability"
 	"tidb-graphql/internal/planner"
+	"tidb-graphql/internal/scalars"
 	"tidb-graphql/internal/schemafilter"
+	"tidb-graphql/internal/schemanaming"
 	"tidb-graphql/internal/sqltype"
+	"tidb-graphql/internal/uuidutil"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/graphql-go/graphql"
+	"github.com/graphql-go/graphql/language/ast"
 )
 
 // Resolver handles GraphQL query execution against a database.
@@ -41,12 +44,26 @@ type Resolver struct {
 	createInputCache   map[string]*graphql.InputObject
 	updateInputCache   map[string]*graphql.InputObject
 	deletePayloadCache map[string]*graphql.Object
+	enumCache          map[string]*graphql.Enum
+	enumFilterCache    map[string]*graphql.InputObject
+	setFilterCache     map[string]*graphql.InputObject
 	singularQueryCache map[string]string
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
 	orderDirection     *graphql.Enum
 	nonNegativeInt     *graphql.Scalar
+	bigIntType         *graphql.Scalar
+	decimalType        *graphql.Scalar
 	jsonType           *graphql.Scalar
+	dateType           *graphql.Scalar
+	timeType           *graphql.Scalar
+	yearType           *graphql.Scalar
+	bytesType          *graphql.Scalar
+	uuidType           *graphql.Scalar
+	nodeInterface      *graphql.Interface
+	pageInfoType       *graphql.Object
+	edgeCache          map[string]*graphql.Object
+	connectionCache    map[string]*graphql.Object
 	limits             *planner.PlanLimits
 	defaultLimit       int
 	filters            schemafilter.Config
@@ -71,9 +88,14 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		createInputCache:   make(map[string]*graphql.InputObject),
 		updateInputCache:   make(map[string]*graphql.InputObject),
 		deletePayloadCache: make(map[string]*graphql.Object),
+		enumCache:          make(map[string]*graphql.Enum),
+		enumFilterCache:    make(map[string]*graphql.InputObject),
+		setFilterCache:     make(map[string]*graphql.InputObject),
 		singularQueryCache: make(map[string]string),
 		singularTypeCache:  make(map[string]string),
 		singularNamer:      naming.New(namingConfig, nil),
+		edgeCache:          make(map[string]*graphql.Object),
+		connectionCache:    make(map[string]*graphql.Object),
 		limits:             limits,
 		defaultLimit:       defaultLimit,
 		filters:            filters,
@@ -84,6 +106,8 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 // It creates types for each table, adds list and by-primary-key queries, and wires up
 // relationship resolvers for foreign key navigation.
 func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
+	r.applyNaming()
+
 	queryFields := graphql.Fields{}
 
 	for _, table := range r.dbSchema.Tables {
@@ -98,6 +122,17 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 				return "No tables found in database", nil
 			},
 			Description: "Placeholder field when database has no tables",
+		}
+	}
+	if r.hasNodeTypes() {
+		queryFields["node"] = &graphql.Field{
+			Type: r.nodeInterfaceType(),
+			Args: graphql.FieldConfigArgument{
+				"id": &graphql.ArgumentConfig{
+					Type: graphql.NewNonNull(graphql.ID),
+				},
+			},
+			Resolve: r.makeNodeResolver(),
 		}
 	}
 
@@ -120,8 +155,19 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 			Fields: mutationFields,
 		})
 	}
+	if types := r.schemaTypes(); len(types) > 0 {
+		schemaConfig.Types = types
+	}
 
 	return graphql.NewSchema(schemaConfig)
+}
+
+func (r *Resolver) applyNaming() {
+	if r.dbSchema == nil {
+		return
+	}
+	namingConfig := r.singularNamer.Config()
+	schemanaming.Apply(r.dbSchema, naming.New(namingConfig, nil))
 }
 
 func (r *Resolver) singularQueryName(table introspection.Table) string {
@@ -182,7 +228,7 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 
 	// List query
 	fields[fieldName] = &graphql.Field{
-		Type: graphql.NewList(tableType),
+		Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(tableType))),
 		Args: graphql.FieldConfigArgument{
 			"limit": &graphql.ArgumentConfig{
 				Type:         r.nonNegativeIntScalar(),
@@ -211,7 +257,8 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 	pkCols := introspection.PrimaryKeyColumns(table)
 	if len(pkCols) > 0 {
 		pkFieldName := r.singularQueryName(table)
-		r.addSingleRowQuery(fields, table, tableType, pkFieldName, pkCols)
+		r.addPrimaryKeyQuery(fields, table, tableType, pkFieldName, pkCols)
+		r.addPrimaryKeyUniqueLookup(fields, table, tableType, pkFieldName, pkCols)
 	}
 
 	// Unique key queries
@@ -227,6 +274,36 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 		Resolve: r.makeAggregateResolver(table),
 	}
 
+	// Connection query (only for tables with primary keys)
+	if len(pkCols) > 0 {
+		connectionName := fieldName + "Connection"
+		connectionType := r.buildConnectionType(table, tableType)
+		connArgs := graphql.FieldConfigArgument{
+			"first": &graphql.ArgumentConfig{
+				Type:         r.nonNegativeIntScalar(),
+				DefaultValue: planner.DefaultConnectionLimit,
+			},
+			"after": &graphql.ArgumentConfig{
+				Type: graphql.String,
+			},
+		}
+		if orderByInput := r.orderByInput(table); orderByInput != nil {
+			connArgs["orderBy"] = &graphql.ArgumentConfig{
+				Type: orderByInput,
+			}
+		}
+		if whereInput := r.whereInput(table); whereInput != nil {
+			connArgs["where"] = &graphql.ArgumentConfig{
+				Type: whereInput,
+			}
+		}
+		fields[connectionName] = &graphql.Field{
+			Type:    graphql.NewNonNull(connectionType),
+			Args:    connArgs,
+			Resolve: r.makeConnectionResolver(table),
+		}
+	}
+
 	return fields
 }
 
@@ -237,7 +314,7 @@ func (r *Resolver) addSingleRowQuery(fields graphql.Fields, table introspection.
 	for i := range cols {
 		col := &cols[i]
 		argName := introspection.GraphQLFieldName(*col)
-		argType := r.mapColumnTypeToGraphQL(col)
+		argType := r.mapColumnTypeToGraphQL(table, col)
 		args[argName] = &graphql.ArgumentConfig{
 			Type: graphql.NewNonNull(argType),
 		}
@@ -248,6 +325,31 @@ func (r *Resolver) addSingleRowQuery(fields graphql.Fields, table introspection.
 		Args:    args,
 		Resolve: r.makeSingleRowResolver(table),
 	}
+}
+
+// addPrimaryKeyQuery adds a query field that returns a single row by global node ID.
+func (r *Resolver) addPrimaryKeyQuery(fields graphql.Fields, table introspection.Table, tableType *graphql.Object, queryName string, pkCols []introspection.Column) {
+	fields[queryName] = &graphql.Field{
+		Type: tableType,
+		Args: graphql.FieldConfigArgument{
+			"id": &graphql.ArgumentConfig{
+				Type: graphql.NewNonNull(graphql.ID),
+			},
+		},
+		Resolve: r.makePrimaryKeyResolver(table, pkCols),
+	}
+}
+
+// addPrimaryKeyUniqueLookup adds a unique-key style lookup for raw primary key fields.
+func (r *Resolver) addPrimaryKeyUniqueLookup(fields graphql.Fields, table introspection.Table, tableType *graphql.Object, baseName string, pkCols []introspection.Column) {
+	if len(pkCols) == 0 {
+		return
+	}
+	queryName := baseName + "_by"
+	for _, col := range pkCols {
+		queryName += "_" + introspection.GraphQLFieldName(col)
+	}
+	r.addSingleRowQuery(fields, table, tableType, queryName, pkCols)
 }
 
 // addUniqueKeyQueries adds resolver fields for unique index lookups
@@ -293,13 +395,20 @@ func (r *Resolver) buildGraphQLType(table introspection.Table) *graphql.Object {
 		return cached
 	}
 
+	interfaces := []*graphql.Interface{}
+	if len(introspection.PrimaryKeyColumns(table)) > 0 {
+		interfaces = append(interfaces, r.nodeInterfaceType())
+	}
+
 	// Create type with FieldsThunk for lazy field initialization
 	// This prevents circular reference issues
 	objType := graphql.NewObject(graphql.ObjectConfig{
-		Name: typeName,
+		Name:        typeName,
+		Description: table.Comment,
 		Fields: graphql.FieldsThunk(func() graphql.Fields {
 			return r.buildFieldsForTable(table)
 		}),
+		Interfaces: interfaces,
 	})
 
 	// Cache immediately before building fields (important for circular refs)
@@ -320,13 +429,26 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 
 	// Add scalar fields from columns
 	for _, col := range table.Columns {
-		fieldType := r.mapColumnTypeToGraphQL(&col)
+		fieldType := r.mapColumnTypeToGraphQL(table, &col)
 		if !col.IsNullable {
 			fieldType = graphql.NewNonNull(fieldType)
 		}
 
-		fields[introspection.GraphQLFieldName(col)] = &graphql.Field{
-			Type: fieldType,
+		field := &graphql.Field{
+			Type:        fieldType,
+			Description: col.Comment,
+		}
+		if introspection.EffectiveGraphQLType(col) == sqltype.TypeUUID {
+			field.Resolve = r.uuidColumnResolver(col)
+		}
+		fields[introspection.GraphQLFieldName(col)] = field
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	if len(pkCols) > 0 {
+		fields["id"] = &graphql.Field{
+			Type:    graphql.NewNonNull(graphql.ID),
+			Resolve: r.makeNodeIDResolver(table, pkCols),
 		}
 	}
 
@@ -342,6 +464,9 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			}
 			relatedType := r.buildGraphQLType(relatedTable)
 
+			// Keep many-to-one fields nullable even when FK is NOT NULL.
+			// Row-level/table-level security can hide the related row; non-null would
+			// bubble errors and null out parent objects/lists.
 			fields[rel.GraphQLFieldName] = &graphql.Field{
 				Type:    relatedType,
 				Resolve: r.makeManyToOneResolver(table, rel),
@@ -357,7 +482,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			relatedType := r.buildGraphQLType(relatedTable)
 
 			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewList(graphql.NewNonNull(relatedType)),
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(relatedType))),
 				Args: graphql.FieldConfigArgument{
 					"limit": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
@@ -384,6 +509,33 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				Args:    r.aggregateArgs(relatedTable),
 				Resolve: r.makeRelationshipAggregateResolver(table, rel),
 			}
+
+			// Add connection field for one-to-many relationships (only if related table has PK)
+			relPKCols := introspection.PrimaryKeyColumns(relatedTable)
+			if len(relPKCols) > 0 {
+				connFieldName := rel.GraphQLFieldName + "Connection"
+				connType := r.buildConnectionType(relatedTable, relatedType)
+				connArgs := graphql.FieldConfigArgument{
+					"first": &graphql.ArgumentConfig{
+						Type:         r.nonNegativeIntScalar(),
+						DefaultValue: planner.DefaultConnectionLimit,
+					},
+					"after": &graphql.ArgumentConfig{
+						Type: graphql.String,
+					},
+				}
+				if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
+					connArgs["orderBy"] = &graphql.ArgumentConfig{
+						Type: orderByInput,
+					}
+				}
+				if whereInput := r.whereInput(relatedTable); whereInput != nil {
+					connArgs["where"] = &graphql.ArgumentConfig{
+						Type: whereInput,
+					}
+				}
+				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeOneToManyConnectionResolver(table, rel))
+			}
 		} else if rel.IsManyToMany {
 			// Many-to-many through pure junction: returns list of related entities
 			relatedTable, err := r.findTable(rel.RemoteTable)
@@ -393,7 +545,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			relatedType := r.buildGraphQLType(relatedTable)
 
 			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewList(graphql.NewNonNull(relatedType)),
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(relatedType))),
 				Args: graphql.FieldConfigArgument{
 					"limit": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
@@ -411,6 +563,33 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 					Type: orderByInput,
 				}
 			}
+
+			// Add connection field for many-to-many relationships (only if related table has PK)
+			relPKCols := introspection.PrimaryKeyColumns(relatedTable)
+			if len(relPKCols) > 0 {
+				connFieldName := rel.GraphQLFieldName + "Connection"
+				connType := r.buildConnectionType(relatedTable, relatedType)
+				connArgs := graphql.FieldConfigArgument{
+					"first": &graphql.ArgumentConfig{
+						Type:         r.nonNegativeIntScalar(),
+						DefaultValue: planner.DefaultConnectionLimit,
+					},
+					"after": &graphql.ArgumentConfig{
+						Type: graphql.String,
+					},
+				}
+				if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
+					connArgs["orderBy"] = &graphql.ArgumentConfig{
+						Type: orderByInput,
+					}
+				}
+				if whereInput := r.whereInput(relatedTable); whereInput != nil {
+					connArgs["where"] = &graphql.ArgumentConfig{
+						Type: whereInput,
+					}
+				}
+				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeManyToManyConnectionResolver(table, rel))
+			}
 		} else if rel.IsEdgeList {
 			// Edge list through attribute junction: returns list of edge/junction objects
 			junctionTable, err := r.findTable(rel.JunctionTable)
@@ -420,7 +599,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			edgeType := r.buildGraphQLType(junctionTable)
 
 			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewList(graphql.NewNonNull(edgeType)),
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(edgeType))),
 				Args: graphql.FieldConfigArgument{
 					"limit": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
@@ -438,10 +617,45 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 					Type: orderByInput,
 				}
 			}
+
+			// Add connection field for edge-list relationships (only if junction table has PK)
+			relPKCols := introspection.PrimaryKeyColumns(junctionTable)
+			if len(relPKCols) > 0 {
+				connFieldName := rel.GraphQLFieldName + "Connection"
+				connType := r.buildConnectionType(junctionTable, edgeType)
+				connArgs := graphql.FieldConfigArgument{
+					"first": &graphql.ArgumentConfig{
+						Type:         r.nonNegativeIntScalar(),
+						DefaultValue: planner.DefaultConnectionLimit,
+					},
+					"after": &graphql.ArgumentConfig{
+						Type: graphql.String,
+					},
+				}
+				if orderByInput := r.orderByInput(junctionTable); orderByInput != nil {
+					connArgs["orderBy"] = &graphql.ArgumentConfig{
+						Type: orderByInput,
+					}
+				}
+				if whereInput := r.whereInput(junctionTable); whereInput != nil {
+					connArgs["where"] = &graphql.ArgumentConfig{
+						Type: whereInput,
+					}
+				}
+				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeEdgeListConnectionResolver(table, rel))
+			}
 		}
 	}
 
 	return fields
+}
+
+func addRelConnectionField(fields graphql.Fields, name string, connType *graphql.Object, args graphql.FieldConfigArgument, resolve graphql.FieldResolveFn) {
+	fields[name] = &graphql.Field{
+		Type:    graphql.NewNonNull(connType),
+		Args:    args,
+		Resolve: resolve,
+	}
 }
 
 // findTable finds a table by name in the schema
@@ -566,7 +780,7 @@ func (r *Resolver) buildComparableAggregateFieldsType(table introspection.Table,
 		fieldName := introspection.GraphQLFieldName(col)
 		// MIN/MAX preserve the original column type
 		fields[fieldName] = &graphql.Field{
-			Type: r.mapColumnTypeToGraphQL(&col),
+			Type: r.mapColumnTypeToGraphQL(table, &col),
 		}
 	}
 
@@ -684,6 +898,149 @@ func (r *Resolver) makeSingleRowResolver(table introspection.Table) graphql.Fiel
 	}
 }
 
+func (r *Resolver) makeNodeIDResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type")
+		}
+		values := make([]interface{}, len(pkCols))
+		for i, col := range pkCols {
+			fieldName := introspection.GraphQLFieldName(col)
+			value, ok := source[fieldName]
+			if !ok {
+				return nil, fmt.Errorf("missing primary key field %s", fieldName)
+			}
+			values[i] = value
+		}
+		encoded := nodeid.Encode(introspection.GraphQLTypeName(table), values...)
+		if encoded == "" {
+			return nil, fmt.Errorf("failed to encode node id")
+		}
+		return encoded, nil
+	}
+}
+
+func (r *Resolver) makePrimaryKeyResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		rawID, ok := p.Args["id"]
+		if !ok || rawID == nil {
+			return nil, fmt.Errorf("missing id argument")
+		}
+		id, ok := rawID.(string)
+		if !ok {
+			id = fmt.Sprint(rawID)
+		}
+
+		pkValues, err := r.pkValuesFromNodeID(table, pkCols, id)
+		if err != nil {
+			return nil, err
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+		selected := planner.SelectedColumns(table, field, p.Info.Fragments)
+
+		var query planner.SQLQuery
+		if len(pkCols) == 1 {
+			pk := &pkCols[0]
+			query, err = planner.PlanTableByPK(table, selected, pk, pkValues[pk.Name])
+		} else {
+			query, err = planner.PlanTableByPKColumns(table, selected, pkCols, pkValues)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, query.SQL, query.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() {
+			_ = rows.Close()
+		}()
+
+		results, err := scanRows(rows, selected)
+		if err != nil {
+			return nil, err
+		}
+		if len(results) == 0 {
+			return nil, nil
+		}
+		return results[0], nil
+	}
+}
+
+func (r *Resolver) makeNodeResolver() graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		rawID, ok := p.Args["id"]
+		if !ok || rawID == nil {
+			return nil, fmt.Errorf("missing id argument")
+		}
+		id, ok := rawID.(string)
+		if !ok {
+			id = fmt.Sprint(rawID)
+		}
+
+		// Peek at type name to find the table dynamically
+		typeName, values, err := nodeid.Decode(id)
+		if err != nil {
+			return nil, err
+		}
+
+		table, err := r.findTableByTypeName(typeName)
+		if err != nil {
+			return nil, err
+		}
+		pkCols := introspection.PrimaryKeyColumns(table)
+		if len(pkCols) == 0 {
+			return nil, fmt.Errorf("table %s has no primary key", table.Name)
+		}
+
+		pkValues, err := r.pkValuesFromDecodedNodeID(table, pkCols, typeName, values)
+		if err != nil {
+			return nil, err
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+		selected := planner.SelectedColumns(table, field, p.Info.Fragments)
+
+		var query planner.SQLQuery
+		if len(pkCols) == 1 {
+			pk := &pkCols[0]
+			query, err = planner.PlanTableByPK(table, selected, pk, pkValues[pk.Name])
+		} else {
+			query, err = planner.PlanTableByPKColumns(table, selected, pkCols, pkValues)
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, query.SQL, query.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() {
+			_ = rows.Close()
+		}()
+
+		results, err := scanRows(rows, selected)
+		if err != nil {
+			return nil, err
+		}
+		if len(results) == 0 {
+			return nil, nil
+		}
+		results[0]["__typename"] = typeName
+		return results[0], nil
+	}
+}
+
 func (r *Resolver) planFromParams(p graphql.ResolveParams) (*planner.Plan, error) {
 	field := firstFieldAST(p.Info.FieldASTs)
 	if field == nil {
@@ -694,6 +1051,85 @@ func (r *Resolver) planFromParams(p graphql.ResolveParams) (*planner.Plan, error
 		return planner.PlanQuery(r.dbSchema, field, p.Args, planner.WithFragments(p.Info.Fragments), planner.WithLimits(*r.limits), planner.WithDefaultListLimit(r.defaultLimit))
 	}
 	return planner.PlanQuery(r.dbSchema, field, p.Args, planner.WithFragments(p.Info.Fragments), planner.WithDefaultListLimit(r.defaultLimit))
+}
+
+func (r *Resolver) pkValuesFromNodeID(table introspection.Table, pkCols []introspection.Column, id string) (map[string]interface{}, error) {
+	decodedType, decodedValues, err := nodeid.Decode(id)
+	if err != nil {
+		return nil, err
+	}
+	return r.pkValuesFromDecodedNodeID(table, pkCols, decodedType, decodedValues)
+}
+
+func (r *Resolver) pkValuesFromDecodedNodeID(table introspection.Table, pkCols []introspection.Column, decodedType string, decodedValues []interface{}) (map[string]interface{}, error) {
+	expectedType := introspection.GraphQLTypeName(table)
+	if decodedType != expectedType {
+		return nil, fmt.Errorf("invalid id for %s", expectedType)
+	}
+	if len(decodedValues) != len(pkCols) {
+		return nil, fmt.Errorf("invalid id for %s", expectedType)
+	}
+	pkValues := make(map[string]interface{}, len(pkCols))
+	for i, col := range pkCols {
+		parsed, err := nodeid.ParsePKValue(col, decodedValues[i])
+		if err != nil {
+			return nil, err
+		}
+		pkValues[col.Name] = parsed
+	}
+	return pkValues, nil
+}
+
+func (r *Resolver) findTableByTypeName(typeName string) (introspection.Table, error) {
+	if r.dbSchema == nil {
+		return introspection.Table{}, fmt.Errorf("schema not available")
+	}
+	for _, table := range r.dbSchema.Tables {
+		if introspection.GraphQLTypeName(table) == typeName {
+			return table, nil
+		}
+	}
+	return introspection.Table{}, fmt.Errorf("unknown type %s", typeName)
+}
+
+func (r *Resolver) hasNodeTypes() bool {
+	if r.dbSchema == nil {
+		return false
+	}
+	for _, table := range r.dbSchema.Tables {
+		if len(introspection.PrimaryKeyColumns(table)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Resolver) schemaTypes() []graphql.Type {
+	r.mu.RLock()
+	if len(r.typeCache) == 0 {
+		r.mu.RUnlock()
+		return nil
+	}
+	// Snapshot the cache under a single lock to avoid key/value drift between
+	// separate read passes.
+	snapshot := make(map[string]*graphql.Object, len(r.typeCache))
+	keys := make([]string, 0, len(r.typeCache))
+	for key, objType := range r.typeCache {
+		snapshot[key] = objType
+		keys = append(keys, key)
+	}
+	r.mu.RUnlock()
+
+	sort.Strings(keys)
+
+	types := make([]graphql.Type, 0, len(keys))
+	for _, key := range keys {
+		if objType, ok := snapshot[key]; ok {
+			types = append(types, objType)
+		}
+	}
+
+	return types
 }
 
 func seedBatchRows(p graphql.ResolveParams, rows []map[string]interface{}) {
@@ -908,33 +1344,7 @@ func (r *Resolver) nonNegativeIntScalar() *graphql.Scalar {
 		return cached
 	}
 
-	scalar := graphql.NewScalar(graphql.ScalarConfig{
-		Name:        "NonNegativeInt",
-		Description: "An integer greater than or equal to zero.",
-		Serialize: func(value interface{}) interface{} {
-			if parsed, ok := coerceNonNegativeInt(value); ok {
-				return parsed
-			}
-			return nil
-		},
-		ParseValue: func(value interface{}) interface{} {
-			if parsed, ok := coerceNonNegativeInt(value); ok {
-				return parsed
-			}
-			return nil
-		},
-		ParseLiteral: func(valueAST ast.Value) interface{} {
-			intValue, ok := valueAST.(*ast.IntValue)
-			if !ok {
-				return nil
-			}
-			parsed, err := strconv.Atoi(intValue.Value)
-			if err != nil || parsed < 0 {
-				return nil
-			}
-			return parsed
-		},
-	})
+	scalar := scalars.NonNegativeInt()
 
 	r.mu.Lock()
 	if r.nonNegativeInt == nil {
@@ -954,39 +1364,7 @@ func (r *Resolver) jsonScalar() *graphql.Scalar {
 		return cached
 	}
 
-	scalar := graphql.NewScalar(graphql.ScalarConfig{
-		Name:        "JSON",
-		Description: "Arbitrary JSON value serialized as a string.",
-		Serialize: func(value interface{}) interface{} {
-			switch v := value.(type) {
-			case []byte:
-				return string(v)
-			case string:
-				return v
-			case nil:
-				return nil
-			default:
-				serialized, err := json.Marshal(v)
-				if err != nil {
-					slog.Default().Warn("failed to serialize JSON scalar", slog.String("error", err.Error()))
-					return nil
-				}
-				return string(serialized)
-			}
-		},
-		ParseValue: func(value interface{}) interface{} {
-			if s, ok := value.(string); ok {
-				return s
-			}
-			return nil
-		},
-		ParseLiteral: func(valueAST ast.Value) interface{} {
-			if sv, ok := valueAST.(*ast.StringValue); ok {
-				return sv.Value
-			}
-			return nil
-		},
-	})
+	scalar := scalars.JSON()
 
 	r.mu.Lock()
 	if r.jsonType == nil {
@@ -998,26 +1376,670 @@ func (r *Resolver) jsonScalar() *graphql.Scalar {
 	return cached
 }
 
-func coerceNonNegativeInt(value interface{}) (int, bool) {
-	switch v := value.(type) {
-	case int:
-		if v < 0 {
-			return 0, false
-		}
-		return v, true
-	case int64:
-		if v < 0 || v > math.MaxInt {
-			return 0, false
-		}
-		return int(v), true
-	case float64:
-		if v < 0 || v > math.MaxInt || v != math.Trunc(v) {
-			return 0, false
-		}
-		return int(v), true
-	default:
-		return 0, false
+func (r *Resolver) bigIntScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.bigIntType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
 	}
+
+	scalar := scalars.BigInt()
+
+	r.mu.Lock()
+	if r.bigIntType == nil {
+		r.bigIntType = scalar
+	}
+	cached = r.bigIntType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) decimalScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.decimalType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Decimal()
+
+	r.mu.Lock()
+	if r.decimalType == nil {
+		r.decimalType = scalar
+	}
+	cached = r.decimalType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) dateScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.dateType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Date()
+
+	r.mu.Lock()
+	if r.dateType == nil {
+		r.dateType = scalar
+	}
+	cached = r.dateType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) timeScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.timeType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Time()
+
+	r.mu.Lock()
+	if r.timeType == nil {
+		r.timeType = scalar
+	}
+	cached = r.timeType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) yearScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.yearType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Year()
+
+	r.mu.Lock()
+	if r.yearType == nil {
+		r.yearType = scalar
+	}
+	cached = r.yearType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) bytesScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.bytesType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Bytes()
+
+	r.mu.Lock()
+	if r.bytesType == nil {
+		r.bytesType = scalar
+	}
+	cached = r.bytesType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) uuidScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.uuidType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.UUID()
+
+	r.mu.Lock()
+	if r.uuidType == nil {
+		r.uuidType = scalar
+	}
+	cached = r.uuidType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) nodeInterfaceType() *graphql.Interface {
+	r.mu.RLock()
+	cached := r.nodeInterface
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	nodeInterface := graphql.NewInterface(graphql.InterfaceConfig{
+		Name: "Node",
+		Fields: graphql.Fields{
+			"id": &graphql.Field{Type: graphql.NewNonNull(graphql.ID)},
+		},
+		ResolveType: func(p graphql.ResolveTypeParams) *graphql.Object {
+			source, ok := p.Value.(map[string]interface{})
+			if !ok {
+				return nil
+			}
+			typeName, ok := source["__typename"].(string)
+			if !ok || typeName == "" {
+				return nil
+			}
+			r.mu.RLock()
+			objType := r.typeCache[typeName]
+			r.mu.RUnlock()
+			return objType
+		},
+	})
+
+	r.mu.Lock()
+	if r.nodeInterface == nil {
+		r.nodeInterface = nodeInterface
+	}
+	cached = r.nodeInterface
+	r.mu.Unlock()
+
+	return cached
+}
+
+// pageInfoType returns the shared PageInfo GraphQL type (lazy-init).
+func (r *Resolver) getPageInfoType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.pageInfoType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	pageInfo := graphql.NewObject(graphql.ObjectConfig{
+		Name: "PageInfo",
+		Fields: graphql.Fields{
+			"hasNextPage": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Boolean),
+			},
+			"hasPreviousPage": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Boolean),
+			},
+			"startCursor": &graphql.Field{
+				Type: graphql.String,
+			},
+			"endCursor": &graphql.Field{
+				Type: graphql.String,
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if r.pageInfoType == nil {
+		r.pageInfoType = pageInfo
+	}
+	cached = r.pageInfoType
+	r.mu.Unlock()
+
+	return cached
+}
+
+// buildEdgeType builds the Edge type for a table (cached per table).
+func (r *Resolver) buildEdgeType(table introspection.Table, tableType *graphql.Object) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + "Edge"
+
+	r.mu.RLock()
+	if cached, ok := r.edgeCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	edgeType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			"cursor": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.String),
+			},
+			"node": &graphql.Field{
+				Type: graphql.NewNonNull(tableType),
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.edgeCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.edgeCache[typeName] = edgeType
+	r.mu.Unlock()
+
+	return edgeType
+}
+
+// buildConnectionType builds the Connection type for a table (cached per table).
+func (r *Resolver) buildConnectionType(table introspection.Table, tableType *graphql.Object) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + "Connection"
+
+	r.mu.RLock()
+	if cached, ok := r.connectionCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	edgeType := r.buildEdgeType(table, tableType)
+	pageInfo := r.getPageInfoType()
+
+	connType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			"edges": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(edgeType))),
+			},
+			"nodes": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(tableType))),
+			},
+			"pageInfo": &graphql.Field{
+				Type: graphql.NewNonNull(pageInfo),
+			},
+			"totalCount": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Int),
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					source, ok := p.Source.(map[string]interface{})
+					if !ok {
+						return 0, nil
+					}
+					cr, ok := source["__connectionResult"].(*connectionResult)
+					if !ok || cr == nil || cr.plan == nil {
+						return 0, nil
+					}
+					return cr.totalCount()
+				},
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.connectionCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.connectionCache[typeName] = connType
+	r.mu.Unlock()
+
+	return connType
+}
+
+// connectionResult holds the data needed to resolve connection fields.
+type connectionResult struct {
+	rows     []map[string]interface{}
+	plan     *planner.ConnectionPlan
+	hasNext  bool
+	hasPrev  bool
+	executor dbexec.QueryExecutor
+	countCtx context.Context
+	// totalCount is lazily computed
+	totalCountVal *int
+	totalCountMu  sync.Mutex
+}
+
+func (cr *connectionResult) totalCount() (int, error) {
+	cr.totalCountMu.Lock()
+	defer cr.totalCountMu.Unlock()
+
+	if cr.totalCountVal != nil {
+		return *cr.totalCountVal, nil
+	}
+
+	rows, err := cr.executor.QueryContext(cr.countCtx, cr.plan.Count.SQL, cr.plan.Count.Args...)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var count int
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			return 0, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	cr.totalCountVal = &count
+	return count, nil
+}
+
+func encodeCursorFromRow(row map[string]interface{}, plan *planner.ConnectionPlan) string {
+	typeName := introspection.GraphQLTypeName(plan.Table)
+	values := make([]interface{}, len(plan.CursorColumns))
+	for i, col := range plan.CursorColumns {
+		fieldName := introspection.GraphQLFieldName(col)
+		values[i] = row[fieldName]
+	}
+	return cursor.EncodeCursor(typeName, plan.OrderByKey, plan.OrderBy.Direction, values...)
+}
+
+// makeConnectionResolver creates a resolver for root connection queries.
+func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		var opts []planner.PlanOption
+		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		if r.limits != nil {
+			opts = append(opts, planner.WithLimits(*r.limits))
+		}
+
+		plan, err := planner.PlanConnection(r.dbSchema, table, field, p.Args, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan connection: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := scanRows(rows, plan.Columns)
+		if err != nil {
+			return nil, err
+		}
+
+		hasNext := len(results) > plan.First
+		if hasNext {
+			// Plans read first+1 rows; trim to requested size after hasNextPage probe.
+			results = results[:plan.First]
+		}
+
+		seedBatchRows(p, results)
+		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+	}
+}
+
+// makeOneToManyConnectionResolver creates a resolver for relationship connection queries.
+func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type")
+		}
+
+		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
+		pkValue := source[pkFieldName]
+		if pkValue == nil {
+			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+		}
+
+		// Only batch when no cursor is provided.
+		if afterRaw, ok := p.Args["after"]; !ok || afterRaw == nil || afterRaw == "" {
+			if result, ok, err := r.tryBatchOneToManyConnection(p, parentTable, rel, pkValue); ok || err != nil {
+				return result, err
+			}
+		}
+
+		relatedTable, err := r.findTable(rel.RemoteTable)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		var opts []planner.PlanOption
+		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		if r.limits != nil {
+			opts = append(opts, planner.WithLimits(*r.limits))
+		}
+
+		plan, err := planner.PlanOneToManyConnection(relatedTable, rel.RemoteColumn, pkValue, field, p.Args, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan connection: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := scanRows(rows, plan.Columns)
+		if err != nil {
+			return nil, err
+		}
+
+		hasNext := len(results) > plan.First
+		if hasNext {
+			// Plans read first+1 rows; trim to requested size after hasNextPage probe.
+			results = results[:plan.First]
+		}
+
+		seedBatchRows(p, results)
+		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+	}
+}
+
+// makeManyToManyConnectionResolver creates a resolver for many-to-many connection queries.
+func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type")
+		}
+
+		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
+		pkValue := source[pkFieldName]
+		if pkValue == nil {
+			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+		}
+
+		// Only batch when no cursor is provided.
+		if afterRaw, ok := p.Args["after"]; !ok || afterRaw == nil || afterRaw == "" {
+			if result, ok, err := r.tryBatchManyToManyConnection(p, parentTable, rel, pkValue); ok || err != nil {
+				return result, err
+			}
+		}
+
+		relatedTable, err := r.findTable(rel.RemoteTable)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		var opts []planner.PlanOption
+		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		if r.limits != nil {
+			opts = append(opts, planner.WithLimits(*r.limits))
+		}
+
+		plan, err := planner.PlanManyToManyConnection(
+			relatedTable,
+			rel.JunctionTable,
+			rel.JunctionLocalFK,
+			rel.JunctionRemoteFK,
+			rel.RemoteColumn,
+			pkValue,
+			field,
+			p.Args,
+			opts...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan connection: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := scanRows(rows, plan.Columns)
+		if err != nil {
+			return nil, err
+		}
+
+		hasNext := len(results) > plan.First
+		if hasNext {
+			results = results[:plan.First]
+		}
+
+		seedBatchRows(p, results)
+		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+	}
+}
+
+// makeEdgeListConnectionResolver creates a resolver for edge-list connection queries.
+func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type")
+		}
+
+		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
+		pkValue := source[pkFieldName]
+		if pkValue == nil {
+			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+		}
+
+		// Only batch when no cursor is provided.
+		if afterRaw, ok := p.Args["after"]; !ok || afterRaw == nil || afterRaw == "" {
+			if result, ok, err := r.tryBatchEdgeListConnection(p, parentTable, rel, pkValue); ok || err != nil {
+				return result, err
+			}
+		}
+
+		junctionTable, err := r.findTable(rel.JunctionTable)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
+		}
+
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		var opts []planner.PlanOption
+		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		if r.limits != nil {
+			opts = append(opts, planner.WithLimits(*r.limits))
+		}
+
+		plan, err := planner.PlanEdgeListConnection(
+			junctionTable,
+			rel.JunctionLocalFK,
+			pkValue,
+			field,
+			p.Args,
+			opts...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan connection: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := scanRows(rows, plan.Columns)
+		if err != nil {
+			return nil, err
+		}
+
+		hasNext := len(results) > plan.First
+		if hasNext {
+			results = results[:plan.First]
+		}
+
+		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+	}
+}
+
+// buildConnectionResult constructs the map that connection field resolvers read from.
+func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]interface{}, plan *planner.ConnectionPlan, hasNext bool) map[string]interface{} {
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	countCtx := ctx
+	if countCtx == nil {
+		countCtx = context.Background()
+	}
+	// totalCount is lazy, so it should not fail just because the caller's
+	// request context is canceled after rows have already been materialized.
+	countCtx = context.WithoutCancel(countCtx)
+
+	result := &connectionResult{
+		rows:     rows,
+		plan:     plan,
+		hasNext:  hasNext,
+		executor: r.executor,
+		countCtx: countCtx,
+	}
+	if plan != nil {
+		result.hasPrev = plan.HasCursor
+	}
+
+	// Build edges
+	edges := make([]map[string]interface{}, len(rows))
+	for i, row := range rows {
+		var c string
+		if plan != nil {
+			c = encodeCursorFromRow(row, plan)
+		}
+		edges[i] = map[string]interface{}{
+			"cursor": c,
+			"node":   row,
+		}
+	}
+
+	// Build pageInfo
+	var startCursor, endCursor interface{}
+	if len(edges) > 0 {
+		startCursor = edges[0]["cursor"]
+		endCursor = edges[len(edges)-1]["cursor"]
+	}
+
+	hasPrev := false
+	if plan != nil {
+		hasPrev = plan.HasCursor
+	}
+
+	connMap := map[string]interface{}{
+		"edges": edges,
+		"nodes": rows,
+		"pageInfo": map[string]interface{}{
+			"hasNextPage":     hasNext,
+			"hasPreviousPage": hasPrev,
+			"startCursor":     startCursor,
+			"endCursor":       endCursor,
+		},
+		"__connectionResult": result,
+	}
+
+	return connMap
 }
 
 func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
@@ -1037,15 +2059,16 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 
 	for _, col := range table.Columns {
 		// Skip JSON columns
-		if sqltype.MapToGraphQL(col.DataType) == sqltype.TypeJSON {
+		if introspection.EffectiveGraphQLType(col) == sqltype.TypeJSON {
 			continue
 		}
 
 		fieldName := introspection.GraphQLFieldName(col)
-		filterType := r.getFilterInputType(col.DataType)
+		filterType := r.getFilterInputType(table, col)
 		if filterType != nil {
 			fields[fieldName] = &graphql.InputObjectFieldConfig{
-				Type: filterType,
+				Type:        filterType,
+				Description: col.Comment,
 			}
 		}
 	}
@@ -1076,8 +2099,194 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 	return inputObj
 }
 
-func (r *Resolver) getFilterInputType(dataType string) *graphql.InputObject {
-	filterName := sqltype.MapToGraphQL(dataType).FilterTypeName()
+func (r *Resolver) enumTypeName(table introspection.Table, col introspection.Column) string {
+	singularTable := r.singularNamer.Singularize(table.Name)
+	return r.singularNamer.ToGraphQLTypeName(singularTable) + r.singularNamer.ToGraphQLTypeName(col.Name)
+}
+
+// normalizeEnumValueName gives a stable GraphQL-safe name for arbitrary SQL enum values.
+func normalizeEnumValueName(value string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		if r <= 0x7F {
+			ch := byte(r)
+			isLetter := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+			isDigit := ch >= '0' && ch <= '9'
+			if isLetter || isDigit {
+				if ch >= 'a' && ch <= 'z' {
+					ch = ch - 'a' + 'A'
+				}
+				b.WriteByte(ch)
+				lastUnderscore = false
+				continue
+			}
+			if !lastUnderscore && b.Len() > 0 {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+			continue
+		}
+		if b.Len() > 0 && !lastUnderscore {
+			b.WriteByte('_')
+		}
+		// escape non-ascii characters. GraphQL (unlike TiDB) doesn't support non-ascii characters
+		// in enum value names, so we need to escape them to ensure we can represent all possible
+		// enum values.
+		if r <= 0xFFFF {
+			fmt.Fprintf(&b, "U%04X", r)
+		} else {
+			fmt.Fprintf(&b, "U%06X", r)
+		}
+		lastUnderscore = false
+	}
+	name := strings.Trim(b.String(), "_")
+	if name == "" {
+		name = "VALUE" // fallback for empty enum values
+	}
+	if name[0] >= '0' && name[0] <= '9' {
+		name = "VALUE_" + name // GraphQL enum values can't start with a digit, so prefix with "VALUE_"
+	}
+	return name
+}
+
+func uniqueEnumValueName(base string, used map[string]int) string {
+	name := base
+	for {
+		if count, ok := used[name]; ok {
+			count++
+			used[name] = count
+			name = fmt.Sprintf("%s_%d", base, count)
+			continue
+		}
+		used[name] = 1
+		return name
+	}
+}
+
+// enumTypeForColumn preserves DB enum values while exposing GraphQL enums consistently.
+func (r *Resolver) enumTypeForColumn(table introspection.Table, col *introspection.Column) *graphql.Enum {
+	if col == nil || len(col.EnumValues) == 0 {
+		return nil
+	}
+	enumName := r.enumTypeName(table, *col)
+	r.mu.RLock()
+	cached := r.enumCache[enumName]
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	used := make(map[string]int)
+	values := graphql.EnumValueConfigMap{}
+	for _, value := range col.EnumValues {
+		enumValueName := normalizeEnumValueName(value)
+		enumValueName = uniqueEnumValueName(enumValueName, used)
+		values[enumValueName] = &graphql.EnumValueConfig{Value: value}
+	}
+
+	enumType := graphql.NewEnum(graphql.EnumConfig{
+		Name:   enumName,
+		Values: values,
+	})
+
+	r.mu.Lock()
+	if cached := r.enumCache[enumName]; cached != nil {
+		r.mu.Unlock()
+		return cached
+	}
+	r.enumCache[enumName] = enumType
+	r.mu.Unlock()
+
+	return enumType
+}
+
+func (r *Resolver) enumFilterType(enumType *graphql.Enum) *graphql.InputObject {
+	if enumType == nil {
+		return nil
+	}
+	filterName := enumType.Name() + "Filter"
+
+	r.mu.RLock()
+	cached := r.enumFilterCache[filterName]
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	filterType := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: filterName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"eq":     &graphql.InputObjectFieldConfig{Type: enumType},
+			"ne":     &graphql.InputObjectFieldConfig{Type: enumType},
+			"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(enumType))},
+			"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(enumType))},
+			"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+		},
+	})
+
+	r.mu.Lock()
+	if cached := r.enumFilterCache[filterName]; cached != nil {
+		r.mu.Unlock()
+		return cached
+	}
+	r.enumFilterCache[filterName] = filterType
+	r.mu.Unlock()
+
+	return filterType
+}
+
+func (r *Resolver) setFilterType(enumType *graphql.Enum) *graphql.InputObject {
+	if enumType == nil {
+		return nil
+	}
+	filterName := enumType.Name() + "SetFilter"
+
+	r.mu.RLock()
+	cached := r.setFilterCache[filterName]
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	listEnumType := graphql.NewList(graphql.NewNonNull(enumType))
+	filterType := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: filterName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"has":       &graphql.InputObjectFieldConfig{Type: enumType},
+			"hasAnyOf":  &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"hasAllOf":  &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"hasNoneOf": &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"eq":        &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"ne":        &graphql.InputObjectFieldConfig{Type: listEnumType},
+			"isNull":    &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+		},
+	})
+
+	r.mu.Lock()
+	if cached := r.setFilterCache[filterName]; cached != nil {
+		r.mu.Unlock()
+		return cached
+	}
+	r.setFilterCache[filterName] = filterType
+	r.mu.Unlock()
+
+	return filterType
+}
+
+func (r *Resolver) getFilterInputType(table introspection.Table, col introspection.Column) *graphql.InputObject {
+	effectiveType := introspection.EffectiveGraphQLType(col)
+	if effectiveType == sqltype.TypeSet {
+		if enumType := r.enumTypeForColumn(table, &col); enumType != nil {
+			return r.setFilterType(enumType)
+		}
+		return nil
+	}
+	if enumType := r.enumTypeForColumn(table, &col); enumType != nil {
+		return r.enumFilterType(enumType)
+	}
+
+	filterName := effectiveType.FilterTypeName()
 
 	// Check cache
 	r.mu.RLock()
@@ -1102,6 +2311,36 @@ func (r *Resolver) getFilterInputType(dataType string) *graphql.InputObject {
 				"gte":    &graphql.InputObjectFieldConfig{Type: graphql.Int},
 				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.Int))},
 				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.Int))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "BigIntFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "BigIntFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.bigIntScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.bigIntScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.bigIntScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.bigIntScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.bigIntScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.bigIntScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bigIntScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bigIntScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "DecimalFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "DecimalFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.decimalScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.decimalScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.decimalScalar()))},
 				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 			},
 		})
@@ -1143,6 +2382,88 @@ func (r *Resolver) getFilterInputType(dataType string) *graphql.InputObject {
 			Fields: graphql.InputObjectConfigFieldMap{
 				"eq":     &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 				"ne":     &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "BytesFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "BytesFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.bytesScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.bytesScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bytesScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.bytesScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "UUIDFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "UUIDFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.uuidScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.uuidScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.uuidScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.uuidScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "DateFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "DateFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.dateScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.dateScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.dateScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "DateTimeFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "DateTimeFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"ne":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"lt":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"lte":    &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"gt":     &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"gte":    &graphql.InputObjectFieldConfig{Type: graphql.DateTime},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.DateTime))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(graphql.DateTime))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "TimeFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "TimeFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.timeScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.timeScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.timeScalar()))},
+				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+			},
+		})
+	case "YearFilter":
+		filterType = graphql.NewInputObject(graphql.InputObjectConfig{
+			Name: "YearFilter",
+			Fields: graphql.InputObjectConfigFieldMap{
+				"eq":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"ne":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"lt":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"lte":    &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"gt":     &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"gte":    &graphql.InputObjectFieldConfig{Type: r.yearScalar()},
+				"in":     &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.yearScalar()))},
+				"notIn":  &graphql.InputObjectFieldConfig{Type: graphql.NewList(graphql.NewNonNull(r.yearScalar()))},
 				"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
 			},
 		})
@@ -1250,7 +2571,7 @@ func (r *Resolver) tryBatchOneToMany(p graphql.ResolveParams, table introspectio
 		if metrics != nil {
 			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationOneToMany)
 		}
-		planned, err := planner.PlanOneToManyBatch(relatedTable, selection, rel.RemoteColumn, chunk, limit, offset, orderBy)
+		planned, err := planner.PlanOneToManyBatch(relatedTable, selection, rel.RemoteColumn, chunk, limit, offset, orderBy, nil)
 		if err != nil {
 			if errors.Is(err, planner.ErrNoPrimaryKey) {
 				if metrics != nil {
@@ -1387,6 +2708,7 @@ func (r *Resolver) tryBatchManyToMany(p graphql.ResolveParams, table introspecti
 			limit,
 			offset,
 			orderBy,
+			nil,
 		)
 		if err != nil {
 			if errors.Is(err, planner.ErrNoPrimaryKey) {
@@ -1513,7 +2835,7 @@ func (r *Resolver) tryBatchEdgeList(p graphql.ResolveParams, table introspection
 		if metrics != nil {
 			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationEdgeList)
 		}
-		planned, err := planner.PlanEdgeListBatch(junctionTable, rel.JunctionLocalFK, selection, chunk, limit, offset, orderBy)
+		planned, err := planner.PlanEdgeListBatch(junctionTable, rel.JunctionLocalFK, selection, chunk, limit, offset, orderBy, nil)
 		if err != nil {
 			if errors.Is(err, planner.ErrNoPrimaryKey) {
 				if metrics != nil {
@@ -1550,6 +2872,663 @@ func (r *Resolver) tryBatchEdgeList(p graphql.ResolveParams, table introspection
 	state.setChildRows(relKey, grouped)
 
 	return grouped[fmt.Sprint(pkValue)], true, nil
+}
+
+func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
+	metrics := graphQLMetricsFromContext(p.Context)
+
+	state, ok := getBatchState(p.Context)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_batch_state")
+		}
+		return nil, false, nil
+	}
+
+	parentKey, ok := parentKeyFromSource(p.Source)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "missing_parent_key")
+		}
+		return nil, false, nil
+	}
+
+	parentRows := state.getParentRows(parentKey)
+	if len(parentRows) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "missing_parent_rows")
+		}
+		return nil, false, nil
+	}
+
+	relatedTable, err := r.findTable(rel.RemoteTable)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(relatedTable)
+	if len(pkCols) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_primary_key")
+		}
+		return nil, false, nil
+	}
+
+	field := firstFieldAST(p.Info.FieldASTs)
+	if field == nil {
+		return nil, true, fmt.Errorf("missing field AST")
+	}
+
+	first, err := planner.ParseFirst(p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+
+	orderBy, err := planner.ParseOrderBy(relatedTable, p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+	if orderBy == nil {
+		pkColNames := make([]string, len(pkCols))
+		for i, col := range pkCols {
+			pkColNames[i] = col.Name
+		}
+		orderBy = &planner.OrderBy{
+			Columns:   pkColNames,
+			Direction: "ASC",
+		}
+	}
+
+	var whereClause *planner.WhereClause
+	if whereArg, ok := p.Args["where"]; ok {
+		if whereMap, ok := whereArg.(map[string]interface{}); ok {
+			whereClause, err = planner.BuildWhereClause(relatedTable, whereMap)
+			if err != nil {
+				return nil, true, err
+			}
+			if whereClause != nil {
+				if err := planner.ValidateIndexedColumns(relatedTable, whereClause.UsedColumns); err != nil {
+					return nil, true, err
+				}
+			}
+		}
+	}
+
+	selection := planner.SelectedColumnsForConnection(relatedTable, field, p.Info.Fragments, orderBy)
+	orderByKey := planner.OrderByKey(relatedTable, orderBy.Columns)
+	cursorCols := planner.CursorColumns(relatedTable, orderBy)
+
+	relKey := fmt.Sprintf(
+		"%s|%s|%s|%s|%s|%s",
+		table.Name,
+		rel.RemoteTable,
+		rel.RemoteColumn,
+		orderByKey,
+		columnsKey(selection),
+		stableArgsKey(p.Args),
+	)
+
+	if cached := state.getConnectionRows(relKey); cached != nil {
+		state.IncrementCacheHit()
+		if metrics != nil {
+			metrics.RecordBatchCacheHit(p.Context, relationOneToMany)
+		}
+		if result, ok := cached[fmt.Sprint(pkValue)]; ok {
+			if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+				seedBatchRows(p, nodes)
+			}
+			return result, true, nil
+		}
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.IncrementCacheMiss()
+	if metrics != nil {
+		metrics.RecordBatchCacheMiss(p.Context, relationOneToMany)
+	}
+
+	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
+	parentValues := uniqueParentValues(parentRows, parentField)
+	if len(parentValues) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	// Keep original typed parent values so count queries can bind FK args correctly.
+	parentValueByKey := make(map[string]interface{}, len(parentValues))
+	for _, value := range parentValues {
+		parentValueByKey[fmt.Sprint(value)] = value
+	}
+
+	chunks := chunkValues(parentValues, batchMaxInClause)
+	if metrics != nil {
+		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationOneToMany)
+	}
+
+	groupedConnections := make(map[string]map[string]interface{})
+	for _, chunk := range chunks {
+		if metrics != nil {
+			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationOneToMany)
+		}
+		planned, err := planner.PlanOneToManyConnectionBatch(
+			relatedTable,
+			rel.RemoteColumn,
+			selection,
+			chunk,
+			first,
+			orderBy,
+			whereClause,
+		)
+		if err != nil {
+			if errors.Is(err, planner.ErrNoPrimaryKey) {
+				if metrics != nil {
+					metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_primary_key")
+				}
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		if planned.SQL == "" {
+			continue
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
+		if err != nil {
+			return nil, true, normalizeQueryError(err)
+		}
+		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
+		rows.Close()
+		if err != nil {
+			return nil, true, err
+		}
+		if metrics != nil {
+			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationOneToMany)
+		}
+
+		grouped := groupByAlias(results, planner.BatchParentAlias)
+		for parentID, rows := range grouped {
+			parentValue := parentValueByKey[parentID]
+			// Connection plans fetch first+1 rows to compute hasNextPage per parent.
+			hasNext := len(rows) > first
+			if hasNext {
+				rows = rows[:first]
+			}
+
+			countQuery, err := planner.BuildOneToManyCountSQL(
+				relatedTable,
+				rel.RemoteColumn,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+
+			plan := &planner.ConnectionPlan{
+				Count:         countQuery,
+				Table:         relatedTable,
+				Columns:       selection,
+				OrderBy:       orderBy,
+				OrderByKey:    orderByKey,
+				CursorColumns: cursorCols,
+				First:         first,
+				HasCursor:     false,
+			}
+
+			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext)
+		}
+	}
+
+	if len(groupedConnections) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.setConnectionRows(relKey, groupedConnections)
+
+	if result, ok := groupedConnections[fmt.Sprint(pkValue)]; ok {
+		if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+			seedBatchRows(p, nodes)
+		}
+		return result, true, nil
+	}
+	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+}
+
+func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
+	metrics := graphQLMetricsFromContext(p.Context)
+
+	state, ok := getBatchState(p.Context)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationManyToMany, "no_batch_state")
+		}
+		return nil, false, nil
+	}
+
+	parentKey, ok := parentKeyFromSource(p.Source)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationManyToMany, "missing_parent_key")
+		}
+		return nil, false, nil
+	}
+
+	parentRows := state.getParentRows(parentKey)
+	if len(parentRows) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationManyToMany, "missing_parent_rows")
+		}
+		return nil, false, nil
+	}
+
+	relatedTable, err := r.findTable(rel.RemoteTable)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(relatedTable)
+	if len(pkCols) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationManyToMany, "no_primary_key")
+		}
+		return nil, false, nil
+	}
+
+	field := firstFieldAST(p.Info.FieldASTs)
+	if field == nil {
+		return nil, true, fmt.Errorf("missing field AST")
+	}
+
+	first, err := planner.ParseFirst(p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+
+	orderBy, err := planner.ParseOrderBy(relatedTable, p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+	if orderBy == nil {
+		pkColNames := make([]string, len(pkCols))
+		for i, col := range pkCols {
+			pkColNames[i] = col.Name
+		}
+		orderBy = &planner.OrderBy{
+			Columns:   pkColNames,
+			Direction: "ASC",
+		}
+	}
+
+	var whereClause *planner.WhereClause
+	if whereArg, ok := p.Args["where"]; ok {
+		if whereMap, ok := whereArg.(map[string]interface{}); ok {
+			whereClause, err = planner.BuildWhereClauseQualified(relatedTable, relatedTable.Name, whereMap)
+			if err != nil {
+				return nil, true, err
+			}
+			if whereClause != nil {
+				if err := planner.ValidateIndexedColumns(relatedTable, whereClause.UsedColumns); err != nil {
+					return nil, true, err
+				}
+			}
+		}
+	}
+
+	selection := planner.SelectedColumnsForConnection(relatedTable, field, p.Info.Fragments, orderBy)
+	orderByKey := planner.OrderByKey(relatedTable, orderBy.Columns)
+	cursorCols := planner.CursorColumns(relatedTable, orderBy)
+
+	relKey := fmt.Sprintf(
+		"%s|%s|%s|%s|%s|%s|%s",
+		table.Name,
+		rel.RemoteTable,
+		rel.JunctionTable,
+		rel.RemoteColumn,
+		orderByKey,
+		columnsKey(selection),
+		stableArgsKey(p.Args),
+	)
+
+	if cached := state.getConnectionRows(relKey); cached != nil {
+		state.IncrementCacheHit()
+		if metrics != nil {
+			metrics.RecordBatchCacheHit(p.Context, relationManyToMany)
+		}
+		if result, ok := cached[fmt.Sprint(pkValue)]; ok {
+			if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+				seedBatchRows(p, nodes)
+			}
+			return result, true, nil
+		}
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.IncrementCacheMiss()
+	if metrics != nil {
+		metrics.RecordBatchCacheMiss(p.Context, relationManyToMany)
+	}
+
+	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
+	parentValues := uniqueParentValues(parentRows, parentField)
+	if len(parentValues) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	parentValueByKey := make(map[string]interface{}, len(parentValues))
+	for _, value := range parentValues {
+		parentValueByKey[fmt.Sprint(value)] = value
+	}
+
+	chunks := chunkValues(parentValues, batchMaxInClause)
+	if metrics != nil {
+		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationManyToMany)
+	}
+
+	groupedConnections := make(map[string]map[string]interface{})
+	for _, chunk := range chunks {
+		if metrics != nil {
+			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationManyToMany)
+		}
+		planned, err := planner.PlanManyToManyConnectionBatch(
+			relatedTable,
+			rel.JunctionTable,
+			rel.JunctionLocalFK,
+			rel.JunctionRemoteFK,
+			rel.RemoteColumn,
+			selection,
+			chunk,
+			first,
+			orderBy,
+			whereClause,
+		)
+		if err != nil {
+			if errors.Is(err, planner.ErrNoPrimaryKey) {
+				if metrics != nil {
+					metrics.RecordBatchSkipped(p.Context, relationManyToMany, "no_primary_key")
+				}
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		if planned.SQL == "" {
+			continue
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
+		if err != nil {
+			return nil, true, normalizeQueryError(err)
+		}
+		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
+		rows.Close()
+		if err != nil {
+			return nil, true, err
+		}
+		if metrics != nil {
+			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationManyToMany)
+		}
+
+		grouped := groupByAlias(results, planner.BatchParentAlias)
+		for parentID, rows := range grouped {
+			parentValue := parentValueByKey[parentID]
+			hasNext := len(rows) > first
+			if hasNext {
+				rows = rows[:first]
+			}
+
+			countQuery, err := planner.BuildManyToManyCountSQL(
+				relatedTable,
+				rel.JunctionTable,
+				rel.JunctionLocalFK,
+				rel.JunctionRemoteFK,
+				rel.RemoteColumn,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+
+			plan := &planner.ConnectionPlan{
+				Count:         countQuery,
+				Table:         relatedTable,
+				Columns:       selection,
+				OrderBy:       orderBy,
+				OrderByKey:    orderByKey,
+				CursorColumns: cursorCols,
+				First:         first,
+				HasCursor:     false,
+			}
+
+			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext)
+		}
+	}
+
+	if len(groupedConnections) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.setConnectionRows(relKey, groupedConnections)
+
+	if result, ok := groupedConnections[fmt.Sprint(pkValue)]; ok {
+		if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+			seedBatchRows(p, nodes)
+		}
+		return result, true, nil
+	}
+	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+}
+
+func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
+	metrics := graphQLMetricsFromContext(p.Context)
+
+	state, ok := getBatchState(p.Context)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationEdgeList, "no_batch_state")
+		}
+		return nil, false, nil
+	}
+
+	parentKey, ok := parentKeyFromSource(p.Source)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationEdgeList, "missing_parent_key")
+		}
+		return nil, false, nil
+	}
+
+	parentRows := state.getParentRows(parentKey)
+	if len(parentRows) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationEdgeList, "missing_parent_rows")
+		}
+		return nil, false, nil
+	}
+
+	junctionTable, err := r.findTable(rel.JunctionTable)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(junctionTable)
+	if len(pkCols) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationEdgeList, "no_primary_key")
+		}
+		return nil, false, nil
+	}
+
+	field := firstFieldAST(p.Info.FieldASTs)
+	if field == nil {
+		return nil, true, fmt.Errorf("missing field AST")
+	}
+
+	first, err := planner.ParseFirst(p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+
+	orderBy, err := planner.ParseOrderBy(junctionTable, p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+	if orderBy == nil {
+		pkColNames := make([]string, len(pkCols))
+		for i, col := range pkCols {
+			pkColNames[i] = col.Name
+		}
+		orderBy = &planner.OrderBy{
+			Columns:   pkColNames,
+			Direction: "ASC",
+		}
+	}
+
+	var whereClause *planner.WhereClause
+	if whereArg, ok := p.Args["where"]; ok {
+		if whereMap, ok := whereArg.(map[string]interface{}); ok {
+			whereClause, err = planner.BuildWhereClause(junctionTable, whereMap)
+			if err != nil {
+				return nil, true, err
+			}
+			if whereClause != nil {
+				if err := planner.ValidateIndexedColumns(junctionTable, whereClause.UsedColumns); err != nil {
+					return nil, true, err
+				}
+			}
+		}
+	}
+
+	selection := planner.SelectedColumnsForConnection(junctionTable, field, p.Info.Fragments, orderBy)
+	orderByKey := planner.OrderByKey(junctionTable, orderBy.Columns)
+	cursorCols := planner.CursorColumns(junctionTable, orderBy)
+
+	relKey := fmt.Sprintf(
+		"%s|%s|%s|%s|%s|%s",
+		table.Name,
+		rel.JunctionTable,
+		rel.JunctionLocalFK,
+		orderByKey,
+		columnsKey(selection),
+		stableArgsKey(p.Args),
+	)
+
+	if cached := state.getConnectionRows(relKey); cached != nil {
+		state.IncrementCacheHit()
+		if metrics != nil {
+			metrics.RecordBatchCacheHit(p.Context, relationEdgeList)
+		}
+		if result, ok := cached[fmt.Sprint(pkValue)]; ok {
+			if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+				seedBatchRows(p, nodes)
+			}
+			return result, true, nil
+		}
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.IncrementCacheMiss()
+	if metrics != nil {
+		metrics.RecordBatchCacheMiss(p.Context, relationEdgeList)
+	}
+
+	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
+	parentValues := uniqueParentValues(parentRows, parentField)
+	if len(parentValues) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	parentValueByKey := make(map[string]interface{}, len(parentValues))
+	for _, value := range parentValues {
+		parentValueByKey[fmt.Sprint(value)] = value
+	}
+
+	chunks := chunkValues(parentValues, batchMaxInClause)
+	if metrics != nil {
+		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationEdgeList)
+	}
+
+	groupedConnections := make(map[string]map[string]interface{})
+	for _, chunk := range chunks {
+		if metrics != nil {
+			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationEdgeList)
+		}
+		planned, err := planner.PlanEdgeListConnectionBatch(
+			junctionTable,
+			rel.JunctionLocalFK,
+			selection,
+			chunk,
+			first,
+			orderBy,
+			whereClause,
+		)
+		if err != nil {
+			if errors.Is(err, planner.ErrNoPrimaryKey) {
+				if metrics != nil {
+					metrics.RecordBatchSkipped(p.Context, relationEdgeList, "no_primary_key")
+				}
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		if planned.SQL == "" {
+			continue
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
+		if err != nil {
+			return nil, true, normalizeQueryError(err)
+		}
+		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
+		rows.Close()
+		if err != nil {
+			return nil, true, err
+		}
+		if metrics != nil {
+			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationEdgeList)
+		}
+
+		grouped := groupByAlias(results, planner.BatchParentAlias)
+		for parentID, rows := range grouped {
+			parentValue := parentValueByKey[parentID]
+			hasNext := len(rows) > first
+			if hasNext {
+				rows = rows[:first]
+			}
+
+			countQuery, err := planner.BuildEdgeListCountSQL(
+				junctionTable,
+				rel.JunctionLocalFK,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+
+			plan := &planner.ConnectionPlan{
+				Count:         countQuery,
+				Table:         junctionTable,
+				Columns:       selection,
+				OrderBy:       orderBy,
+				OrderByKey:    orderByKey,
+				CursorColumns: cursorCols,
+				First:         first,
+				HasCursor:     false,
+			}
+
+			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext)
+		}
+	}
+
+	if len(groupedConnections) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.setConnectionRows(relKey, groupedConnections)
+
+	if result, ok := groupedConnections[fmt.Sprint(pkValue)]; ok {
+		if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+			seedBatchRows(p, nodes)
+		}
+		return result, true, nil
+	}
+	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
 }
 
 func (r *Resolver) tryBatchRelationshipAggregate(
@@ -2060,7 +4039,7 @@ func normalizeQueryError(err error) error {
 }
 
 func scanRows(rows dbexec.Rows, columns []introspection.Column) ([]map[string]interface{}, error) {
-	var results []map[string]interface{}
+	results := make([]map[string]interface{}, 0)
 
 	for rows.Next() {
 		values := make([]interface{}, len(columns))
@@ -2077,7 +4056,7 @@ func scanRows(rows dbexec.Rows, columns []introspection.Column) ([]map[string]in
 		row := make(map[string]interface{})
 		for i, col := range columns {
 			fieldName := introspection.GraphQLFieldName(col)
-			row[fieldName] = convertValue(values[i])
+			row[fieldName] = convertColumnValue(col, values[i])
 		}
 
 		results = append(results, row)
@@ -2087,7 +4066,7 @@ func scanRows(rows dbexec.Rows, columns []introspection.Column) ([]map[string]in
 }
 
 func scanRowsWithExtras(rows dbexec.Rows, columns []introspection.Column, extras []string) ([]map[string]interface{}, error) {
-	var results []map[string]interface{}
+	results := make([]map[string]interface{}, 0)
 
 	totalColumns := len(columns) + len(extras)
 	for rows.Next() {
@@ -2105,7 +4084,7 @@ func scanRowsWithExtras(rows dbexec.Rows, columns []introspection.Column, extras
 		row := make(map[string]interface{}, totalColumns)
 		for i, col := range columns {
 			fieldName := introspection.GraphQLFieldName(col)
-			row[fieldName] = convertValue(values[i])
+			row[fieldName] = convertColumnValue(col, values[i])
 		}
 		for i, name := range extras {
 			row[name] = convertValue(values[len(columns)+i])
@@ -2115,6 +4094,13 @@ func scanRowsWithExtras(rows dbexec.Rows, columns []introspection.Column, extras
 	}
 
 	return results, rows.Err()
+}
+
+func ensureNonNullRows(rows []map[string]interface{}) []map[string]interface{} {
+	if rows == nil {
+		return []map[string]interface{}{}
+	}
+	return rows
 }
 
 func graphQLFieldNameForColumn(table introspection.Table, columnName string) string {
@@ -2136,6 +4122,51 @@ func columnsForPlan(plan *planner.Plan) []introspection.Column {
 	return plan.Table.Columns
 }
 
+func (r *Resolver) uuidColumnResolver(col introspection.Column) graphql.FieldResolveFn {
+	fieldName := introspection.GraphQLFieldName(col)
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		source, ok := p.Source.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("invalid source type for UUID field %s", fieldName)
+		}
+		raw := source[fieldName]
+		if raw == nil {
+			return nil, nil
+		}
+		normalized, err := normalizeUUIDResultValue(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid UUID value for field %s: %w", fieldName, err)
+		}
+		return normalized, nil
+	}
+}
+
+func normalizeUUIDResultValue(raw interface{}) (string, error) {
+	switch v := raw.(type) {
+	case string:
+		_, canonical, err := uuidutil.ParseString(v)
+		if err != nil {
+			return "", err
+		}
+		return canonical, nil
+	case []byte:
+		if len(v) == 16 {
+			_, canonical, err := uuidutil.ParseBytes(v)
+			if err != nil {
+				return "", err
+			}
+			return canonical, nil
+		}
+		_, canonical, err := uuidutil.ParseString(string(v))
+		if err != nil {
+			return "", err
+		}
+		return canonical, nil
+	default:
+		return "", fmt.Errorf("unsupported UUID value type %T", raw)
+	}
+}
+
 func convertValue(val interface{}) interface{} {
 	if val == nil {
 		return nil
@@ -2149,31 +4180,135 @@ func convertValue(val interface{}) interface{} {
 	return val
 }
 
-func (r *Resolver) mapColumnTypeToGraphQL(col *introspection.Column) graphql.Output {
-	switch sqltype.MapToGraphQL(col.DataType) {
+func convertColumnValue(col introspection.Column, val interface{}) interface{} {
+	switch introspection.EffectiveGraphQLType(col) {
+	case sqltype.TypeSet:
+		return parseSetColumnValue(val)
+	case sqltype.TypeBytes:
+		return val
+	case sqltype.TypeUUID:
+		// UUID normalization/validation is enforced by uuidColumnResolver so it can
+		// return field-level GraphQL errors on malformed stored values.
+		return val
+	default:
+		return convertValue(val)
+	}
+}
+
+func parseSetColumnValue(val interface{}) interface{} {
+	if val == nil {
+		return nil
+	}
+
+	var raw string
+	switch v := val.(type) {
+	case []byte:
+		raw = string(v)
+	case string:
+		raw = v
+	default:
+		return convertValue(val)
+	}
+
+	if raw == "" {
+		return []string{}
+	}
+
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *introspection.Column) graphql.Output {
+	effectiveType := introspection.EffectiveGraphQLType(*col)
+	if effectiveType == sqltype.TypeUUID {
+		return r.uuidScalar()
+	}
+	if effectiveType == sqltype.TypeSet {
+		if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+			return graphql.NewList(graphql.NewNonNull(enumType))
+		}
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
+	}
+	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+		return enumType
+	}
+	switch effectiveType {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()
 	case sqltype.TypeInt:
 		return graphql.Int
+	case sqltype.TypeBigInt:
+		return r.bigIntScalar()
 	case sqltype.TypeFloat:
 		return graphql.Float
+	case sqltype.TypeDecimal:
+		return r.decimalScalar()
 	case sqltype.TypeBoolean:
 		return graphql.Boolean
+	case sqltype.TypeDate:
+		return r.dateScalar()
+	case sqltype.TypeDateTime:
+		return graphql.DateTime
+	case sqltype.TypeTime:
+		return r.timeScalar()
+	case sqltype.TypeYear:
+		return r.yearScalar()
+	case sqltype.TypeBytes:
+		return r.bytesScalar()
+	case sqltype.TypeSet:
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
 	default:
 		return graphql.String
 	}
 }
 
-func (r *Resolver) mapColumnTypeToGraphQLInput(col *introspection.Column) graphql.Input {
-	switch sqltype.MapToGraphQL(col.DataType) {
+func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *introspection.Column) graphql.Input {
+	effectiveType := introspection.EffectiveGraphQLType(*col)
+	if effectiveType == sqltype.TypeUUID {
+		return r.uuidScalar()
+	}
+	if effectiveType == sqltype.TypeSet {
+		if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+			return graphql.NewList(graphql.NewNonNull(enumType))
+		}
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
+	}
+	if enumType := r.enumTypeForColumn(table, col); enumType != nil {
+		return enumType
+	}
+	switch effectiveType {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()
 	case sqltype.TypeInt:
 		return graphql.Int
+	case sqltype.TypeBigInt:
+		return r.bigIntScalar()
 	case sqltype.TypeFloat:
 		return graphql.Float
+	case sqltype.TypeDecimal:
+		return r.decimalScalar()
 	case sqltype.TypeBoolean:
 		return graphql.Boolean
+	case sqltype.TypeDate:
+		return r.dateScalar()
+	case sqltype.TypeDateTime:
+		return graphql.DateTime
+	case sqltype.TypeTime:
+		return r.timeScalar()
+	case sqltype.TypeYear:
+		return r.yearScalar()
+	case sqltype.TypeBytes:
+		return r.bytesScalar()
+	case sqltype.TypeSet:
+		return graphql.NewList(graphql.NewNonNull(graphql.String))
 	default:
 		return graphql.String
 	}
@@ -2254,13 +4389,14 @@ func (r *Resolver) makeOneToManyResolver(table introspection.Table, rel introspe
 		pkValue := source[pkFieldName]
 
 		if pkValue == nil {
-			return []interface{}{}, nil
+			return []map[string]interface{}{}, nil
 		}
 
 		if results, ok, err := r.tryBatchOneToMany(p, table, rel, pkValue); ok || err != nil {
 			if err != nil {
 				return nil, err
 			}
+			results = ensureNonNullRows(results)
 			seedBatchRows(p, results)
 			return results, nil
 		}
@@ -2297,6 +4433,7 @@ func (r *Resolver) makeOneToManyResolver(table introspection.Table, rel introspe
 			return nil, err
 		}
 
+		results = ensureNonNullRows(results)
 		seedBatchRows(p, results)
 		return results, nil
 	}
@@ -2316,13 +4453,14 @@ func (r *Resolver) makeManyToManyResolver(table introspection.Table, rel introsp
 		pkValue := source[pkFieldName]
 
 		if pkValue == nil {
-			return []interface{}{}, nil
+			return []map[string]interface{}{}, nil
 		}
 
 		if results, ok, err := r.tryBatchManyToMany(p, table, rel, pkValue); ok || err != nil {
 			if err != nil {
 				return nil, err
 			}
+			results = ensureNonNullRows(results)
 			seedBatchRows(p, results)
 			return results, nil
 		}
@@ -2384,6 +4522,7 @@ func (r *Resolver) makeManyToManyResolver(table introspection.Table, rel introsp
 			return nil, err
 		}
 
+		results = ensureNonNullRows(results)
 		seedBatchRows(p, results)
 		return results, nil
 	}
@@ -2403,13 +4542,14 @@ func (r *Resolver) makeEdgeListResolver(table introspection.Table, rel introspec
 		pkValue := source[pkFieldName]
 
 		if pkValue == nil {
-			return []interface{}{}, nil
+			return []map[string]interface{}{}, nil
 		}
 
 		if results, ok, err := r.tryBatchEdgeList(p, table, rel, pkValue); ok || err != nil {
 			if err != nil {
 				return nil, err
 			}
+			results = ensureNonNullRows(results)
 			seedBatchRows(p, results)
 			return results, nil
 		}
@@ -2468,6 +4608,7 @@ func (r *Resolver) makeEdgeListResolver(table introspection.Table, rel introspec
 			return nil, err
 		}
 
+		results = ensureNonNullRows(results)
 		seedBatchRows(p, results)
 		return results, nil
 	}

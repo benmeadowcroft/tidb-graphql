@@ -26,14 +26,14 @@ type PlanCost struct {
 }
 
 // EstimateCost estimates cost based on the field selection and arguments.
-func EstimateCost(field *ast.Field, args map[string]interface{}, fallbackLimit int) PlanCost {
+func EstimateCost(field *ast.Field, args map[string]interface{}, fallbackLimit int, fragments map[string]ast.Definition) PlanCost {
 	if field == nil {
 		return PlanCost{}
 	}
 
-	depth := selectionDepth(field, 1)
-	rows := estimateRowsRecursive(field, args, fallbackLimit)
-	complexity := estimateComplexityRecursive(field, args, fallbackLimit)
+	depth := selectionDepth(field, 1, fragments)
+	rows := estimateRowsRecursive(field, args, fallbackLimit, fragments)
+	complexity := estimateComplexityRecursive(field, args, fallbackLimit, fragments)
 
 	return PlanCost{
 		Depth:      depth,
@@ -62,18 +62,204 @@ func validateLimits(cost PlanCost, limits PlanLimits) error {
 	return nil
 }
 
-func selectionDepth(field *ast.Field, current int) int {
+// isConnectionField returns true if the field uses Relay connection pagination
+// (has a "first" argument), indicating its children are connection wrappers
+// rather than actual data fields.
+func isConnectionField(field *ast.Field, fragments map[string]ast.Definition) bool {
+	if field == nil || field.Name == nil {
+		return false
+	}
+	if hasFirstArg(field) {
+		return true
+	}
+	return hasConnectionSelections(field, fragments)
+}
+
+func hasConnectionSelections(field *ast.Field, fragments map[string]ast.Definition) bool {
+	if field == nil || field.SelectionSet == nil {
+		return false
+	}
+
+	var visit func(selections []ast.Selection) bool
+	visit = func(selections []ast.Selection) bool {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil {
+					continue
+				}
+				switch s.Name.Value {
+				case "edges", "nodes", "pageInfo":
+					return true
+				}
+				if s.SelectionSet != nil && visit(s.SelectionSet.Selections) {
+					return true
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil && visit(s.SelectionSet.Selections) {
+					return true
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				if visit(frag.SelectionSet.Selections) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	return visit(field.SelectionSet.Selections)
+}
+
+// connectionDataSelections extracts the actual data field selections from a
+// connection field by unwrapping Relay scaffolding. It looks inside
+// edges → node and nodes for real column fields, and skips pageInfo,
+// totalCount, and cursor which have no SQL cost.
+func connectionDataSelections(field *ast.Field, fragments map[string]ast.Definition) []ast.Selection {
+	if field.SelectionSet == nil {
+		return nil
+	}
+
+	var result []ast.Selection
+
+	var appendDataSelections func(selections []ast.Selection)
+	appendDataSelections = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				result = append(result, s)
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					appendDataSelections(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				appendDataSelections(frag.SelectionSet.Selections)
+			}
+		}
+	}
+
+	var appendEdgeNodeSelections func(selections []ast.Selection)
+	appendEdgeNodeSelections = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil {
+					continue
+				}
+				if s.Name.Value == "node" && s.SelectionSet != nil {
+					appendDataSelections(s.SelectionSet.Selections)
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					appendEdgeNodeSelections(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				appendEdgeNodeSelections(frag.SelectionSet.Selections)
+			}
+		}
+	}
+
+	var visit func(selections []ast.Selection)
+	visit = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil {
+					continue
+				}
+				switch s.Name.Value {
+				case "edges":
+					if s.SelectionSet != nil {
+						appendEdgeNodeSelections(s.SelectionSet.Selections)
+					}
+				case "nodes":
+					if s.SelectionSet != nil {
+						appendDataSelections(s.SelectionSet.Selections)
+					}
+				case "pageInfo", "totalCount":
+					// No SQL cost — skip entirely
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					visit(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				visit(frag.SelectionSet.Selections)
+			}
+		}
+	}
+
+	visit(field.SelectionSet.Selections)
+
+	return result
+}
+
+func selectionDepth(field *ast.Field, current int, fragments map[string]ast.Definition) int {
 	if field.SelectionSet == nil || len(field.SelectionSet.Selections) == 0 {
 		return current
 	}
 
+	// For connections, recurse into the unwrapped data fields so that
+	// wrapper levels (edges, node, pageInfo) don't inflate depth.
+	selections := field.SelectionSet.Selections
+	if isConnectionField(field, fragments) {
+		selections = connectionDataSelections(field, fragments)
+		if len(selections) == 0 {
+			return current
+		}
+	}
+
 	maxDepth := current
-	for _, selection := range field.SelectionSet.Selections {
+	for _, selection := range selections {
 		sub, ok := selection.(*ast.Field)
 		if !ok {
 			continue
 		}
-		depth := selectionDepth(sub, current+1)
+		depth := selectionDepth(sub, current+1, fragments)
 		if depth > maxDepth {
 			maxDepth = depth
 		}
@@ -81,7 +267,7 @@ func selectionDepth(field *ast.Field, current int) int {
 	return maxDepth
 }
 
-func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int) int {
+func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int, fragments map[string]ast.Definition) int {
 	if field == nil {
 		return 0
 	}
@@ -93,19 +279,28 @@ func estimateRowsRecursive(field *ast.Field, args map[string]interface{}, fallba
 		return rows
 	}
 
-	for _, selection := range field.SelectionSet.Selections {
+	// Unwrap connection scaffolding to count only real data fields.
+	selections := field.SelectionSet.Selections
+	if isConnectionField(field, fragments) {
+		selections = connectionDataSelections(field, fragments)
+		if len(selections) == 0 {
+			return rows
+		}
+	}
+
+	for _, selection := range selections {
 		sub, ok := selection.(*ast.Field)
 		if !ok {
 			continue
 		}
-		childRows := estimateRowsRecursive(sub, nil, fallbackLimit)
+		childRows := estimateRowsRecursive(sub, nil, fallbackLimit, fragments)
 		rows += limit * childRows
 	}
 
 	return rows
 }
 
-func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int) int {
+func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, fallbackLimit int, fragments map[string]ast.Definition) int {
 	if field == nil {
 		return 0
 	}
@@ -117,12 +312,21 @@ func estimateComplexityRecursive(field *ast.Field, args map[string]interface{}, 
 		return complexity * limit
 	}
 
-	for _, selection := range field.SelectionSet.Selections {
+	// Unwrap connection scaffolding to count only real data fields.
+	selections := field.SelectionSet.Selections
+	if isConnectionField(field, fragments) {
+		selections = connectionDataSelections(field, fragments)
+		if len(selections) == 0 {
+			return complexity * limit
+		}
+	}
+
+	for _, selection := range selections {
 		sub, ok := selection.(*ast.Field)
 		if !ok {
 			continue
 		}
-		complexity += limit * estimateComplexityRecursive(sub, nil, fallbackLimit)
+		complexity += limit * estimateComplexityRecursive(sub, nil, fallbackLimit, fragments)
 	}
 
 	return complexity
@@ -169,22 +373,40 @@ func argInt(args map[string]interface{}, key string) (int, bool) {
 }
 
 func listLimitForField(field *ast.Field, args map[string]interface{}, fallback int) int {
-	if !hasLimitArg(field) {
+	if !hasLimitArg(field) && !hasFirstArg(field) {
 		if _, ok := argInt(args, "limit"); !ok {
-			return 1
+			if _, ok := argInt(args, "first"); !ok {
+				return 1
+			}
 		}
 	}
 
 	if limit, ok := argInt(args, "limit"); ok {
 		return limit
 	}
-	if limit := limitFromAST(field, fallback); limit > 0 {
+	if first, ok := argInt(args, "first"); ok {
+		return first
+	}
+	// Check AST arguments without fallback so that a missing "limit" arg
+	// doesn't shadow a present "first" arg via the fallback value.
+	if limit := limitFromAST(field, 0); limit > 0 {
 		return limit
+	}
+	if first := firstFromAST(field, 0); first > 0 {
+		return first
 	}
 	return fallback
 }
 
 func hasLimitArg(field *ast.Field) bool {
+	return hasArgNamed(field, "limit")
+}
+
+func hasFirstArg(field *ast.Field) bool {
+	return hasArgNamed(field, "first")
+}
+
+func hasArgNamed(field *ast.Field, name string) bool {
 	if field == nil {
 		return false
 	}
@@ -192,11 +414,33 @@ func hasLimitArg(field *ast.Field) bool {
 		if arg == nil || arg.Name == nil {
 			continue
 		}
-		if arg.Name.Value == "limit" {
+		if arg.Name.Value == name {
 			return true
 		}
 	}
 	return false
+}
+
+func firstFromAST(field *ast.Field, fallback int) int {
+	if field == nil {
+		return fallback
+	}
+	for _, arg := range field.Arguments {
+		if arg == nil || arg.Name == nil || arg.Value == nil {
+			continue
+		}
+		if arg.Name.Value != "first" {
+			continue
+		}
+		if intVal, ok := arg.Value.(*ast.IntValue); ok {
+			if intVal.Value != "" {
+				if parsed, err := parseInt(intVal.Value); err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	return fallback
 }
 
 func parseInt(value string) (int, error) {

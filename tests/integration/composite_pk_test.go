@@ -29,7 +29,7 @@ func TestCompositePK_TwoColumns(t *testing.T) {
 	// Test: Lookup order item by composite PK (order_id, product_id)
 	query := `
 		{
-			orderItem(orderId: 100, productId: 2) {
+			orderItem_by_orderId_productId(orderId: 100, productId: 2) {
 				orderId
 				productId
 				quantity
@@ -46,12 +46,12 @@ func TestCompositePK_TwoColumns(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	item := data["orderItem"].(map[string]interface{})
+	item := data["orderItem_by_orderId_productId"].(map[string]interface{})
 
 	assert.EqualValues(t, 100, item["orderId"])
 	assert.EqualValues(t, 2, item["productId"])
 	assert.EqualValues(t, 1, item["quantity"])
-	assert.EqualValues(t, 49.99, item["unitPrice"])
+	assert.EqualValues(t, 49.99, requireDecimalAsFloat64(t, item["unitPrice"]))
 }
 
 func TestCompositePK_ThreeColumns(t *testing.T) {
@@ -68,7 +68,7 @@ func TestCompositePK_ThreeColumns(t *testing.T) {
 	// Test: Lookup inventory location by composite PK (warehouse_id, aisle, shelf)
 	query := `
 		{
-			inventoryLocation(warehouseId: 1, aisle: "B", shelf: 2) {
+			inventoryLocation_by_warehouseId_aisle_shelf(warehouseId: 1, aisle: "B", shelf: 2) {
 				warehouseId
 				aisle
 				shelf
@@ -86,7 +86,7 @@ func TestCompositePK_ThreeColumns(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	location := data["inventoryLocation"].(map[string]interface{})
+	location := data["inventoryLocation_by_warehouseId_aisle_shelf"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, location["warehouseId"])
 	assert.Equal(t, "B", location["aisle"])
@@ -109,7 +109,7 @@ func TestCompositePK_NotFound(t *testing.T) {
 	// Test: Lookup non-existent order item
 	query := `
 		{
-			orderItem(orderId: 999, productId: 999) {
+			orderItem_by_orderId_productId(orderId: 999, productId: 999) {
 				orderId
 				productId
 			}
@@ -124,7 +124,7 @@ func TestCompositePK_NotFound(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	item := data["orderItem"]
+	item := data["orderItem_by_orderId_productId"]
 	assert.Nil(t, item, "Non-existent item should return null")
 }
 
@@ -140,10 +140,12 @@ func TestCompositePK_SingleColumnStillWorks(t *testing.T) {
 	schema := buildGraphQLSchema(t, testDB)
 
 	// Test: Single-column PK still works as expected
+	nodeID := nodeIDForTable("warehouses", 1)
 	query := `
 		{
-			warehouse(id: 1) {
+			warehouse(id: "` + nodeID + `") {
 				id
+				databaseId
 				name
 				location
 			}
@@ -160,7 +162,7 @@ func TestCompositePK_SingleColumnStillWorks(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	warehouse := data["warehouse"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, warehouse["id"])
+	assert.EqualValues(t, 1, warehouse["databaseId"])
 	assert.Equal(t, "Main Warehouse", warehouse["name"])
 	assert.Equal(t, "New York", warehouse["location"])
 }
@@ -245,4 +247,42 @@ func TestCompositePK_ListQuery(t *testing.T) {
 	items := data["orderItems"].([]interface{})
 
 	assert.Len(t, items, 3, "Order 100 should have 3 items")
+}
+
+func TestCompositePK_GlobalIDLookup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/composite_pk_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/composite_pk_seed.sql")
+
+	schema := buildGraphQLSchema(t, testDB)
+	nodeID := nodeIDForTable("order_items", 100, 2)
+	query := `
+		{
+			orderItem(id: "` + nodeID + `") {
+				id
+				orderId
+				productId
+				quantity
+			}
+		}
+	`
+
+	result := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: query,
+		Context:       context.Background(),
+	})
+	require.Empty(t, result.Errors, "Query should not return errors: %v", result.Errors)
+	require.NotNil(t, result.Data, "Result data should not be nil")
+
+	data := result.Data.(map[string]interface{})
+	item := data["orderItem"].(map[string]interface{})
+	assert.Equal(t, nodeID, item["id"])
+	assert.EqualValues(t, 100, item["orderId"])
+	assert.EqualValues(t, 2, item["productId"])
+	assert.EqualValues(t, 1, item["quantity"])
 }

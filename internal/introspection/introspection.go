@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -21,6 +22,7 @@ import (
 type Column struct {
 	Name            string
 	DataType        string
+	ColumnType      string
 	IsNullable      bool
 	IsPrimaryKey    bool
 	IsGenerated     bool
@@ -28,6 +30,11 @@ type Column struct {
 	IsAutoRandom    bool
 	HasDefault      bool
 	ColumnDefault   string
+	EnumValues      []string
+	Comment         string
+	// OverrideType is an explicit GraphQL type override resolved during schema preparation.
+	OverrideType    sqltype.GraphQLType
+	HasOverrideType bool
 	// GraphQLFieldName is the resolved GraphQL field name for this column.
 	GraphQLFieldName string
 }
@@ -94,8 +101,9 @@ type JunctionMap map[string]JunctionConfig
 
 // Table represents a database table
 type Table struct {
-	Name   string
-	IsView bool
+	Name    string
+	IsView  bool
+	Comment string
 	// GraphQLTypeName is the resolved GraphQL type name for this table.
 	GraphQLTypeName string
 	// GraphQLQueryName is the resolved GraphQL root field name for this table.
@@ -114,6 +122,8 @@ type Table struct {
 type Schema struct {
 	Tables    []Table
 	Junctions JunctionMap
+	// NamesApplied marks whether GraphQL naming has been applied to this schema.
+	NamesApplied bool
 }
 
 // Queryer provides query access for schema introspection.
@@ -150,6 +160,9 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 		if err != nil {
 			recordSpanError(span, err)
 			return nil, fmt.Errorf("failed to get columns for %s: %w", tableInfo.Name, err)
+		}
+		if !tableInfo.IsView {
+			columns = applyAutoRandomColumns(ctx, db, tableInfo.Name, columns)
 		}
 
 		var primaryKeys []string
@@ -188,6 +201,7 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 		schema.Tables = append(schema.Tables, Table{
 			Name:        tableInfo.Name,
 			IsView:      tableInfo.IsView,
+			Comment:     tableInfo.Comment,
 			Columns:     columns,
 			ForeignKeys: foreignKeys,
 			Indexes:     indexes,
@@ -234,8 +248,9 @@ func RebuildRelationshipsWithJunctions(schema *Schema, namer *naming.Namer, junc
 }
 
 type tableInfo struct {
-	Name   string
-	IsView bool
+	Name    string
+	IsView  bool
+	Comment string
 }
 
 func getTables(ctx context.Context, db Queryer, databaseName string) ([]tableInfo, error) {
@@ -245,7 +260,7 @@ func getTables(ctx context.Context, db Queryer, databaseName string) ([]tableInf
 	defer span.End()
 
 	query := `
-		SELECT TABLE_NAME, TABLE_TYPE
+		SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT
 		FROM INFORMATION_SCHEMA.TABLES
 		WHERE TABLE_SCHEMA = ?
 		AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
@@ -265,13 +280,19 @@ func getTables(ctx context.Context, db Queryer, databaseName string) ([]tableInf
 	for rows.Next() {
 		var tableName string
 		var tableType string
-		if err := rows.Scan(&tableName, &tableType); err != nil {
+		var tableComment sql.NullString
+		if err := rows.Scan(&tableName, &tableType, &tableComment); err != nil {
 			recordSpanError(span, err)
 			return nil, err
 		}
+		comment := ""
+		if tableComment.Valid {
+			comment = strings.TrimSpace(tableComment.String)
+		}
 		tables = append(tables, tableInfo{
-			Name:   tableName,
-			IsView: strings.EqualFold(tableType, "VIEW"),
+			Name:    tableName,
+			IsView:  strings.EqualFold(tableType, "VIEW"),
+			Comment: comment,
 		})
 	}
 
@@ -293,6 +314,8 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		SELECT
 			COLUMN_NAME,
 			DATA_TYPE,
+			COLUMN_TYPE,
+			COLUMN_COMMENT,
 			IS_NULLABLE,
 			COLUMN_DEFAULT,
 			EXTRA
@@ -316,9 +339,15 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		var isNullable string
 		var columnDefault sql.NullString
 		var extra string
-		if err := rows.Scan(&col.Name, &col.DataType, &isNullable, &columnDefault, &extra); err != nil {
+		var columnType string
+		var columnComment sql.NullString
+		if err := rows.Scan(&col.Name, &col.DataType, &columnType, &columnComment, &isNullable, &columnDefault, &extra); err != nil {
 			recordSpanError(span, err)
 			return nil, err
+		}
+		col.ColumnType = columnType
+		if columnComment.Valid {
+			col.Comment = strings.TrimSpace(columnComment.String)
 		}
 		col.IsNullable = strings.ToUpper(isNullable) == "YES"
 		if columnDefault.Valid {
@@ -329,6 +358,21 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		col.IsAutoIncrement = strings.Contains(extraLower, "auto_increment")
 		col.IsAutoRandom = strings.Contains(extraLower, "auto_random")
 		col.IsGenerated = strings.Contains(extraLower, "generated")
+		if strings.EqualFold(col.DataType, "enum") {
+			values, err := parseEnumValues(columnType)
+			if err != nil {
+				slog.Default().Warn("failed to parse enum values", slog.String("column", col.Name), slog.String("type", columnType), slog.String("error", err.Error()))
+			} else {
+				col.EnumValues = values
+			}
+		} else if strings.EqualFold(col.DataType, "set") {
+			values, err := parseSetValues(columnType)
+			if err != nil {
+				slog.Default().Warn("failed to parse set values", slog.String("column", col.Name), slog.String("type", columnType), slog.String("error", err.Error()))
+			} else {
+				col.EnumValues = values
+			}
+		}
 		columns = append(columns, col)
 	}
 
@@ -337,6 +381,83 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		return nil, err
 	}
 	return columns, nil
+}
+
+func applyAutoRandomColumns(ctx context.Context, db Queryer, tableName string, columns []Column) []Column {
+	for _, col := range columns {
+		if col.IsAutoRandom {
+			return columns
+		}
+	}
+
+	createSQL, err := getCreateTableSQL(ctx, db, tableName)
+	if err != nil {
+		slog.Default().Warn("failed to load create table statement", slog.String("table", tableName), slog.String("error", err.Error()))
+		return columns
+	}
+
+	autoCols := extractAutoRandomColumns(createSQL)
+	if len(autoCols) == 0 {
+		return columns
+	}
+
+	for i := range columns {
+		if autoCols[columns[i].Name] {
+			columns[i].IsAutoRandom = true
+		}
+	}
+	return columns
+}
+
+func getCreateTableSQL(ctx context.Context, db Queryer, tableName string) (string, error) {
+	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", tableName)
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	var createSQL string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name, &createSQL); err != nil {
+			return "", err
+		}
+		break
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if createSQL == "" {
+		return "", fmt.Errorf("empty create table statement for %s", tableName)
+	}
+	return createSQL, nil
+}
+
+func extractAutoRandomColumns(createSQL string) map[string]bool {
+	autoCols := make(map[string]bool)
+	for _, line := range strings.Split(createSQL, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "`") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "/*t![auto_rand]") || !strings.Contains(lower, "auto_random") {
+			continue
+		}
+		end := strings.Index(line[1:], "`")
+		if end == -1 {
+			continue
+		}
+		colName := line[1 : 1+end]
+		autoCols[colName] = true
+	}
+	return autoCols
 }
 
 func getPrimaryKeys(ctx context.Context, db Queryer, databaseName, tableName string) ([]string, error) {
@@ -688,7 +809,7 @@ func getPKColumn(table *Table) string {
 func NumericColumns(table Table) []Column {
 	var cols []Column
 	for _, col := range table.Columns {
-		if sqltype.MapToGraphQL(col.DataType).IsNumeric() {
+		if EffectiveGraphQLType(col).IsNumeric() {
 			cols = append(cols, col)
 		}
 	}
@@ -699,7 +820,7 @@ func NumericColumns(table Table) []Column {
 func ComparableColumns(table Table) []Column {
 	var cols []Column
 	for _, col := range table.Columns {
-		if sqltype.MapToGraphQL(col.DataType).IsComparable() {
+		if EffectiveGraphQLType(col).IsComparable() {
 			cols = append(cols, col)
 		}
 	}

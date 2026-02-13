@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"tidb-graphql/internal/dbexec"
+	"tidb-graphql/internal/introspection"
 )
 
 type fakeRows struct {
@@ -188,4 +190,13 @@ func (e *fakeExecutor) ExecContext(_ context.Context, _ string, _ ...any) (sql.R
 
 func (e *fakeExecutor) BeginTx(_ context.Context) (dbexec.TxExecutor, error) {
 	return nil, errors.New("not implemented")
+}
+
+func renamePrimaryKeyID(table *introspection.Table) {
+	for i := range table.Columns {
+		col := &table.Columns[i]
+		if col.IsPrimaryKey && strings.EqualFold(col.Name, "id") {
+			col.GraphQLFieldName = "databaseId"
+		}
+	}
 }

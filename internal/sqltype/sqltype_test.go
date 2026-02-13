@@ -13,7 +13,6 @@ func TestMapToGraphQL_IntegerTypes(t *testing.T) {
 		"MEDIUMINT", "mediumint",
 		"INT", "int",
 		"INTEGER", "integer",
-		"BIGINT", "bigint",
 		"SERIAL", "serial",
 		"BIT", "bit",
 	}
@@ -27,12 +26,24 @@ func TestMapToGraphQL_IntegerTypes(t *testing.T) {
 	}
 }
 
+func TestMapToGraphQL_BigIntTypes(t *testing.T) {
+	bigIntTypes := []string{
+		"BIGINT", "bigint",
+	}
+
+	for _, sqlType := range bigIntTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeBigInt, MapToGraphQL(sqlType))
+			assert.Equal(t, "BigInt", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "BigIntFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
 func TestMapToGraphQL_FloatTypes(t *testing.T) {
 	floatTypes := []string{
 		"FLOAT", "float",
 		"DOUBLE", "double",
-		"DECIMAL", "decimal",
-		"NUMERIC", "numeric",
 	}
 
 	for _, sqlType := range floatTypes {
@@ -44,6 +55,20 @@ func TestMapToGraphQL_FloatTypes(t *testing.T) {
 	}
 }
 
+func TestMapToGraphQL_DecimalTypes(t *testing.T) {
+	decimalTypes := []string{
+		"DECIMAL", "decimal",
+		"NUMERIC", "numeric",
+	}
+
+	for _, sqlType := range decimalTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeDecimal, MapToGraphQL(sqlType))
+			assert.Equal(t, "Decimal", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "DecimalFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
 func TestMapToGraphQL_BooleanTypes(t *testing.T) {
 	boolTypes := []string{
 		"BOOL", "bool",
@@ -67,25 +92,103 @@ func TestMapToGraphQL_StringTypes(t *testing.T) {
 		"TEXT", "text",
 		"MEDIUMTEXT", "mediumtext",
 		"LONGTEXT", "longtext",
-		"BLOB", "blob",
-		"TINYBLOB", "tinyblob",
-		"MEDIUMBLOB", "mediumblob",
-		"LONGBLOB", "longblob",
-		"BINARY", "binary",
-		"VARBINARY", "varbinary",
 		"ENUM", "enum",
-		"SET", "set",
-		"DATE", "date",
-		"DATETIME", "datetime",
-		"TIMESTAMP", "timestamp",
-		"TIME", "time",
-		"YEAR", "year",
 	}
 
 	for _, sqlType := range stringTypes {
 		t.Run(sqlType, func(t *testing.T) {
 			assert.Equal(t, TypeString, MapToGraphQL(sqlType))
 			assert.Equal(t, "String", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "StringFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_BytesTypes(t *testing.T) {
+	bytesTypes := []string{
+		"BLOB", "blob",
+		"TINYBLOB", "tinyblob",
+		"MEDIUMBLOB", "mediumblob",
+		"LONGBLOB", "longblob",
+		"BINARY", "binary",
+		"VARBINARY", "varbinary",
+	}
+
+	for _, sqlType := range bytesTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeBytes, MapToGraphQL(sqlType))
+			assert.Equal(t, "Bytes", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "BytesFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_DateTimeTypes(t *testing.T) {
+	dateTypes := []string{
+		"DATETIME", "datetime",
+		"TIMESTAMP", "timestamp",
+	}
+
+	for _, sqlType := range dateTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeDateTime, MapToGraphQL(sqlType))
+			assert.Equal(t, "DateTime", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "DateTimeFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_DateTypes(t *testing.T) {
+	dateTypes := []string{
+		"DATE", "date",
+	}
+
+	for _, sqlType := range dateTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeDate, MapToGraphQL(sqlType))
+			assert.Equal(t, "Date", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "DateFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_TimeTypes(t *testing.T) {
+	timeTypes := []string{
+		"TIME", "time",
+	}
+
+	for _, sqlType := range timeTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeTime, MapToGraphQL(sqlType))
+			assert.Equal(t, "Time", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "TimeFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_YearTypes(t *testing.T) {
+	yearTypes := []string{
+		"YEAR", "year",
+	}
+
+	for _, sqlType := range yearTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeYear, MapToGraphQL(sqlType))
+			assert.Equal(t, "Year", MapToGraphQL(sqlType).String())
+			assert.Equal(t, "YearFilter", MapToGraphQL(sqlType).FilterTypeName())
+		})
+	}
+}
+
+func TestMapToGraphQL_SetTypes(t *testing.T) {
+	setTypes := []string{
+		"SET", "set",
+	}
+
+	for _, sqlType := range setTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeSet, MapToGraphQL(sqlType))
+			assert.Equal(t, "Set", MapToGraphQL(sqlType).String())
 			assert.Equal(t, "StringFilter", MapToGraphQL(sqlType).FilterTypeName())
 		})
 	}
@@ -102,6 +205,13 @@ func TestMapToGraphQL_JSONType(t *testing.T) {
 			assert.Equal(t, "StringFilter", MapToGraphQL(sqlType).FilterTypeName())
 		})
 	}
+}
+
+func TestGraphQLType_UUID(t *testing.T) {
+	assert.Equal(t, "UUID", TypeUUID.String())
+	assert.Equal(t, "UUIDFilter", TypeUUID.FilterTypeName())
+	assert.False(t, TypeUUID.IsNumeric())
+	assert.True(t, TypeUUID.IsComparable())
 }
 
 func TestMapToGraphQL_UnknownTypesDefaultToString(t *testing.T) {
@@ -153,11 +263,11 @@ func TestMapToGraphQL_WithSizeSpecifiers(t *testing.T) {
 		{"varchar(255)", TypeString, "String"},
 		{"VARCHAR(100)", TypeString, "String"},
 		{"char(10)", TypeString, "String"},
-		{"decimal(10,2)", TypeFloat, "Float"},
-		{"DECIMAL(18,4)", TypeFloat, "Float"},
+		{"decimal(10,2)", TypeDecimal, "Decimal"},
+		{"DECIMAL(18,4)", TypeDecimal, "Decimal"},
 		{"int(11)", TypeInt, "Int"},
 		{"INT(10)", TypeInt, "Int"},
-		{"bigint(20)", TypeInt, "Int"},
+		{"bigint(20)", TypeBigInt, "BigInt"},
 		{"tinyint(1)", TypeInt, "Int"},
 		{"enum('a','b','c')", TypeString, "String"},
 	}
@@ -176,10 +286,19 @@ func TestIsNumeric(t *testing.T) {
 		expected    bool
 	}{
 		{TypeInt, true},
+		{TypeBigInt, true},
 		{TypeFloat, true},
+		{TypeDecimal, true},
 		{TypeString, false},
 		{TypeBoolean, false},
 		{TypeJSON, false},
+		{TypeDate, false},
+		{TypeDateTime, false},
+		{TypeTime, false},
+		{TypeYear, false},
+		{TypeSet, false},
+		{TypeBytes, false},
+		{TypeUUID, false},
 	}
 
 	for _, tc := range testCases {
@@ -195,10 +314,19 @@ func TestIsComparable(t *testing.T) {
 		expected    bool
 	}{
 		{TypeInt, true},
+		{TypeBigInt, true},
 		{TypeFloat, true},
+		{TypeDecimal, true},
 		{TypeString, true},
 		{TypeBoolean, true},
 		{TypeJSON, false}, // JSON is not comparable
+		{TypeDate, true},
+		{TypeDateTime, true},
+		{TypeTime, true},
+		{TypeYear, true},
+		{TypeSet, true},
+		{TypeBytes, true},
+		{TypeUUID, true},
 	}
 
 	for _, tc := range testCases {

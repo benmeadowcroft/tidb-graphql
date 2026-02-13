@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/graphql-go/graphql/language/ast"
 	"tidb-graphql/internal/introspection"
+
+	"github.com/graphql-go/graphql/language/ast"
 )
 
 // Plan is the top-level output of planning a GraphQL query.
@@ -86,7 +87,7 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 	}
 
 	if options.limits != nil {
-		cost := EstimateCost(field, args, defaultLimit)
+		cost := EstimateCost(field, args, defaultLimit, options.fragments)
 		if err := validateLimits(cost, *options.limits); err != nil {
 			return nil, err
 		}
@@ -202,6 +203,35 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 				return nil, err
 			}
 			return &Plan{Root: planned, Table: table, Columns: selected}, nil
+		}
+
+		pkCols := introspection.PrimaryKeyColumns(table)
+		if len(pkCols) > 0 {
+			// Build expected field name
+			pkField := singleField + "_by"
+			for _, col := range pkCols {
+				pkField += "_" + introspection.GraphQLFieldName(col)
+			}
+
+			if fieldName == pkField {
+				// Extract argument values
+				values := make(map[string]interface{})
+				for _, col := range pkCols {
+					argName := introspection.GraphQLFieldName(col)
+					argValue, ok := args[argName]
+					if !ok {
+						return nil, fmt.Errorf("missing primary key argument %s", argName)
+					}
+					values[col.Name] = argValue
+				}
+
+				selected := SelectedColumns(table, field, options.fragments)
+				planned, err := PlanTableByPKColumns(table, selected, pkCols, values)
+				if err != nil {
+					return nil, err
+				}
+				return &Plan{Root: planned, Table: table, Columns: selected}, nil
+			}
 		}
 
 		// Check for unique key lookups
@@ -368,6 +398,14 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 		return table.Columns
 	}
 
+	if len(introspection.PrimaryKeyColumns(table)) > 0 {
+		for _, col := range table.Columns {
+			if col.IsPrimaryKey {
+				selected[col.Name] = struct{}{}
+			}
+		}
+	}
+
 	columns := make([]introspection.Column, 0, len(selected))
 	for _, col := range table.Columns {
 		if _, ok := selected[col.Name]; ok {
@@ -379,6 +417,141 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 		return table.Columns
 	}
 	return columns
+}
+
+// SelectedColumnsForConnection extracts the column selection from a connection
+// field's selection set. Connection fields wrap actual columns inside nodes { ... }
+// and/or edges { node { ... } }, so we traverse into those sub-selections.
+// OrderBy and PK columns are always included to ensure cursor generation works.
+func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, fragments map[string]ast.Definition, orderBy *OrderBy) []introspection.Column {
+	if field == nil || field.SelectionSet == nil {
+		return EnsureColumns(table, table.Columns, orderBy.Columns)
+	}
+
+	// Build column lookup
+	columnByField := make(map[string]string, len(table.Columns))
+	for _, col := range table.Columns {
+		columnByField[introspection.GraphQLFieldName(col)] = col.Name
+	}
+
+	selected := make(map[string]struct{})
+	visitedFragments := make(map[string]struct{})
+
+	var visitConnectionSelections func(selections []ast.Selection)
+	visitConnectionSelections = func(selections []ast.Selection) {
+		for _, selection := range selections {
+			switch sel := selection.(type) {
+			case *ast.Field:
+				if sel.Name == nil {
+					continue
+				}
+				switch sel.Name.Value {
+				case "nodes", "node":
+					collectColumnFields(sel, columnByField, selected, fragments)
+				case "edges":
+					if sel.SelectionSet != nil {
+						visitConnectionSelections(sel.SelectionSet.Selections)
+					}
+				}
+			case *ast.InlineFragment:
+				if sel.SelectionSet != nil {
+					visitConnectionSelections(sel.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || sel.Name == nil {
+					continue
+				}
+				fragmentName := sel.Name.Value
+				// Connection selections commonly route through shared fragments.
+				// Track visited names to avoid cycles and duplicate traversal.
+				if _, seen := visitedFragments[fragmentName]; seen {
+					continue
+				}
+				def, ok := fragments[fragmentName]
+				if !ok {
+					continue
+				}
+				fragment, ok := def.(*ast.FragmentDefinition)
+				if !ok || fragment.SelectionSet == nil {
+					continue
+				}
+				visitedFragments[fragmentName] = struct{}{}
+				visitConnectionSelections(fragment.SelectionSet.Selections)
+			}
+		}
+	}
+
+	visitConnectionSelections(field.SelectionSet.Selections)
+
+	if len(selected) == 0 {
+		return EnsureColumns(table, table.Columns, orderBy.Columns)
+	}
+
+	// Always include PK columns (for id field / cursor generation)
+	for _, col := range table.Columns {
+		if col.IsPrimaryKey {
+			selected[col.Name] = struct{}{}
+		}
+	}
+
+	// Always include orderBy columns (for cursor generation)
+	for _, colName := range orderBy.Columns {
+		selected[colName] = struct{}{}
+	}
+
+	// Build result preserving table column order
+	columns := make([]introspection.Column, 0, len(selected))
+	for _, col := range table.Columns {
+		if _, ok := selected[col.Name]; ok {
+			columns = append(columns, col)
+		}
+	}
+
+	if len(columns) == 0 {
+		return EnsureColumns(table, table.Columns, orderBy.Columns)
+	}
+	return columns
+}
+
+// collectColumnFields extracts column names from a field's selection set.
+func collectColumnFields(field *ast.Field, columnByField map[string]string, selected map[string]struct{}, fragments map[string]ast.Definition) {
+	if field == nil || field.SelectionSet == nil {
+		return
+	}
+
+	var visit func(selections []ast.Selection)
+	visit = func(selections []ast.Selection) {
+		for _, sel := range selections {
+			switch s := sel.(type) {
+			case *ast.Field:
+				if s.Name == nil || s.Name.Value == "__typename" {
+					continue
+				}
+				if colName, ok := columnByField[s.Name.Value]; ok {
+					selected[colName] = struct{}{}
+				}
+			case *ast.InlineFragment:
+				if s.SelectionSet != nil {
+					visit(s.SelectionSet.Selections)
+				}
+			case *ast.FragmentSpread:
+				if fragments == nil || s.Name == nil {
+					continue
+				}
+				def, ok := fragments[s.Name.Value]
+				if !ok {
+					continue
+				}
+				frag, ok := def.(*ast.FragmentDefinition)
+				if !ok || frag.SelectionSet == nil {
+					continue
+				}
+				visit(frag.SelectionSet.Selections)
+			}
+		}
+	}
+
+	visit(field.SelectionSet.Selections)
 }
 
 func findColumn(columns []introspection.Column, name string) (introspection.Column, bool) {

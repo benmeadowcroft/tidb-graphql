@@ -214,6 +214,28 @@ OTLP (applies to all signals unless overridden):
 
 See `docs/reference/schema-filters.md` for behavior details.
 
+## type_mappings
+
+- `type_mappings.uuid_columns` (map of table => list of column glob patterns, default: empty)
+
+`uuid_columns` uses case-insensitive SQL-name pattern matching (table + column), with wildcard merge semantics:
+- patterns from `"*"` apply to all tables
+- table-specific patterns are merged with wildcard patterns
+
+Example:
+
+```yaml
+type_mappings:
+  uuid_columns:
+    "*": ["*_uuid"]
+    "orders": ["id", "customer_uuid"]
+```
+
+Mapped columns are exposed as `UUID` in GraphQL (for supported SQL storage types) and use canonical lowercase hyphenated output.
+Supported mapped SQL storage types are:
+- `BINARY(16)` / `VARBINARY(16)` (canonical RFC byte order, equivalent to `UUID_TO_BIN(x,0)`)
+- `CHAR(36)` / `VARCHAR(36)` (canonical text UUID)
+
 ## naming
 
 Controls how SQL table names are converted to GraphQL type names (singularization/pluralization).

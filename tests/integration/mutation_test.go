@@ -134,8 +134,9 @@ func TestMutation_CreateWithExplicitPK(t *testing.T) {
 	// Test: Create a category with explicit ID
 	mutation := `
 		mutation {
-			createCategory(input: {id: 100, name: "Test Category"}) {
+			createCategory(input: {databaseId: 100, name: "Test Category"}) {
 				id
+				databaseId
 				name
 			}
 		}
@@ -146,7 +147,7 @@ func TestMutation_CreateWithExplicitPK(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	category := data["createCategory"].(map[string]interface{})
 
-	assert.EqualValues(t, 100, category["id"], "Category should have explicit ID 100")
+	assert.EqualValues(t, 100, category["databaseId"], "Category should have explicit ID 100")
 	assert.Equal(t, "Test Category", category["name"])
 }
 
@@ -231,10 +232,12 @@ func TestMutation_UpdateSimple(t *testing.T) {
 	schema, executor := buildMutationSchema(t, testDB)
 
 	// Test: Update a category
+	nodeID := nodeIDForTable("categories", 1)
 	mutation := `
 		mutation {
-			updateCategory(id: 1, set: {description: "Updated description"}) {
+			updateCategory(id: "` + nodeID + `", set: {description: "Updated description"}) {
 				id
+				databaseId
 				name
 				description
 			}
@@ -246,7 +249,7 @@ func TestMutation_UpdateSimple(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	category := data["updateCategory"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, category["id"])
+	assert.EqualValues(t, 1, category["databaseId"])
 	assert.Equal(t, "Electronics", category["name"])
 	assert.Equal(t, "Updated description", category["description"])
 }
@@ -263,10 +266,12 @@ func TestMutation_UpdateWithEmptySet(t *testing.T) {
 	schema, executor := buildMutationSchema(t, testDB)
 
 	// Test: Update with empty set should return current row (no-op)
+	nodeID := nodeIDForTable("categories", 1)
 	mutation := `
 		mutation {
-			updateCategory(id: 1, set: {}) {
+			updateCategory(id: "` + nodeID + `", set: {}) {
 				id
+				databaseId
 				name
 				description
 			}
@@ -278,7 +283,7 @@ func TestMutation_UpdateWithEmptySet(t *testing.T) {
 	data := result.Data.(map[string]interface{})
 	category := data["updateCategory"].(map[string]interface{})
 
-	assert.EqualValues(t, 1, category["id"])
+	assert.EqualValues(t, 1, category["databaseId"])
 	assert.Equal(t, "Electronics", category["name"])
 }
 
@@ -294,9 +299,10 @@ func TestMutation_UpdateNonExistent(t *testing.T) {
 	schema, executor := buildMutationSchema(t, testDB)
 
 	// Test: Update non-existent row should return null
+	nodeID := nodeIDForTable("categories", 999)
 	mutation := `
 		mutation {
-			updateCategory(id: 999, set: {description: "New description"}) {
+			updateCategory(id: "` + nodeID + `", set: {description: "New description"}) {
 				id
 				name
 			}
@@ -322,9 +328,10 @@ func TestMutation_UpdateCompositePK(t *testing.T) {
 	schema, executor := buildMutationSchema(t, testDB)
 
 	// Test: Update order item with composite PK
+	nodeID := nodeIDForTable("order_items", 100, 1)
 	mutation := `
 		mutation {
-			updateOrderItem(orderId: 100, lineNumber: 1, set: {quantity: 10}) {
+			updateOrderItem(id: "` + nodeID + `", set: {quantity: 10}) {
 				orderId
 				lineNumber
 				quantity
@@ -367,11 +374,11 @@ func TestMutation_DeleteSimple(t *testing.T) {
 	require.Empty(t, result.Errors)
 	data := result.Data.(map[string]interface{})
 	created := data["createAuditLog"].(map[string]interface{})
-	createdID := created["id"]
+	createdID := created["id"].(string)
 
 	// Now delete it
 	deleteMutation := `
-		mutation($id: Int!) {
+		mutation($id: ID!) {
 			deleteAuditLog(id: $id) {
 				id
 			}
@@ -397,9 +404,10 @@ func TestMutation_DeleteNonExistent(t *testing.T) {
 	schema, executor := buildMutationSchema(t, testDB)
 
 	// Test: Delete non-existent row should return null
+	nodeID := nodeIDForTable("audit_log", 999)
 	mutation := `
 		mutation {
-			deleteAuditLog(id: 999) {
+			deleteAuditLog(id: "` + nodeID + `") {
 				id
 			}
 		}
@@ -424,9 +432,10 @@ func TestMutation_DeleteCompositePK(t *testing.T) {
 	schema, executor := buildMutationSchema(t, testDB)
 
 	// Test: Delete order item with composite PK
+	nodeID := nodeIDForTable("order_items", 100, 2)
 	mutation := `
 		mutation {
-			deleteOrderItem(orderId: 100, lineNumber: 2) {
+			deleteOrderItem(id: "` + nodeID + `") {
 				orderId
 				lineNumber
 			}
@@ -444,7 +453,7 @@ func TestMutation_DeleteCompositePK(t *testing.T) {
 	// Verify deletion by trying to query it
 	query := `
 		{
-			orderItem(orderId: 100, lineNumber: 2) {
+			orderItem(id: "` + nodeID + `") {
 				orderId
 				lineNumber
 			}
@@ -539,9 +548,10 @@ func TestMutation_ForeignKeyDeleteRestrict(t *testing.T) {
 	schema, executor := buildMutationSchema(t, testDB)
 
 	// Test: Delete category that has products (should fail due to FK constraint)
+	nodeID := nodeIDForTable("categories", 1)
 	mutation := `
 		mutation {
-			deleteCategory(id: 1) {
+			deleteCategory(id: "` + nodeID + `") {
 				id
 			}
 		}
@@ -595,7 +605,7 @@ func TestMutation_GeneratedColumnExcluded(t *testing.T) {
 	assert.EqualValues(t, 1, inventory["productId"])
 	assert.EqualValues(t, 100, inventory["quantity"])
 	// Generated column should be computed: 100 * 10.50 = 1050.00
-	assert.EqualValues(t, 1050.00, inventory["totalValue"])
+	assert.EqualValues(t, 1050.00, requireDecimalAsFloat64(t, inventory["totalValue"]))
 }
 
 func TestMutation_TransactionRollbackOnSecondMutation(t *testing.T) {
@@ -792,10 +802,12 @@ func TestMutation_SchemaFilterDenyMutationColumn(t *testing.T) {
 	}
 
 	// But created_at should still be queryable
+	nodeID := nodeIDForTable("categories", 1)
 	categoryQuery := `
 		{
-			category(id: 1) {
+			category(id: "` + nodeID + `") {
 				id
+				databaseId
 				name
 				createdAt
 			}

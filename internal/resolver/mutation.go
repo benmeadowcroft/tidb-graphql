@@ -10,8 +10,12 @@ import (
 
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/planner"
 	"tidb-graphql/internal/schemafilter"
+	"tidb-graphql/internal/setutil"
+	"tidb-graphql/internal/sqltype"
+	"tidb-graphql/internal/uuidutil"
 )
 
 func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.Table) graphql.Fields {
@@ -52,7 +56,7 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 	updatableMap := columnNameSet(updatableCols)
 	if hasPK && len(updatableCols) > 0 {
 		updateInput := r.updateSetInputType(table, updatableCols)
-		args := r.primaryKeyArgs(pkCols)
+		args := r.primaryKeyArgs()
 		args["set"] = &graphql.ArgumentConfig{
 			Type: updateInput,
 		}
@@ -65,7 +69,7 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 
 	if hasPK {
 		deletePayload := r.deletePayloadType(table, pkCols)
-		args := r.primaryKeyArgs(pkCols)
+		args := r.primaryKeyArgs()
 		fields["delete"+typeName] = &graphql.Field{
 			Type:    deletePayload,
 			Args:    args,
@@ -115,12 +119,13 @@ func (r *Resolver) createInputType(table introspection.Table, columns []introspe
 
 	fields := graphql.InputObjectConfigFieldMap{}
 	for _, col := range columns {
-		fieldType := r.mapColumnTypeToGraphQLInput(&col)
+		fieldType := r.mapColumnTypeToGraphQLInput(table, &col)
 		if isRequiredInsertColumn(col) {
 			fieldType = graphql.NewNonNull(fieldType)
 		}
 		fields[introspection.GraphQLFieldName(col)] = &graphql.InputObjectFieldConfig{
-			Type: fieldType,
+			Type:        fieldType,
+			Description: col.Comment,
 		}
 	}
 
@@ -151,9 +156,10 @@ func (r *Resolver) updateSetInputType(table introspection.Table, columns []intro
 
 	fields := graphql.InputObjectConfigFieldMap{}
 	for _, col := range columns {
-		fieldType := r.mapColumnTypeToGraphQLInput(&col)
+		fieldType := r.mapColumnTypeToGraphQLInput(table, &col)
 		fields[introspection.GraphQLFieldName(col)] = &graphql.InputObjectFieldConfig{
-			Type: fieldType,
+			Type:        fieldType,
+			Description: col.Comment,
 		}
 	}
 
@@ -183,8 +189,11 @@ func (r *Resolver) deletePayloadType(table introspection.Table, pkCols []introsp
 	}
 
 	fields := graphql.Fields{}
+	fields["id"] = &graphql.Field{
+		Type: graphql.NewNonNull(graphql.ID),
+	}
 	for _, col := range pkCols {
-		fieldType := r.mapColumnTypeToGraphQL(&col)
+		fieldType := r.mapColumnTypeToGraphQL(table, &col)
 		if !col.IsNullable {
 			fieldType = graphql.NewNonNull(fieldType)
 		}
@@ -209,16 +218,12 @@ func (r *Resolver) deletePayloadType(table introspection.Table, pkCols []introsp
 	return objType
 }
 
-func (r *Resolver) primaryKeyArgs(pkCols []introspection.Column) graphql.FieldConfigArgument {
-	args := graphql.FieldConfigArgument{}
-	for i := range pkCols {
-		col := &pkCols[i]
-		argType := r.mapColumnTypeToGraphQLInput(col)
-		args[introspection.GraphQLFieldName(*col)] = &graphql.ArgumentConfig{
-			Type: graphql.NewNonNull(argType),
-		}
+func (r *Resolver) primaryKeyArgs() graphql.FieldConfigArgument {
+	return graphql.FieldConfigArgument{
+		"id": &graphql.ArgumentConfig{
+			Type: graphql.NewNonNull(graphql.ID),
+		},
 	}
-	return args
 }
 
 func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[string]bool) graphql.FieldResolveFn {
@@ -267,7 +272,7 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[string]bool, pkCols []introspection.Column) graphql.FieldResolveFn {
 	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
 
-		pkValues, err := pkValuesFromArgs(pkCols, p.Args)
+		pkValues, err := pkValuesFromArgs(table, pkCols, p.Args)
 		if err != nil {
 			return nil, err
 		}
@@ -330,7 +335,7 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
 	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
 
-		pkValues, err := pkValuesFromArgs(pkCols, p.Args)
+		pkValues, err := pkValuesFromArgs(table, pkCols, p.Args)
 		if err != nil {
 			return nil, err
 		}
@@ -354,6 +359,7 @@ func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []intros
 		}
 
 		payload := map[string]interface{}{}
+		payload["id"] = encodeNodeID(table, pkCols, pkValues)
 		for _, col := range pkCols {
 			fieldName := introspection.GraphQLFieldName(col)
 			payload[fieldName] = pkValues[col.Name]
@@ -453,7 +459,11 @@ func collectInputColumns(table introspection.Table, input map[string]interface{}
 		if !ok {
 			continue
 		}
-		handle(col, value)
+		normalized, err := normalizeMutationInputValue(col, value)
+		if err != nil {
+			return err
+		}
+		handle(col, normalized)
 		seen[fieldName] = struct{}{}
 	}
 
@@ -468,17 +478,86 @@ func collectInputColumns(table introspection.Table, input map[string]interface{}
 	return nil
 }
 
-func pkValuesFromArgs(pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {
-	values := make(map[string]interface{}, len(pkCols))
-	for _, col := range pkCols {
-		fieldName := introspection.GraphQLFieldName(col)
-		value, ok := args[fieldName]
-		if !ok {
-			return nil, fmt.Errorf("missing primary key argument: %s", fieldName)
-		}
-		values[col.Name] = value
+func normalizeMutationInputValue(col introspection.Column, value interface{}) (interface{}, error) {
+	switch introspection.EffectiveGraphQLType(col) {
+	case sqltype.TypeSet:
+		return normalizeSetInputValue(col, value)
+	case sqltype.TypeUUID:
+		return normalizeUUIDInputValue(col, value)
+	default:
+		return value, nil
 	}
-	return values, nil
+}
+
+func normalizeSetInputValue(col introspection.Column, value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+	csv, err := setutil.CanonicalizeAny(value, col.EnumValues)
+	if err != nil {
+		return nil, newMutationError(err.Error(), "invalid_input", 0)
+	}
+	return csv, nil
+}
+
+func normalizeUUIDInputValue(col introspection.Column, value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	raw, ok := value.(string)
+	if !ok {
+		return nil, newMutationError("uuid value must be a string", "invalid_input", 0)
+	}
+
+	parsed, canonical, err := uuidutil.ParseString(raw)
+	if err != nil {
+		return nil, newMutationError(err.Error(), "invalid_input", 0)
+	}
+
+	if uuidutil.IsBinaryStorageType(col.DataType) {
+		return uuidutil.ToBytes(parsed), nil
+	}
+	return canonical, nil
+}
+
+func pkValuesFromArgs(table introspection.Table, pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {
+	rawID, ok := args["id"]
+	if !ok || rawID == nil {
+		return nil, fmt.Errorf("missing primary key argument: id")
+	}
+	id, ok := rawID.(string)
+	if !ok {
+		id = fmt.Sprint(rawID)
+	}
+	typeName, values, err := nodeid.Decode(id)
+	if err != nil {
+		return nil, err
+	}
+	expectedType := introspection.GraphQLTypeName(table)
+	if typeName != expectedType {
+		return nil, fmt.Errorf("invalid id for %s", expectedType)
+	}
+	if len(values) != len(pkCols) {
+		return nil, fmt.Errorf("invalid id for %s", expectedType)
+	}
+	pkValues := make(map[string]interface{}, len(pkCols))
+	for i, col := range pkCols {
+		parsed, err := nodeid.ParsePKValue(col, values[i])
+		if err != nil {
+			return nil, err
+		}
+		pkValues[col.Name] = parsed
+	}
+	return pkValues, nil
+}
+
+func encodeNodeID(table introspection.Table, pkCols []introspection.Column, pkValues map[string]interface{}) string {
+	values := make([]interface{}, len(pkCols))
+	for i, col := range pkCols {
+		values[i] = pkValues[col.Name]
+	}
+	return nodeid.Encode(introspection.GraphQLTypeName(table), values...)
 }
 
 func resolveInsertPKValues(table introspection.Table, pkCols []introspection.Column, input map[string]interface{}, result sql.Result) (map[string]interface{}, error) {

@@ -1,0 +1,4 @@
+INSERT INTO files (name, payload, hash) VALUES
+  ('alpha', x'48656C6C6F', x'00112233445566778899AABBCCDDEEFF'),
+  ('beta', x'776F726C64', x'102132435465768798A9BACBDCEDFE0F'),
+  ('empty', x'', x'');

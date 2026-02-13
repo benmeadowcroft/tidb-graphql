@@ -93,6 +93,17 @@ func TestParseFirst_Explicit(t *testing.T) {
 	}
 }
 
+func TestParseFirst_Zero(t *testing.T) {
+	args := map[string]interface{}{"first": 0}
+	first, err := ParseFirst(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if first != 0 {
+		t.Errorf("expected 0, got %d", first)
+	}
+}
+
 func TestParseFirst_CapsAtMax(t *testing.T) {
 	args := map[string]interface{}{"first": 500}
 	first, err := ParseFirst(args)
@@ -381,5 +392,33 @@ func TestPlanOneToManyConnectionBatch(t *testing.T) {
 	}
 	if query.Args[0] != 1 || query.Args[1] != 2 || query.Args[2] != 0 || query.Args[3] != 3 {
 		t.Errorf("expected args [1 2 0 3], got %v", query.Args)
+	}
+}
+
+func TestPlanOneToManyConnectionBatch_FirstZero(t *testing.T) {
+	table := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+		},
+	}
+	columns := []introspection.Column{
+		{Name: "id"},
+		{Name: "user_id"},
+	}
+
+	query, err := PlanOneToManyConnectionBatch(table, "user_id", columns, []interface{}{1, 2}, 0, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(query.Args) != 4 {
+		t.Fatalf("expected 4 args, got %v", query.Args)
+	}
+	if query.Args[2] != 0 || query.Args[3] != 1 {
+		t.Errorf("expected row window bounds [0 1], got %v", query.Args[2:])
 	}
 }

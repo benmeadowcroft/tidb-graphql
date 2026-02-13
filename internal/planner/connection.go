@@ -614,6 +614,7 @@ func ParseFirst(args map[string]interface{}) (int, error) {
 	}
 	switch v := raw.(type) {
 	case int:
+		// first=0 is intentional: callers can request pageInfo/totalCount only.
 		if v < 0 {
 			return 0, fmt.Errorf("first must be non-negative")
 		}

@@ -1763,6 +1763,7 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 
 		hasNext := len(results) > plan.First
 		if hasNext {
+			// Plans read first+1 rows; trim to requested size after hasNextPage probe.
 			results = results[:plan.First]
 		}
 
@@ -1826,6 +1827,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 
 		hasNext := len(results) > plan.First
 		if hasNext {
+			// Plans read first+1 rows; trim to requested size after hasNextPage probe.
 			results = results[:plan.First]
 		}
 

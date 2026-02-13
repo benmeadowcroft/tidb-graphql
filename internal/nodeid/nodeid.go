@@ -2,6 +2,7 @@
 package nodeid
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,7 +39,9 @@ func Decode(nodeID string) (string, []interface{}, error) {
 		return "", nil, fmt.Errorf("invalid id: %w", err)
 	}
 	var payload []interface{}
-	if err := json.Unmarshal(raw, &payload); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&payload); err != nil {
 		return "", nil, fmt.Errorf("invalid id: %w", err)
 	}
 	if len(payload) < 2 {
@@ -59,8 +62,9 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 
 	switch introspection.EffectiveGraphQLType(col) {
 	case sqltype.TypeInt, sqltype.TypeBigInt:
-		// Node IDs decode numeric JSON values as float64/uint64. Keep explicit range
-		// checks here so PK coercion cannot overflow when converting to int64.
+		// Node IDs may decode numeric JSON values as json.Number/float64/uint64.
+		// Keep explicit range checks here so PK coercion cannot overflow when
+		// converting to int64.
 		parseUint := func(v uint64) (int64, error) {
 			if v > math.MaxInt64 {
 				return 0, fmt.Errorf("invalid integer value for %s", col.Name)
@@ -78,6 +82,12 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		}
 
 		switch v := raw.(type) {
+		case json.Number:
+			parsed, err := strconv.ParseInt(v.String(), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid integer value for %s", col.Name)
+			}
+			return parsed, nil
 		case float64:
 			parsed, err := parseFloat(v)
 			if err != nil {
@@ -119,6 +129,12 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		}
 	case sqltype.TypeFloat:
 		switch v := raw.(type) {
+		case json.Number:
+			parsed, err := strconv.ParseFloat(v.String(), 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid float value for %s", col.Name)
+			}
+			return parsed, nil
 		case float64:
 			return v, nil
 		case float32:
@@ -134,6 +150,8 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 		}
 	case sqltype.TypeDecimal:
 		switch v := raw.(type) {
+		case json.Number:
+			return v.String(), nil
 		case string:
 			return v, nil
 		case []byte:

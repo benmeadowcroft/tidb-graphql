@@ -2,6 +2,7 @@ package nodeid
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "User", typeName)
 	require.Len(t, values, 1)
-	assert.Equal(t, 42.0, values[0])
+	assert.Equal(t, json.Number("42"), values[0])
 }
 
 func TestEncodeDecodeComposite(t *testing.T) {
@@ -28,7 +29,23 @@ func TestEncodeDecodeComposite(t *testing.T) {
 	assert.Equal(t, "OrderItem", typeName)
 	require.Len(t, values, 2)
 	assert.Equal(t, "A-1", values[0])
-	assert.Equal(t, 7.0, values[1])
+	assert.Equal(t, json.Number("7"), values[1])
+}
+
+func TestEncodeDecodeRoundTrip_LargeIntPK(t *testing.T) {
+	const largeID = int64(5188146770730811493)
+
+	encoded := Encode("User", largeID)
+	typeName, values, err := Decode(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, "User", typeName)
+	require.Len(t, values, 1)
+	assert.Equal(t, json.Number("5188146770730811493"), values[0])
+
+	col := introspection.Column{Name: "id", DataType: "bigint"}
+	parsed, err := ParsePKValue(col, values[0])
+	require.NoError(t, err)
+	assert.Equal(t, largeID, parsed)
 }
 
 func TestDecodeErrors(t *testing.T) {

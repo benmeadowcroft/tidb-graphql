@@ -56,7 +56,7 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 	updatableMap := columnNameSet(updatableCols)
 	if hasPK && len(updatableCols) > 0 {
 		updateInput := r.updateSetInputType(table, updatableCols)
-		args := r.primaryKeyArgs(table, pkCols)
+		args := r.primaryKeyArgs()
 		args["set"] = &graphql.ArgumentConfig{
 			Type: updateInput,
 		}
@@ -69,7 +69,7 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 
 	if hasPK {
 		deletePayload := r.deletePayloadType(table, pkCols)
-		args := r.primaryKeyArgs(table, pkCols)
+		args := r.primaryKeyArgs()
 		fields["delete"+typeName] = &graphql.Field{
 			Type:    deletePayload,
 			Args:    args,
@@ -218,7 +218,7 @@ func (r *Resolver) deletePayloadType(table introspection.Table, pkCols []introsp
 	return objType
 }
 
-func (r *Resolver) primaryKeyArgs(table introspection.Table, pkCols []introspection.Column) graphql.FieldConfigArgument {
+func (r *Resolver) primaryKeyArgs() graphql.FieldConfigArgument {
 	return graphql.FieldConfigArgument{
 		"id": &graphql.ArgumentConfig{
 			Type: graphql.NewNonNull(graphql.ID),

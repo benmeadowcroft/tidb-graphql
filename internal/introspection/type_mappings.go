@@ -72,7 +72,14 @@ func mergePatterns(patterns map[string][]string, table string) []string {
 		}
 		combined = append(combined, patterns[key]...)
 	}
-	return slices.Compact(combined)
+	// Use explicit first-seen deduplication: slices.Compact only removed adjacent duplicates.
+	deduped := make([]string, 0, len(combined))
+	for _, pattern := range combined {
+		if !slices.Contains(deduped, pattern) {
+			deduped = append(deduped, pattern)
+		}
+	}
+	return deduped
 }
 
 func matchesAny(value string, patterns []string) bool {

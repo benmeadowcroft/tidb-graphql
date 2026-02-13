@@ -238,13 +238,27 @@ func Decimal() *graphql.Scalar {
 		ParseValue: func(value interface{}) interface{} {
 			switch v := value.(type) {
 			case string:
-				return v
+				if normalized, ok := normalizeDecimal(v); ok {
+					return normalized
+				}
+				return nil
 			case []byte:
-				return string(v)
+				if normalized, ok := normalizeDecimal(string(v)); ok {
+					return normalized
+				}
+				return nil
 			case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
 				return fmt.Sprintf("%v", v)
-			case float32, float64:
-				return fmt.Sprintf("%v", v)
+			case float32:
+				if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+					return nil
+				}
+				return strconv.FormatFloat(float64(v), 'g', -1, 32)
+			case float64:
+				if math.IsNaN(v) || math.IsInf(v, 0) {
+					return nil
+				}
+				return strconv.FormatFloat(v, 'g', -1, 64)
 			default:
 				return nil
 			}
@@ -252,16 +266,33 @@ func Decimal() *graphql.Scalar {
 		ParseLiteral: func(valueAST ast.Value) interface{} {
 			switch v := valueAST.(type) {
 			case *ast.StringValue:
-				return v.Value
+				if normalized, ok := normalizeDecimal(v.Value); ok {
+					return normalized
+				}
+				return nil
 			case *ast.IntValue:
 				return v.Value
 			case *ast.FloatValue:
-				return v.Value
+				if normalized, ok := normalizeDecimal(v.Value); ok {
+					return normalized
+				}
+				return nil
 			default:
 				return nil
 			}
 		},
 	})
+}
+
+func normalizeDecimal(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", false
+	}
+	if !decimalPattern.MatchString(value) {
+		return "", false
+	}
+	return value, true
 }
 
 func Date() *graphql.Scalar {
@@ -523,6 +554,7 @@ func coerceNonNegativeInt(value interface{}) (int, bool) {
 }
 
 var (
+	decimalPattern          = regexp.MustCompile(`^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?$`)
 	timeWithColonPattern    = regexp.MustCompile(`^(\d+):(\d{1,2})(?::(\d{1,2}))?(?:\.(\d{1,6}))?$`)
 	timeNoColonPattern      = regexp.MustCompile(`^(\d{1,6})(?:\.(\d{1,6}))?$`)
 	yearStringFormatPattern = regexp.MustCompile(`^\d{4}$`)

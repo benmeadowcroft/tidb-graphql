@@ -1110,8 +1110,12 @@ func (r *Resolver) schemaTypes() []graphql.Type {
 		r.mu.RUnlock()
 		return nil
 	}
+	// Snapshot the cache under a single lock to avoid key/value drift between
+	// separate read passes.
+	snapshot := make(map[string]*graphql.Object, len(r.typeCache))
 	keys := make([]string, 0, len(r.typeCache))
-	for key := range r.typeCache {
+	for key, objType := range r.typeCache {
+		snapshot[key] = objType
 		keys = append(keys, key)
 	}
 	r.mu.RUnlock()
@@ -1119,13 +1123,11 @@ func (r *Resolver) schemaTypes() []graphql.Type {
 	sort.Strings(keys)
 
 	types := make([]graphql.Type, 0, len(keys))
-	r.mu.RLock()
 	for _, key := range keys {
-		if objType, ok := r.typeCache[key]; ok {
+		if objType, ok := snapshot[key]; ok {
 			types = append(types, objType)
 		}
 	}
-	r.mu.RUnlock()
 
 	return types
 }
@@ -1685,7 +1687,7 @@ type connectionResult struct {
 	hasNext  bool
 	hasPrev  bool
 	executor dbexec.QueryExecutor
-	ctx      context.Context
+	countCtx context.Context
 	// totalCount is lazily computed
 	totalCountVal *int
 	totalCountMu  sync.Mutex
@@ -1699,7 +1701,7 @@ func (cr *connectionResult) totalCount() (int, error) {
 		return *cr.totalCountVal, nil
 	}
 
-	rows, err := cr.executor.QueryContext(cr.ctx, cr.plan.Count.SQL, cr.plan.Count.Args...)
+	rows, err := cr.executor.QueryContext(cr.countCtx, cr.plan.Count.SQL, cr.plan.Count.Args...)
 	if err != nil {
 		return 0, err
 	}
@@ -1781,6 +1783,13 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 		pkValue := source[pkFieldName]
 		if pkValue == nil {
 			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+		}
+
+		// Only batch when no cursor is provided.
+		if afterRaw, ok := p.Args["after"]; !ok || afterRaw == nil || afterRaw == "" {
+			if result, ok, err := r.tryBatchOneToManyConnection(p, parentTable, rel, pkValue); ok || err != nil {
+				return result, err
+			}
 		}
 
 		relatedTable, err := r.findTable(rel.RemoteTable)
@@ -1972,13 +1981,20 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 	if rows == nil {
 		rows = []map[string]interface{}{}
 	}
+	countCtx := ctx
+	if countCtx == nil {
+		countCtx = context.Background()
+	}
+	// totalCount is lazy, so it should not fail just because the caller's
+	// request context is canceled after rows have already been materialized.
+	countCtx = context.WithoutCancel(countCtx)
 
 	result := &connectionResult{
 		rows:     rows,
 		plan:     plan,
 		hasNext:  hasNext,
 		executor: r.executor,
-		ctx:      ctx,
+		countCtx: countCtx,
 	}
 	if plan != nil {
 		result.hasPrev = plan.HasCursor
@@ -2553,7 +2569,7 @@ func (r *Resolver) tryBatchOneToMany(p graphql.ResolveParams, table introspectio
 		if metrics != nil {
 			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationOneToMany)
 		}
-		planned, err := planner.PlanOneToManyBatch(relatedTable, selection, rel.RemoteColumn, chunk, limit, offset, orderBy)
+		planned, err := planner.PlanOneToManyBatch(relatedTable, selection, rel.RemoteColumn, chunk, limit, offset, orderBy, nil)
 		if err != nil {
 			if errors.Is(err, planner.ErrNoPrimaryKey) {
 				if metrics != nil {
@@ -2854,6 +2870,224 @@ func (r *Resolver) tryBatchEdgeList(p graphql.ResolveParams, table introspection
 	state.setChildRows(relKey, grouped)
 
 	return grouped[fmt.Sprint(pkValue)], true, nil
+}
+
+func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
+	metrics := graphQLMetricsFromContext(p.Context)
+
+	state, ok := getBatchState(p.Context)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_batch_state")
+		}
+		return nil, false, nil
+	}
+
+	parentKey, ok := parentKeyFromSource(p.Source)
+	if !ok {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "missing_parent_key")
+		}
+		return nil, false, nil
+	}
+
+	parentRows := state.getParentRows(parentKey)
+	if len(parentRows) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "missing_parent_rows")
+		}
+		return nil, false, nil
+	}
+
+	relatedTable, err := r.findTable(rel.RemoteTable)
+	if err != nil {
+		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+	}
+
+	pkCols := introspection.PrimaryKeyColumns(relatedTable)
+	if len(pkCols) == 0 {
+		if metrics != nil {
+			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_primary_key")
+		}
+		return nil, false, nil
+	}
+
+	field := firstFieldAST(p.Info.FieldASTs)
+	if field == nil {
+		return nil, true, fmt.Errorf("missing field AST")
+	}
+
+	first, err := planner.ParseFirst(p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+
+	orderBy, err := planner.ParseOrderBy(relatedTable, p.Args)
+	if err != nil {
+		return nil, true, err
+	}
+	if orderBy == nil {
+		pkColNames := make([]string, len(pkCols))
+		for i, col := range pkCols {
+			pkColNames[i] = col.Name
+		}
+		orderBy = &planner.OrderBy{
+			Columns:   pkColNames,
+			Direction: "ASC",
+		}
+	}
+
+	var whereClause *planner.WhereClause
+	if whereArg, ok := p.Args["where"]; ok {
+		if whereMap, ok := whereArg.(map[string]interface{}); ok {
+			whereClause, err = planner.BuildWhereClause(relatedTable, whereMap)
+			if err != nil {
+				return nil, true, err
+			}
+			if whereClause != nil {
+				if err := planner.ValidateIndexedColumns(relatedTable, whereClause.UsedColumns); err != nil {
+					return nil, true, err
+				}
+			}
+		}
+	}
+
+	selection := planner.SelectedColumnsForConnection(relatedTable, field, p.Info.Fragments, orderBy)
+	orderByKey := planner.OrderByKey(relatedTable, orderBy.Columns)
+	cursorCols := planner.CursorColumns(relatedTable, orderBy)
+
+	relKey := fmt.Sprintf(
+		"%s|%s|%s|%s|%s|%s",
+		table.Name,
+		rel.RemoteTable,
+		rel.RemoteColumn,
+		orderByKey,
+		columnsKey(selection),
+		stableArgsKey(p.Args),
+	)
+
+	if cached := state.getConnectionRows(relKey); cached != nil {
+		state.IncrementCacheHit()
+		if metrics != nil {
+			metrics.RecordBatchCacheHit(p.Context, relationOneToMany)
+		}
+		if result, ok := cached[fmt.Sprint(pkValue)]; ok {
+			if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+				seedBatchRows(p, nodes)
+			}
+			return result, true, nil
+		}
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.IncrementCacheMiss()
+	if metrics != nil {
+		metrics.RecordBatchCacheMiss(p.Context, relationOneToMany)
+	}
+
+	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
+	parentValues := uniqueParentValues(parentRows, parentField)
+	if len(parentValues) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	// Keep original typed parent values so count queries can bind FK args correctly.
+	parentValueByKey := make(map[string]interface{}, len(parentValues))
+	for _, value := range parentValues {
+		parentValueByKey[fmt.Sprint(value)] = value
+	}
+
+	chunks := chunkValues(parentValues, batchMaxInClause)
+	if metrics != nil {
+		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationOneToMany)
+	}
+
+	groupedConnections := make(map[string]map[string]interface{})
+	for _, chunk := range chunks {
+		if metrics != nil {
+			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationOneToMany)
+		}
+		planned, err := planner.PlanOneToManyConnectionBatch(
+			relatedTable,
+			rel.RemoteColumn,
+			selection,
+			chunk,
+			first,
+			orderBy,
+			whereClause,
+		)
+		if err != nil {
+			if errors.Is(err, planner.ErrNoPrimaryKey) {
+				if metrics != nil {
+					metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_primary_key")
+				}
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		if planned.SQL == "" {
+			continue
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
+		if err != nil {
+			return nil, true, normalizeQueryError(err)
+		}
+		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
+		rows.Close()
+		if err != nil {
+			return nil, true, err
+		}
+		if metrics != nil {
+			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationOneToMany)
+		}
+
+		grouped := groupByAlias(results, planner.BatchParentAlias)
+		for parentID, rows := range grouped {
+			parentValue := parentValueByKey[parentID]
+			// Connection plans fetch first+1 rows to compute hasNextPage per parent.
+			hasNext := len(rows) > first
+			if hasNext {
+				rows = rows[:first]
+			}
+
+			countQuery, err := planner.BuildOneToManyCountSQL(
+				relatedTable,
+				rel.RemoteColumn,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+
+			plan := &planner.ConnectionPlan{
+				Count:         countQuery,
+				Table:         relatedTable,
+				Columns:       selection,
+				OrderBy:       orderBy,
+				OrderByKey:    orderByKey,
+				CursorColumns: cursorCols,
+				First:         first,
+				HasCursor:     false,
+			}
+
+			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext)
+		}
+	}
+
+	if len(groupedConnections) == 0 {
+		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
+		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	}
+	state.setConnectionRows(relKey, groupedConnections)
+
+	if result, ok := groupedConnections[fmt.Sprint(pkValue)]; ok {
+		if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
+			seedBatchRows(p, nodes)
+		}
+		return result, true, nil
+	}
+	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
 }
 
 func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {

@@ -236,23 +236,14 @@ func PlanOneToManyConnection(
 		return nil, err
 	}
 
-	// Build count SQL with FK only
-	countBuilder := sq.Select("COUNT(*)").
-		From(sqlutil.QuoteIdentifier(table.Name)).
-		Where(fkCondition)
-	if ca.whereClause != nil && ca.whereClause.Condition != nil {
-		countBuilder = countBuilder.Where(ca.whereClause.Condition)
-	}
-	countBuilder = countBuilder.PlaceholderFormat(sq.Question)
-
-	countQuery, countArgs, err := countBuilder.ToSql()
+	countQuery, err := BuildOneToManyCountSQL(table, remoteColumn, fkValue, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ConnectionPlan{
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
-		Count:         SQLQuery{SQL: countQuery, Args: countArgs},
+		Count:         countQuery,
 		Table:         table,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
@@ -395,6 +386,28 @@ func PlanEdgeListConnection(
 	}, nil
 }
 
+// BuildOneToManyCountSQL builds the count query for a one-to-many connection.
+func BuildOneToManyCountSQL(
+	table introspection.Table,
+	remoteColumn string,
+	fkValue interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	builder := sq.Select("COUNT(*)").
+		From(sqlutil.QuoteIdentifier(table.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue})
+
+	if whereClause != nil && whereClause.Condition != nil {
+		builder = builder.Where(whereClause.Condition)
+	}
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
 // BuildManyToManyCountSQL builds the count query for a many-to-many connection.
 func BuildManyToManyCountSQL(
 	targetTable introspection.Table,
@@ -513,6 +526,29 @@ func orderByClausesQualified(tableName string, orderBy *OrderBy) []string {
 		clauses[i] = fmt.Sprintf("%s.%s %s", sqlutil.QuoteIdentifier(tableName), sqlutil.QuoteIdentifier(col), orderBy.Direction)
 	}
 	return clauses
+}
+
+// PlanOneToManyConnectionBatch builds a batched SQL query for one-to-many connections.
+// It uses offset=0 and limit=first+1 to allow per-parent hasNextPage detection.
+func PlanOneToManyConnectionBatch(
+	relatedTable introspection.Table,
+	remoteColumn string,
+	columns []introspection.Column,
+	parentValues []interface{},
+	first int,
+	orderBy *OrderBy,
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	return PlanOneToManyBatch(
+		relatedTable,
+		columns,
+		remoteColumn,
+		parentValues,
+		first+1,
+		0,
+		orderBy,
+		whereClause,
+	)
 }
 
 // PlanManyToManyConnectionBatch builds a batched SQL query for many-to-many connections.

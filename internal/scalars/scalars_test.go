@@ -37,9 +37,15 @@ func TestDecimalScalar(t *testing.T) {
 
 	parsed := scalar.ParseValue("98.76")
 	assert.Equal(t, "98.76", parsed)
+	assert.Equal(t, ".5", scalar.ParseValue(".5"))
+	assert.Equal(t, "1e3", scalar.ParseValue("1e3"))
+	assert.Nil(t, scalar.ParseValue("not-a-decimal"))
+	assert.Nil(t, scalar.ParseValue("1/2"))
+	assert.Nil(t, scalar.ParseValue(""))
 
 	literal := scalar.ParseLiteral(&ast.FloatValue{Value: "10.5"})
 	assert.Equal(t, "10.5", literal)
+	assert.Nil(t, scalar.ParseLiteral(&ast.StringValue{Value: "abc"}))
 }
 
 func TestDateScalar(t *testing.T) {

@@ -45,13 +45,13 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 		for ci := range table.Columns {
 			col := &table.Columns[ci]
 			if col.IsPrimaryKey && strings.EqualFold(col.Name, "id") {
-				desiredName := "databaseId"
-				if hasColumnFieldName(table.Columns, desiredName, ci) {
-					slog.Default().Warn("GraphQL name collision for databaseId; using databaseId_raw",
+				desiredName := uniqueDatabaseIDName(table.Columns, ci)
+				if desiredName != "databaseId" {
+					slog.Default().Warn("GraphQL name collision for databaseId; using fallback name",
 						"table", table.Name,
 						"column", col.Name,
+						"resolved_name", desiredName,
 					)
-					desiredName = "databaseId_raw"
 				}
 				col.GraphQLFieldName = desiredName
 			}
@@ -83,4 +83,19 @@ func hasColumnFieldName(columns []introspection.Column, name string, skipIndex i
 		}
 	}
 	return false
+}
+
+func uniqueDatabaseIDName(columns []introspection.Column, skipIndex int) string {
+	if !hasColumnFieldName(columns, "databaseId", skipIndex) {
+		return "databaseId"
+	}
+
+	base := "databaseId_raw"
+	candidate := base
+	suffix := 2
+	for hasColumnFieldName(columns, candidate, skipIndex) {
+		candidate = fmt.Sprintf("%s%d", base, suffix)
+		suffix++
+	}
+	return candidate
 }

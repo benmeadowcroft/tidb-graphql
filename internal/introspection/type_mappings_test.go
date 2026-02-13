@@ -152,3 +152,13 @@ func TestEffectiveGraphQLType(t *testing.T) {
 	col.HasOverrideType = true
 	assert.Equal(t, sqltype.TypeUUID, EffectiveGraphQLType(col))
 }
+
+func TestMergePatterns_DeduplicatesNonAdjacent(t *testing.T) {
+	patterns := map[string][]string{
+		"*":      {"*_uuid", "id"},
+		"orders": {"id", "customer_uuid"},
+	}
+
+	merged := mergePatterns(patterns, "orders")
+	assert.Equal(t, []string{"*_uuid", "id", "customer_uuid"}, merged)
+}

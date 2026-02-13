@@ -397,7 +397,15 @@ func PlanEdgeListBatch(
 }
 
 // PlanOneToManyBatch builds a batched SQL query with per-parent limits.
-func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, values []interface{}, limit, offset int, orderBy *OrderBy) (SQLQuery, error) {
+func PlanOneToManyBatch(
+	relatedTable introspection.Table,
+	columns []introspection.Column,
+	remoteColumn string,
+	values []interface{},
+	limit, offset int,
+	orderBy *OrderBy,
+	where *WhereClause,
+) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
 	}
@@ -426,12 +434,23 @@ func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspectio
 
 	quotedRemoteColumn := sqlutil.QuoteIdentifier(remoteColumn)
 	quotedTable := sqlutil.QuoteIdentifier(relatedTable.Name)
+
+	whereSQL := ""
+	var whereArgs []interface{}
+	if where != nil && where.Condition != nil {
+		condSQL, condArgs, err := where.Condition.ToSql()
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		whereSQL = " AND " + condSQL
+		whereArgs = condArgs
+	}
 	// Unfortunately as these are column lists, we can't use Squirrel to build
 	// the query so need to create it directly.
 	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
 	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedRemoteColumn, BatchParentAlias)
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
 		quotedRemoteColumn,
@@ -439,10 +458,13 @@ func PlanOneToManyBatch(relatedTable introspection.Table, columns []introspectio
 		quotedTable,
 		quotedRemoteColumn,
 		placeholders,
+		whereSQL,
 		BatchParentAlias,
 	)
 
-	args := append(append([]interface{}{}, values...), offset, offset+limit)
+	args := append([]interface{}{}, values...)
+	args = append(args, whereArgs...)
+	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 

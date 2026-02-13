@@ -81,6 +81,7 @@ Each connection provides:
 - `totalCount` (lazy; filter-aware, cursor-agnostic)
 
 Connections are forward-only (`first`/`after`) and use stable ordering based on indexed columns (default PK ASC).
+For relationship connections, the first page (`after` omitted) is batched across parents to avoid N+1 lookups; cursor pages run per-parent seek queries.
 
 ## Type mapping
 

@@ -5,9 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	sq "github.com/Masterminds/squirrel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/sqlutil"
 )
 
 func TestPlanTableList(t *testing.T) {
@@ -186,7 +188,7 @@ func TestPlanOneToManyBatch(t *testing.T) {
 		},
 	}
 
-	planned, err := PlanOneToManyBatch(table, nil, "user_id", []interface{}{1, 2}, 10, 0, nil)
+	planned, err := PlanOneToManyBatch(table, nil, "user_id", []interface{}{1, 2}, 10, 0, nil, nil)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
 		"SELECT `id`, `user_id`, `title`, __batch_parent_id FROM (SELECT `id`, `user_id`, `title`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
@@ -209,12 +211,34 @@ func TestPlanOneToManyBatch_OrdersByBatchAliasWhenFKNotSelected(t *testing.T) {
 		{Name: "title"},
 	}
 
-	planned, err := PlanOneToManyBatch(table, selection, "user_id", []interface{}{1, 2}, 5, 0, nil)
+	planned, err := PlanOneToManyBatch(table, selection, "user_id", []interface{}{1, 2}, 5, 0, nil, nil)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
 		"SELECT `id`, `title`, __batch_parent_id FROM (SELECT `id`, `title`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
 	)
 	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 5})
+}
+
+func TestPlanOneToManyBatch_WithWhere(t *testing.T) {
+	table := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+	}
+
+	where := &WhereClause{
+		Condition: sq.Eq{sqlutil.QuoteIdentifier("title"): "first"},
+	}
+
+	planned, err := PlanOneToManyBatch(table, nil, "user_id", []interface{}{1, 2}, 5, 0, nil, where)
+	require.NoError(t, err)
+	assertSQLMatches(t, planned.SQL,
+		"SELECT `id`, `user_id`, `title`, __batch_parent_id FROM (SELECT `id`, `user_id`, `title`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `id`) AS __rn FROM `posts` WHERE `user_id` IN (?,?) AND `title` = ?) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
+	)
+	assertArgsEqual(t, planned.Args, []interface{}{1, 2, "first", 0, 5})
 }
 
 func TestPlanManyToMany_OrderBy(t *testing.T) {

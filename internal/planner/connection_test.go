@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"tidb-graphql/internal/introspection"
+	"tidb-graphql/internal/sqlutil"
 
+	sq "github.com/Masterminds/squirrel"
 	"github.com/graphql-go/graphql/language/ast"
 )
 
@@ -314,5 +316,70 @@ func TestPlanEdgeListConnection_Basic(t *testing.T) {
 	}
 	if !strings.Contains(plan.Count.SQL, "COUNT") {
 		t.Errorf("expected COUNT in count SQL, got: %s", plan.Count.SQL)
+	}
+}
+
+func TestBuildOneToManyCountSQL_WithWhere(t *testing.T) {
+	table := introspection.Table{Name: "posts"}
+	where := &WhereClause{
+		Condition: sq.Eq{sqlutil.QuoteIdentifier("title"): "first"},
+	}
+
+	count, err := BuildOneToManyCountSQL(table, "user_id", 7, where)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(count.SQL, "COUNT(*)") {
+		t.Errorf("expected COUNT(*) in SQL, got: %s", count.SQL)
+	}
+	if !strings.Contains(count.SQL, "`posts`") {
+		t.Errorf("expected posts table in SQL, got: %s", count.SQL)
+	}
+	if !strings.Contains(count.SQL, "`user_id` = ?") {
+		t.Errorf("expected FK predicate in SQL, got: %s", count.SQL)
+	}
+	if !strings.Contains(count.SQL, "`title` = ?") {
+		t.Errorf("expected where predicate in SQL, got: %s", count.SQL)
+	}
+	if len(count.Args) != 2 {
+		t.Fatalf("expected 2 args, got %v", count.Args)
+	}
+	if count.Args[0] != 7 || count.Args[1] != "first" {
+		t.Errorf("unexpected args order: %v", count.Args)
+	}
+}
+
+func TestPlanOneToManyConnectionBatch(t *testing.T) {
+	table := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+		},
+	}
+	columns := []introspection.Column{
+		{Name: "id"},
+		{Name: "user_id"},
+	}
+
+	query, err := PlanOneToManyConnectionBatch(table, "user_id", columns, []interface{}{1, 2}, 2, nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(query.SQL, "ROW_NUMBER() OVER") {
+		t.Errorf("expected window function SQL, got: %s", query.SQL)
+	}
+	if !strings.Contains(query.SQL, "__batch_parent_id") {
+		t.Errorf("expected batch parent alias in SQL, got: %s", query.SQL)
+	}
+	if len(query.Args) != 4 {
+		t.Fatalf("expected 4 args, got %v", query.Args)
+	}
+	if query.Args[0] != 1 || query.Args[1] != 2 || query.Args[2] != 0 || query.Args[3] != 3 {
+		t.Errorf("expected args [1 2 0 3], got %v", query.Args)
 	}
 }

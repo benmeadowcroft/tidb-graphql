@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"tidb-graphql/internal/cursor"
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
@@ -1284,7 +1285,7 @@ func TestOneToManyResolverBatch(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, parentRows, 2)
 
-	batchPlan, err := planner.PlanOneToManyBatch(posts, nil, "user_id", []interface{}{1, 2}, 2, 0, nil)
+	batchPlan, err := planner.PlanOneToManyBatch(posts, nil, "user_id", []interface{}{1, 2}, 2, 0, nil, nil)
 	require.NoError(t, err)
 	postRows := sqlmock.NewRows([]string{"id", "user_id", "title", "__batch_parent_id"}).
 		AddRow(101, 1, "first", 1).
@@ -1562,7 +1563,7 @@ func TestTryBatchOneToMany_CachesResults(t *testing.T) {
 	require.Len(t, parentRows, 2)
 
 	// Expect the batched one-to-many query to execute once.
-	batchPlan, err := planner.PlanOneToManyBatch(posts, nil, "user_id", []interface{}{1, 2}, 2, 0, nil)
+	batchPlan, err := planner.PlanOneToManyBatch(posts, nil, "user_id", []interface{}{1, 2}, 2, 0, nil, nil)
 	require.NoError(t, err)
 	postRows := sqlmock.NewRows([]string{"id", "user_id", "title", "__batch_parent_id"}).
 		AddRow(101, 1, "first", 1).
@@ -1676,14 +1677,14 @@ func TestTryBatchOneToMany_CacheKeyIsolation(t *testing.T) {
 	selection := planner.SelectedColumns(posts, childField, nil)
 
 	argsFirst := map[string]interface{}{"limit": 1, "offset": 0}
-	planFirst, err := planner.PlanOneToManyBatch(posts, selection, rel.RemoteColumn, []interface{}{1, 2}, 1, 0, nil)
+	planFirst, err := planner.PlanOneToManyBatch(posts, selection, rel.RemoteColumn, []interface{}{1, 2}, 1, 0, nil, nil)
 	require.NoError(t, err)
 	firstRows := sqlmock.NewRows([]string{"id", "user_id", "title", "__batch_parent_id"}).
 		AddRow(101, 1, "first", 1)
 	expectQuery(t, mock, planFirst.SQL, planFirst.Args, firstRows)
 
 	argsSecond := map[string]interface{}{"limit": 1, "offset": 1}
-	planSecond, err := planner.PlanOneToManyBatch(posts, selection, rel.RemoteColumn, []interface{}{1, 2}, 1, 1, nil)
+	planSecond, err := planner.PlanOneToManyBatch(posts, selection, rel.RemoteColumn, []interface{}{1, 2}, 1, 1, nil, nil)
 	require.NoError(t, err)
 	secondRows := sqlmock.NewRows([]string{"id", "user_id", "title", "__batch_parent_id"}).
 		AddRow(201, 1, "second", 1)
@@ -1718,6 +1719,231 @@ func TestTryBatchOneToMany_CacheKeyIsolation(t *testing.T) {
 	assert.EqualValues(t, 2, state.GetCacheMisses())
 	assert.EqualValues(t, 0, state.GetCacheHits())
 
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTryBatchOneToManyConnection_NoBatchState(t *testing.T) {
+	users := introspection.Table{Name: "users"}
+	posts := introspection.Table{Name: "posts"}
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users, posts}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		LocalColumn:      "id",
+		RemoteTable:      "posts",
+		RemoteColumn:     "user_id",
+		GraphQLFieldName: "postsConnection",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "postsConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+				}},
+			},
+		}},
+	}
+
+	result, ok, err := r.tryBatchOneToManyConnection(graphql.ResolveParams{
+		Source:  map[string]interface{}{"databaseId": 1},
+		Context: context.Background(),
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	}, users, rel, 1)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Nil(t, result)
+}
+
+func TestTryBatchOneToManyConnection_CachesResults(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	ctx := NewBatchingContext(context.Background())
+	state, ok := GetBatchState(ctx)
+	require.True(t, ok)
+
+	parentKey := "users|list|"
+	parentRows := []map[string]interface{}{
+		{"databaseId": 1, batchParentKeyField: parentKey},
+		{"databaseId": 2, batchParentKeyField: parentKey},
+	}
+	state.setParentRows(parentKey, parentRows)
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		LocalColumn:      "id",
+		RemoteTable:      "posts",
+		RemoteColumn:     "user_id",
+		GraphQLFieldName: "postsConnection",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "postsConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+					&ast.Field{Name: &ast.Name{Value: "userId"}},
+					&ast.Field{Name: &ast.Name{Value: "title"}},
+				}},
+			},
+		}},
+	}
+
+	orderBy := &planner.OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	selection := planner.SelectedColumnsForConnection(posts, field, nil, orderBy)
+	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumn, selection, []interface{}{1, 2}, 1, orderBy, nil)
+	require.NoError(t, err)
+	batchRows := sqlmock.NewRows([]string{"id", "user_id", "title", "__batch_parent_id"}).
+		AddRow(101, 1, "first", 1).
+		AddRow(102, 1, "second", 1).
+		AddRow(201, 2, "other", 2)
+	expectQuery(t, mock, batchPlan.SQL, batchPlan.Args, batchRows)
+
+	args := map[string]interface{}{"first": 1}
+	firstResult, ok, err := r.tryBatchOneToManyConnection(graphql.ResolveParams{
+		Source:  parentRows[0],
+		Args:    args,
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	}, users, rel, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	firstNodes, ok := firstResult["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, firstNodes, 1)
+	assert.EqualValues(t, 101, firstNodes[0]["databaseId"])
+	firstPageInfo, ok := firstResult["pageInfo"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, firstPageInfo["hasNextPage"])
+
+	secondResult, ok, err := r.tryBatchOneToManyConnection(graphql.ResolveParams{
+		Source:  parentRows[1],
+		Args:    args,
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	}, users, rel, 2)
+	require.NoError(t, err)
+	require.True(t, ok)
+	secondNodes, ok := secondResult["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, secondNodes, 1)
+	assert.EqualValues(t, 201, secondNodes[0]["databaseId"])
+
+	assert.EqualValues(t, 1, state.GetCacheMisses())
+	assert.EqualValues(t, 1, state.GetCacheHits())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOneToManyConnectionResolver_WithAfterSkipsBatching(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	ctx := NewBatchingContext(context.Background())
+	state, ok := GetBatchState(ctx)
+	require.True(t, ok)
+	parentKey := "users|list|"
+	source := map[string]interface{}{"databaseId": 1, batchParentKeyField: parentKey}
+	state.setParentRows(parentKey, []map[string]interface{}{source})
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		LocalColumn:      "id",
+		RemoteTable:      "posts",
+		RemoteColumn:     "user_id",
+		GraphQLFieldName: "postsConnection",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "postsConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+				}},
+			},
+		}},
+	}
+
+	after := cursor.EncodeCursor("Posts", "databaseId", "ASC", 100)
+	args := map[string]interface{}{
+		"first": 1,
+		"after": after,
+	}
+	plan, err := planner.PlanOneToManyConnection(posts, rel.RemoteColumn, 1, field, args)
+	require.NoError(t, err)
+	rows := sqlmock.NewRows([]string{"id"}).AddRow(101)
+	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+
+	resolverFn := r.makeOneToManyConnectionResolver(users, rel)
+	result, err := resolverFn(graphql.ResolveParams{
+		Source:  source,
+		Args:    args,
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+	conn, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	nodes, ok := conn["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, nodes, 1)
+	assert.EqualValues(t, 101, nodes[0]["databaseId"])
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

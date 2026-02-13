@@ -83,3 +83,12 @@ func TestApply_PrimaryKeyIDCollision(t *testing.T) {
 	assert.Equal(t, "databaseId_raw", users.Columns[0].GraphQLFieldName)
 	assert.Equal(t, "databaseId", users.Columns[1].GraphQLFieldName)
 }
+
+func TestUniqueDatabaseIDName_MultipleFallbacks(t *testing.T) {
+	columns := []introspection.Column{
+		{GraphQLFieldName: "databaseId"},
+		{GraphQLFieldName: "databaseId_raw"},
+		{GraphQLFieldName: "databaseId_raw2"},
+	}
+	assert.Equal(t, "databaseId_raw3", uniqueDatabaseIDName(columns, -1))
+}

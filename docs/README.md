@@ -2,6 +2,11 @@
 
 This documentation is organized into four types of content. Pick the one that matches your intent and you will get what you need faster.
 
+## Compose scenarios
+If you need Docker/Podman startup patterns, use the scenario guide:
+
+- [Compose scenarios](../examples/compose/README.md)
+
 ## Tutorials
 If you want to get something working end-to-end and understand it as you go.
 

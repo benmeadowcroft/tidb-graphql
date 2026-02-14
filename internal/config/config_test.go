@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -457,5 +458,300 @@ func TestValidationError_Error(t *testing.T) {
 			Message: "test message",
 		}
 		assert.Equal(t, "test.field: test message", err.Error())
+	})
+}
+
+func TestDatabaseConfig_EffectiveDatabaseName(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        DatabaseConfig
+		expectedName  string
+		expectedSrc   string
+		expectedError string
+	}{
+		{
+			name: "discrete database only",
+			config: DatabaseConfig{
+				Database: "appdb",
+			},
+			expectedName: "appdb",
+			expectedSrc:  "database.database",
+		},
+		{
+			name: "dsn database only",
+			config: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/dsn_db?parseTime=true",
+			},
+			expectedName: "dsn_db",
+			expectedSrc:  "dsn",
+		},
+		{
+			name: "dsn and discrete match",
+			config: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/same_db?parseTime=true",
+				Database:         "same_db",
+			},
+			expectedName: "same_db",
+			expectedSrc:  "database.database",
+		},
+		{
+			name: "dsn and discrete mismatch",
+			config: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/dsn_db?parseTime=true",
+				Database:         "other_db",
+			},
+			expectedError: "database mismatch",
+		},
+		{
+			name: "dsn without database falls back to discrete",
+			config: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/?parseTime=true",
+				Database:         "fallback_db",
+			},
+			expectedName: "fallback_db",
+			expectedSrc:  "database.database",
+		},
+		{
+			name: "dsn without database and no discrete database is invalid",
+			config: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/?parseTime=true",
+			},
+			expectedError: "no effective database name configured",
+		},
+		{
+			name: "invalid dsn is invalid",
+			config: DatabaseConfig{
+				ConnectionString: "not-a-valid-dsn",
+			},
+			expectedError: "database.dsn is invalid",
+		},
+		{
+			name:          "empty everything is invalid",
+			config:        DatabaseConfig{},
+			expectedError: "no effective database name configured",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name, source, err := tt.config.EffectiveDatabaseName()
+			if tt.expectedError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedError)
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectedName, name)
+			assert.Equal(t, tt.expectedSrc, source)
+		})
+	}
+}
+
+func TestConfigValidate_DatabaseResolution(t *testing.T) {
+	t.Run("dsn with matching database passes", func(t *testing.T) {
+		cfg := &Config{
+			Database: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/match_db?parseTime=true",
+				Database:         "match_db",
+				Port:             4000,
+				Pool: PoolConfig{
+					MaxOpen: 1,
+					MaxIdle: 1,
+				},
+			},
+			Server: ServerConfig{Port: 8080},
+			Observability: ObservabilityConfig{
+				Logging: LoggingConfig{Level: "info", Format: "json"},
+				OTLP:    OTLPConfig{Protocol: "grpc", Compression: "gzip"},
+			},
+		}
+
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+		assert.Equal(t, "match_db", cfg.Database.Database)
+	})
+
+	t.Run("dsn mismatch with database errors", func(t *testing.T) {
+		cfg := &Config{
+			Database: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/dsn_db?parseTime=true",
+				Database:         "other_db",
+				Port:             4000,
+				Pool: PoolConfig{
+					MaxOpen: 1,
+					MaxIdle: 1,
+				},
+			},
+			Server: ServerConfig{Port: 8080},
+			Observability: ObservabilityConfig{
+				Logging: LoggingConfig{Level: "info", Format: "json"},
+				OTLP:    OTLPConfig{Protocol: "grpc", Compression: "gzip"},
+			},
+		}
+
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "database mismatch")
+	})
+
+	t.Run("dsn without database and no database field errors", func(t *testing.T) {
+		cfg := &Config{
+			Database: DatabaseConfig{
+				ConnectionString: "root:pass@tcp(localhost:4000)/?parseTime=true",
+				Database:         "",
+				Port:             4000,
+				Pool: PoolConfig{
+					MaxOpen: 1,
+					MaxIdle: 1,
+				},
+			},
+			Server: ServerConfig{Port: 8080},
+			Observability: ObservabilityConfig{
+				Logging: LoggingConfig{Level: "info", Format: "json"},
+				OTLP:    OTLPConfig{Protocol: "grpc", Compression: "gzip"},
+			},
+		}
+
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "no effective database name configured")
+	})
+}
+
+func TestParseMyCnf(t *testing.T) {
+	t.Run("parses supported client keys", func(t *testing.T) {
+		raw := `
+[client]
+host = gateway.tidbcloud.com
+port = 4000
+user = app_user
+password = "super-secret"
+database = app_db
+ssl-mode = VERIFY_IDENTITY
+`
+		settings, err := parseMyCnf(raw)
+		assert.NoError(t, err)
+		assert.Equal(t, "gateway.tidbcloud.com", settings.Host)
+		assert.True(t, settings.HasPort)
+		assert.Equal(t, 4000, settings.Port)
+		assert.Equal(t, "app_user", settings.User)
+		assert.Equal(t, "super-secret", settings.Password)
+		assert.True(t, settings.HasDBName)
+		assert.Equal(t, "app_db", settings.Database)
+		assert.Equal(t, "verify-full", settings.TLSMode)
+	})
+
+	t.Run("mysql database fallback is used", func(t *testing.T) {
+		raw := `
+[client]
+host = localhost
+[mysql]
+database = fallback_db
+`
+		settings, err := parseMyCnf(raw)
+		assert.NoError(t, err)
+		assert.True(t, settings.HasDBName)
+		assert.Equal(t, "fallback_db", settings.Database)
+	})
+}
+
+func TestConfigValidate_MyCnfResolution(t *testing.T) {
+	newMyCnf := func(t *testing.T, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "test.my.cnf")
+		err := os.WriteFile(path, []byte(content), 0o600)
+		assert.NoError(t, err)
+		return path
+	}
+
+	validBase := func() *Config {
+		return &Config{
+			Server: ServerConfig{Port: 8080},
+			Observability: ObservabilityConfig{
+				Logging: LoggingConfig{Level: "info", Format: "json"},
+				OTLP:    OTLPConfig{Protocol: "grpc", Compression: "gzip"},
+			},
+			Database: DatabaseConfig{
+				Pool: PoolConfig{MaxOpen: 1, MaxIdle: 1},
+			},
+		}
+	}
+
+	t.Run("mycnf only config passes and resolves source", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Database.MyCnfFile = newMyCnf(t, `
+[client]
+host=localhost
+port=4000
+user=root
+password=pass
+database=mycnf_db
+ssl-mode=REQUIRED
+`)
+
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+		assert.Equal(t, "mycnf_db", cfg.Database.Database)
+		assert.Equal(t, "localhost", cfg.Database.Host)
+		assert.Equal(t, 4000, cfg.Database.Port)
+		assert.Equal(t, "skip-verify", cfg.Database.TLS.Mode)
+
+		name, source, err := cfg.Database.EffectiveDatabaseName()
+		assert.NoError(t, err)
+		assert.Equal(t, "mycnf_db", name)
+		assert.Equal(t, "mycnf", source)
+	})
+
+	t.Run("mycnf mismatched database errors", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Database.MyCnfFile = newMyCnf(t, `
+[client]
+host=localhost
+port=4000
+user=root
+password=pass
+database=mycnf_db
+`)
+		cfg.Database.Database = "other_db"
+
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "database mismatch")
+		assert.Contains(t, result.Error(), "database.mycnf_file")
+	})
+
+	t.Run("mycnf and dsn together errors", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Database.MyCnfFile = newMyCnf(t, `
+[client]
+host=localhost
+port=4000
+user=root
+password=pass
+database=mycnf_db
+`)
+		cfg.Database.ConnectionString = "root:pass@tcp(localhost:4000)/dsn_db?parseTime=true"
+
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "mutually exclusive")
+	})
+
+	t.Run("mycnf without database and no database field errors", func(t *testing.T) {
+		cfg := validBase()
+		cfg.Database.MyCnfFile = newMyCnf(t, `
+[client]
+host=localhost
+port=4000
+user=root
+password=pass
+`)
+		cfg.Database.Database = ""
+
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "database.mycnf_file does not provide a database name")
 	})
 }

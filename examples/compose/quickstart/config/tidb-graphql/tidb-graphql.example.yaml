@@ -1,0 +1,15 @@
+database:
+  host: tidb
+  port: 4000
+  user: root
+  database: tidb_graphql_tutorial
+
+server:
+  port: 8080
+  graphiql_enabled: true
+  tls_mode: off
+
+observability:
+  environment: development
+  logging:
+    format: text

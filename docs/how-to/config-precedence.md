@@ -33,6 +33,41 @@ Result:
 - `database.host` is `prod-db`
 - `database.user` is `app`
 
+## DSN and database name precedence
+
+`database.database` and DSN path must resolve to one canonical database.
+
+Rules:
+1. `database.database` is used when set.
+2. Otherwise DSN path database is used.
+3. If both are set and different, startup fails.
+
+### Matching values (valid)
+
+```yaml
+database:
+  dsn: "user:pass@tcp(db.example.com:4000)/appdb?parseTime=true"
+  database: appdb
+```
+
+### Conflicting values (invalid)
+
+```yaml
+database:
+  dsn: "user:pass@tcp(db.example.com:4000)/appdb?parseTime=true"
+  database: analytics
+```
+
+This fails validation to prevent connecting to one DB while introspecting another.
+
+## DSN vs my.cnf mode
+
+You must choose one connection-string mode:
+1. `database.dsn` / `database.dsn_file`
+2. `database.mycnf_file`
+
+Setting both is invalid and fails startup validation.
+
 ---
 # Related Docs
 

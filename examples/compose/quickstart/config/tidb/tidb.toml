@@ -1,0 +1,5 @@
+# TiDB configuration for development with Docker Compose
+# Enables automatic TLS certificate generation
+
+[security]
+auto-tls = true

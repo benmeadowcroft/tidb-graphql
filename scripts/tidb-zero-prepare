@@ -1,0 +1,195 @@
+#!/usr/bin/env sh
+set -eu
+
+API_URL_DEFAULT="https://zero.tidbapi.com/v1alpha1/instances"
+TAG_DEFAULT="tidb-graphql-quickstart-db-zero"
+DATABASE_DEFAULT="information_schema"
+TLS_MODE_DEFAULT="true"
+
+AUTH_DIR=".auth"
+STATE_FILE="$AUTH_DIR/tidb-zero.json"
+DSN_FILE="$AUTH_DIR/tidb-zero.dsn"
+MY_CNF_FILE="$AUTH_DIR/tidb-zero.my.cnf"
+
+invitation_code="${TIDB_ZERO_INVITATION_CODE:-}"
+tag="${TIDB_ZERO_TAG:-$TAG_DEFAULT}"
+api_url="${TIDB_ZERO_API_URL:-$API_URL_DEFAULT}"
+database="${TIDB_ZERO_DATABASE:-$DATABASE_DEFAULT}"
+tls_mode="${TIDB_ZERO_TLS_MODE:-$TLS_MODE_DEFAULT}"
+force_refresh=0
+status_only=0
+clear_local=0
+
+usage() {
+  cat <<USAGE
+Usage: scripts/tidb-zero-prepare [options]
+
+Provision or reuse a TiDB Zero instance and write local auth artifacts:
+  .auth/tidb-zero.json
+  .auth/tidb-zero.dsn
+  .auth/tidb-zero.my.cnf
+
+Options:
+  --invite, -invite CODE    TiDB Zero invitation code (required on first provision)
+  --tag TAG                 Tag sent to TiDB Zero API
+  --database NAME           Database name to place in DSN (default: information_schema)
+  --tls-mode MODE           TLS mode in DSN (default: true)
+  --refresh                 Force provisioning a new instance
+  --status                  Show cached instance status and exit
+  --clear-local             Remove local TiDB Zero auth artifacts and exit
+  --help                    Show this help
+USAGE
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --invite|-invite)
+      [ "$#" -ge 2 ] || { echo "Error: $1 requires a value"; exit 1; }
+      invitation_code="$2"
+      shift 2
+      ;;
+    --tag)
+      [ "$#" -ge 2 ] || { echo "Error: --tag requires a value"; exit 1; }
+      tag="$2"
+      shift 2
+      ;;
+    --database)
+      [ "$#" -ge 2 ] || { echo "Error: --database requires a value"; exit 1; }
+      database="$2"
+      shift 2
+      ;;
+    --tls-mode)
+      [ "$#" -ge 2 ] || { echo "Error: --tls-mode requires a value"; exit 1; }
+      tls_mode="$2"
+      shift 2
+      ;;
+    --refresh)
+      force_refresh=1
+      shift
+      ;;
+    --status)
+      status_only=1
+      shift
+      ;;
+    --clear-local)
+      clear_local=1
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown option: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+mkdir -p "$AUTH_DIR"
+chmod 700 "$AUTH_DIR"
+
+if [ "$clear_local" -eq 1 ]; then
+  rm -f "$STATE_FILE" "$DSN_FILE" "$MY_CNF_FILE" "$AUTH_DIR/tidb-zero.env"
+  echo "Cleared local TiDB Zero auth artifacts from $AUTH_DIR"
+  exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || { echo "Error: curl is required."; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "Error: jq is required."; exit 1; }
+
+now_epoch=$(date -u +%s)
+reuse=0
+
+if [ -f "$STATE_FILE" ] && [ "$force_refresh" -eq 0 ]; then
+  expires_epoch=$(jq -r '.instance.expiresAt | fromdateiso8601? // 0' "$STATE_FILE" 2>/dev/null || echo 0)
+  if [ "$expires_epoch" -gt "$now_epoch" ]; then
+    reuse=1
+  fi
+fi
+
+if [ "$status_only" -eq 1 ]; then
+  if [ "$reuse" -eq 1 ]; then
+    expires_at=$(jq -er '.instance.expiresAt' "$STATE_FILE")
+    host=$(jq -er '.instance.connection.host' "$STATE_FILE")
+    user=$(jq -er '.instance.connection.username' "$STATE_FILE")
+    echo "TiDB Zero cache status: valid"
+    echo "Host: $host"
+    echo "User: $user"
+    echo "Expires at: $expires_at"
+    echo "DSN file: $DSN_FILE"
+    echo "MySQL defaults file: $MY_CNF_FILE"
+    exit 0
+  fi
+  if [ -f "$STATE_FILE" ]; then
+    expires_at=$(jq -r '.instance.expiresAt // "unknown"' "$STATE_FILE")
+    echo "TiDB Zero cache status: expired"
+    echo "Expires at: $expires_at"
+  else
+    echo "TiDB Zero cache status: missing"
+  fi
+  exit 1
+fi
+
+if [ "$reuse" -eq 0 ]; then
+  if [ -z "$invitation_code" ]; then
+    if [ -f "$STATE_FILE" ]; then
+      echo "Error: cached TiDB Zero instance is expired; provide --invite to provision a new one."
+    else
+      echo "Error: --invite is required on first run."
+    fi
+    exit 1
+  fi
+
+  echo "Provisioning TiDB Zero instance..."
+  payload=$(jq -n --arg invitationCode "$invitation_code" --arg tag "$tag" '{invitationCode:$invitationCode, tag:$tag}')
+  curl -fsS -X POST "$api_url" -H "Content-Type: application/json" -d "$payload" > "$STATE_FILE"
+  chmod 600 "$STATE_FILE"
+else
+  echo "Reusing existing TiDB Zero instance from $STATE_FILE"
+fi
+
+host=$(jq -er '.instance.connection.host' "$STATE_FILE")
+port=$(jq -er '.instance.connection.port' "$STATE_FILE")
+user=$(jq -er '.instance.connection.username' "$STATE_FILE")
+password=$(jq -er '.instance.connection.password' "$STATE_FILE")
+expires_at=$(jq -er '.instance.expiresAt' "$STATE_FILE")
+quota=$(jq -r '.remainingDatabaseQuota // "unknown"' "$STATE_FILE")
+
+if [ -n "${TIDB_ZERO_USER_PREFIX:-}" ]; then
+  user_prefix="$TIDB_ZERO_USER_PREFIX"
+elif [ "${user#*.}" != "$user" ]; then
+  user_prefix="${user%.*}."
+else
+  user_prefix=""
+fi
+
+dsn="$user:$password@tcp($host:$port)/$database?parseTime=true&loc=UTC&tls=$tls_mode"
+printf '%s\n' "$dsn" > "$DSN_FILE"
+chmod 600 "$DSN_FILE"
+
+mysql_ssl_mode="REQUIRED"
+if [ "$tls_mode" = "false" ]; then
+  mysql_ssl_mode="DISABLED"
+fi
+
+cat > "$MY_CNF_FILE" <<EOF
+[client]
+host=$host
+port=$port
+user=$user
+password=$password
+ssl-mode=$mysql_ssl_mode
+EOF
+chmod 600 "$MY_CNF_FILE"
+
+echo "TiDB Zero instance ready"
+echo "Expires at: $expires_at"
+echo "Remaining quota: $quota"
+if [ -n "$user_prefix" ]; then
+  echo "Detected user prefix: $user_prefix"
+fi
+echo "Wrote: $STATE_FILE"
+echo "Wrote: $DSN_FILE"
+echo "Wrote: $MY_CNF_FILE"

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -90,6 +91,12 @@ func run() error {
 		cfg.Observability.ServiceVersion = Version
 	}
 
+	effectiveDatabase, databaseSource, err := cfg.Database.EffectiveDatabaseName()
+	if err != nil {
+		return fmt.Errorf("failed to resolve effective database configuration: %w", err)
+	}
+	dsnPresent := strings.TrimSpace(cfg.Database.ConnectionString) != ""
+
 	// Validate configuration early, before any resource initialization
 	validationResult := cfg.Validate()
 	for _, warn := range validationResult.Warnings {
@@ -156,6 +163,9 @@ func run() error {
 	logger.Info("connecting to TiDB",
 		slog.String("host", cfg.Database.Host),
 		slog.Int("port", cfg.Database.Port),
+		slog.String("database_effective", effectiveDatabase),
+		slog.String("database_source", databaseSource),
+		slog.Bool("dsn_present", dsnPresent),
 	)
 
 	// Connect to database with optional instrumentation
@@ -174,7 +184,7 @@ func run() error {
 	})
 
 	// Configure connection pool
-	if err := configureDatabase(cfg, logger, db); err != nil {
+	if err := configureDatabase(cfg, logger, db, effectiveDatabase, databaseSource, dsnPresent); err != nil {
 		return fmt.Errorf("failed to verify database connection: %w", err)
 	}
 
@@ -187,13 +197,13 @@ func run() error {
 			return fmt.Errorf("failed to discover database roles: %w", err)
 		}
 
-		if err := validateDBRolePrivileges(db, cfg.Database.Database, logger); err != nil {
+		if err := validateDBRolePrivileges(db, effectiveDatabase, logger); err != nil {
 			return fmt.Errorf("failed to validate database role privileges: %w", err)
 		}
 	}
 
-	queryExecutor := buildQueryExecutor(cfg, db, availableRoles)
-	manager, schemaCancel, err := startSchemaManager(cfg, logger, db, limits, schemaRefreshMetrics, queryExecutor)
+	queryExecutor := buildQueryExecutor(cfg, db, availableRoles, effectiveDatabase)
+	manager, schemaCancel, err := startSchemaManager(cfg, logger, db, limits, schemaRefreshMetrics, queryExecutor, effectiveDatabase)
 	if err != nil {
 		return fmt.Errorf("failed to initialize schema refresh manager: %w", err)
 	}
@@ -453,17 +463,19 @@ func connectDB(cfg *config.Config, logger *logging.Logger) (*sql.DB, interface{ 
 	return db, nil, nil
 }
 
-func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) error {
+func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string, databaseSource string, dsnPresent bool) error {
 	db.SetMaxOpenConns(cfg.Database.Pool.MaxOpen)
 	db.SetMaxIdleConns(cfg.Database.Pool.MaxIdle)
 	db.SetConnMaxLifetime(cfg.Database.Pool.MaxLifetime)
 
-	if err := waitForDatabase(cfg, logger, db); err != nil {
+	if err := waitForDatabase(cfg, logger, db, effectiveDatabase); err != nil {
 		return err
 	}
 
 	logger.Info("connected to database",
-		slog.String("database", cfg.Database.Database),
+		slog.String("database_effective", effectiveDatabase),
+		slog.String("database_source", databaseSource),
+		slog.Bool("dsn_present", dsnPresent),
 		slog.Int("pool_max_open", cfg.Database.Pool.MaxOpen),
 		slog.Int("pool_max_idle", cfg.Database.Pool.MaxIdle),
 		slog.Duration("pool_max_lifetime", cfg.Database.Pool.MaxLifetime),
@@ -471,14 +483,14 @@ func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) e
 	return nil
 }
 
-func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) error {
+func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string) error {
 	timeout := cfg.Database.ConnectionTimeout
 	interval := cfg.Database.ConnectionRetryInterval
 
 	// Helper to attempt connection
 	tryConnect := func() error {
 		if cfg.Server.Auth.DBRoleEnabled {
-			return verifyRoleDatabaseAccess(cfg, db)
+			return verifyRoleDatabaseAccess(cfg, db, effectiveDatabase)
 		}
 		return db.Ping()
 	}
@@ -518,7 +530,7 @@ func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB) err
 	}
 }
 
-func verifyRoleDatabaseAccess(cfg *config.Config, db *sql.DB) error {
+func verifyRoleDatabaseAccess(cfg *config.Config, db *sql.DB, effectiveDatabase string) error {
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -539,10 +551,10 @@ func verifyRoleDatabaseAccess(cfg *config.Config, db *sql.DB) error {
 		}
 	}
 
-	if cfg.Database.Database != "" {
-		useSQL := fmt.Sprintf("USE %s", sqlutil.QuoteIdentifier(cfg.Database.Database))
+	if effectiveDatabase != "" {
+		useSQL := fmt.Sprintf("USE %s", sqlutil.QuoteIdentifier(effectiveDatabase))
 		if _, err := conn.ExecContext(ctx, useSQL); err != nil {
-			return fmt.Errorf("failed to select database %s: %w", cfg.Database.Database, err)
+			return fmt.Errorf("failed to select database %s: %w", effectiveDatabase, err)
 		}
 	}
 
@@ -594,12 +606,12 @@ func validateDBRolePrivileges(db *sql.DB, targetDatabase string, logger *logging
 	return nil
 }
 
-func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string) dbexec.QueryExecutor {
+func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string, effectiveDatabase string) dbexec.QueryExecutor {
 	queryExecutor := dbexec.QueryExecutor(dbexec.NewStandardExecutor(db))
 	if cfg.Server.Auth.DBRoleEnabled {
 		queryExecutor = dbexec.NewRoleExecutor(dbexec.RoleExecutorConfig{
 			DB:           db,
-			DatabaseName: cfg.Database.Database,
+			DatabaseName: effectiveDatabase,
 			RoleFromCtx: func(ctx context.Context) (string, bool) {
 				role, ok := middleware.DBRoleFromContext(ctx)
 				return role.Role, ok && role.Validated
@@ -611,10 +623,10 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string)
 	return queryExecutor
 }
 
-func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, limits *planner.PlanLimits, metrics *observability.SchemaRefreshMetrics, executor dbexec.QueryExecutor) (*schemarefresh.Manager, context.CancelFunc, error) {
+func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, limits *planner.PlanLimits, metrics *observability.SchemaRefreshMetrics, executor dbexec.QueryExecutor, effectiveDatabase string) (*schemarefresh.Manager, context.CancelFunc, error) {
 	manager, err := schemarefresh.NewManager(schemarefresh.Config{
 		DB:                db,
-		DatabaseName:      cfg.Database.Database,
+		DatabaseName:      effectiveDatabase,
 		Limits:            limits,
 		DefaultLimit:      cfg.Server.GraphQLDefaultLimit,
 		Logger:            logger,

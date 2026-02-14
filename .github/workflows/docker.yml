@@ -1,6 +1,8 @@
 name: Docker Build & Push
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
     tags: ["v*"]
@@ -22,8 +24,36 @@ jobs:
       - name: Run unit tests
         run: make test-unit
 
-  build-and-push:
+  compose-compat:
     needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose configs
+        run: |
+          docker compose config >/dev/null
+          docker compose -f examples/compose/quickstart/docker-compose.yml config >/dev/null
+          docker compose -f examples/compose/remote-db/docker-compose.yml config >/dev/null
+          docker compose -f examples/compose/quickstart-db-zero/docker-compose.yml config >/dev/null
+          docker compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
+
+      - name: Install Podman and podman-compose
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman podman-compose
+
+      - name: Validate Podman Compose configs
+        run: |
+          podman compose config >/dev/null
+          podman compose -f examples/compose/quickstart/docker-compose.yml config >/dev/null
+          podman compose -f examples/compose/remote-db/docker-compose.yml config >/dev/null
+          podman compose -f examples/compose/quickstart-db-zero/docker-compose.yml config >/dev/null
+          podman compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
+
+  build-and-push:
+    if: github.event_name == 'push'
+    needs: [test, compose-compat]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,10 +88,12 @@ jobs:
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Containerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -70,3 +102,11 @@ jobs:
             COMMIT=${{ steps.build-args.outputs.commit }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify published manifest platforms
+        run: |
+          digest="${{ steps.build.outputs.digest }}"
+          image="ghcr.io/${{ github.repository }}@${digest}"
+          docker buildx imagetools inspect "$image" | tee /tmp/imagetools.txt
+          grep -q "linux/amd64" /tmp/imagetools.txt
+          grep -q "linux/arm64" /tmp/imagetools.txt

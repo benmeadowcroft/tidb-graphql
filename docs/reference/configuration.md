@@ -39,8 +39,29 @@ You can configure the database connection using either:
 
 - `database.dsn` (string, default: empty) — Complete MySQL DSN in go-sql-driver format: `user:password@tcp(host:port)/database?params`
 - `database.dsn_file` (string, default: empty) — Path to file containing DSN (use `@-` for stdin)
+- `database.mycnf_file` (string, default: empty) — Path to MySQL defaults file (`.my.cnf` style)
 
-When `dsn` is set, it overrides the discrete connection fields below.
+When `dsn` is set, it overrides the discrete connection fields below for connection details.
+`database.mycnf_file` is an alternative to DSN and is mutually exclusive with `dsn`/`dsn_file`.
+
+### Effective database resolution
+
+`tidb-graphql` computes one canonical target database used by:
+- schema introspection/refresh
+- role-aware `USE <database>` behavior
+
+Resolution rules:
+1. If `database.database` is set, it is the canonical target.
+2. Otherwise, if DSN contains `/database`, that DSN database is canonical.
+3. Otherwise, if `mycnf_file` contains `database=...` (usually in `[client]`), that database is canonical.
+4. If both are set and differ, startup fails with a validation error.
+5. If neither provides a database name, startup fails with a validation error.
+
+This prevents connecting to one database via DSN while introspecting a different one.
+
+In `mycnf_file` mode, supported keys are:
+- `[client]` `host`, `port`, `user`, `password`, `database`, `ssl-mode`
+- `[mysql]` `database` (fallback if `[client]` does not provide one)
 
 ### Discrete connection fields
 
@@ -88,6 +109,44 @@ database:
   dsn: "user:password@tcp(tidb.example.com:4000)/mydb?parseTime=true"
 ```
 
+**DSN-only canonical database (recommended):**
+```yaml
+database:
+  dsn_file: /run/secrets/database_dsn
+  # database.database omitted; canonical database is read from DSN path.
+```
+
+**DSN + matching database.database (allowed):**
+```yaml
+database:
+  dsn: "user:password@tcp(tidb.example.com:4000)/mydb?parseTime=true"
+  database: mydb
+```
+
+**DSN + conflicting database.database (invalid):**
+```yaml
+database:
+  dsn: "user:password@tcp(tidb.example.com:4000)/mydb?parseTime=true"
+  database: otherdb # startup validation error: mismatch with DSN database
+```
+
+**MySQL defaults file mode (`my.cnf`):**
+```yaml
+database:
+  mycnf_file: /run/secrets/mysql-client.my.cnf
+```
+
+Example `my.cnf`:
+```ini
+[client]
+host = gateway.tidbcloud.com
+port = 4000
+user = graphql_app
+password = super-secret
+database = tidb_graphql_tutorial
+ssl-mode = VERIFY_IDENTITY
+```
+
 **DSN with mTLS (TiDB Cloud):**
 ```yaml
 database:
@@ -123,6 +182,12 @@ database:
     ca_file_env: TIDB_CA_CERT_PATH
     cert_file_env: TIDB_CLIENT_CERT_PATH
     key_file_env: TIDB_CLIENT_KEY_PATH
+```
+
+**Scenario example (TiDB Zero local prep):**
+```yaml
+database:
+  dsn_file: /run/secrets/tidb-zero.dsn
 ```
 
 ## server

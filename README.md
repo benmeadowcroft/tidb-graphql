@@ -20,9 +20,26 @@ The goal of the project is to explore a SQL-first approach to GraphQL with pract
 
 ### Quick start
 
-The [Your first schema in five minutes](docs/tutorials/first-schema.md) tutorial is a quick way to get going with TiDB GraphQL
+You can use docker compose to get TiDB-GraphQL up and running quickly with some sample data:
 
-If you are looking for how to run it, configure it, or explore the schema, start with the docs:
+```bash
+git clone https://github.com/benmeadowcroft/tidb-graphql.git && cd tidb-graphql
+docker compose up
+```
+
+This spins up the TiDB GraphQL server, a local TiDB server, all set up with the [tutorial data](./docs/tutorials/first-schema.md) so you can get up and running quickly.
+
+Next open the GraphiQL UI at [http://localhost:8080/graphql](http://localhost:8080/graphql) to interact with the generated GraphQL schema.
+
+### Compose scenarios
+
+There are a variety of example scenarios when you need a specific setup:
+
+See [Compose scenarios](examples/compose/README.md) for details.
+
+### Next steps
+
+If you are looking for how to build the project, configure it, or explore the schema, start with the docs:
 
 - [Documentation home](docs/README.md)
   - [Tutorials](docs/tutorials/README.md)

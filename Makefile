@@ -1,4 +1,4 @@
-.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server container-build compose-up compose-down compose-reset
+.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server container-build compose-up compose-down compose-reset compose-validate
 
 # Default target
 help:
@@ -21,6 +21,7 @@ help:
 	@echo "  compose-up         - Start development environment (TiDB + tidb-graphql)"
 	@echo "  compose-down       - Stop development environment"
 	@echo "  compose-reset      - Stop and remove all data (fresh start)"
+	@echo "  compose-validate   - Validate docker/podman compose files"
 
 # Load test environment variables from .env.test if it exists
 -include .env.test
@@ -120,6 +121,7 @@ jwks-server:
 
 # Auto-detect container tool (podman preferred, docker fallback)
 CONTAINER_TOOL ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
+QUICKSTART_COMPOSE_FILE ?= examples/compose/quickstart/docker-compose.yml
 
 # Build container image locally (podman or docker)
 container-build:
@@ -130,15 +132,29 @@ container-build:
 
 # Start development environment (TiDB + tidb-graphql)
 compose-up:
-	$(CONTAINER_TOOL) compose up --build
+	$(CONTAINER_TOOL) compose -f $(QUICKSTART_COMPOSE_FILE) up --build
 
 # Stop development environment
 compose-down:
-	$(CONTAINER_TOOL) compose down
+	$(CONTAINER_TOOL) compose -f $(QUICKSTART_COMPOSE_FILE) down
 
 # Stop and remove all data (fresh start)
 compose-reset:
-	$(CONTAINER_TOOL) compose down -v
+	$(CONTAINER_TOOL) compose -f $(QUICKSTART_COMPOSE_FILE) down -v
+
+# Validate compose files for the auto-detected container engine
+compose-validate:
+	@if [ -z "$(CONTAINER_TOOL)" ]; then \
+		echo "Error: No container engine found. Install podman or docker."; \
+		exit 1; \
+	fi
+	@echo "Validating compose files with $(CONTAINER_TOOL)..."
+	@$(CONTAINER_TOOL) compose config >/dev/null
+	@$(CONTAINER_TOOL) compose -f examples/compose/quickstart/docker-compose.yml config >/dev/null
+	@$(CONTAINER_TOOL) compose -f examples/compose/quickstart-db-zero/docker-compose.yml config >/dev/null
+	@$(CONTAINER_TOOL) compose -f examples/compose/remote-db/docker-compose.yml config >/dev/null
+	@$(CONTAINER_TOOL) compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
+	@echo "Compose validation passed."
 
 # Build and run in one command
 dev: build run

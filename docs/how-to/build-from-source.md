@@ -84,6 +84,7 @@ CONTAINER_TOOL=docker make container-build
 
 ## Next steps
 - [Your first schema in five minutes](../tutorials/first-schema.md) (Docker Compose quickstart)
+- [Compose scenarios](../../examples/compose/README.md)
 - [Query basics](../tutorials/query-basics.md)
 
 ## Reference

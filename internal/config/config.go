@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -93,6 +94,11 @@ type DatabaseConfig struct {
 	// Supports "@-" to read from stdin.
 	// Configured via "dsn_file" in YAML or TIGQL_DATABASE_DSN_FILE env var.
 	ConnectionStringFile string `mapstructure:"dsn_file"`
+	// MyCnfFile points to a MySQL defaults file (.my.cnf style) used as an
+	// alternative to DSN/discrete settings.
+	// Supported keys are loaded from [client] (and database from [mysql] fallback).
+	// Configured via "mycnf_file" in YAML or TIGQL_DATABASE_MYCNF_FILE env var.
+	MyCnfFile string `mapstructure:"mycnf_file"`
 
 	// Discrete connection fields (used when DSN is not set)
 	Host           string `mapstructure:"host"`
@@ -113,6 +119,19 @@ type DatabaseConfig struct {
 	ConnectionTimeout time.Duration `mapstructure:"connection_timeout"`
 	// ConnectionRetryInterval is the initial interval between connection retries.
 	ConnectionRetryInterval time.Duration `mapstructure:"connection_retry_interval"`
+}
+
+const defaultDatabaseName = "test"
+
+type myCnfSettings struct {
+	Host      string
+	Port      int
+	User      string
+	Password  string
+	Database  string
+	TLSMode   string
+	HasPort   bool
+	HasDBName bool
 }
 
 // AuthConfig holds authentication and authorization parameters.
@@ -327,6 +346,7 @@ func Load() (*Config, error) {
 
 	// --- Flags binding (highest normal priority) ---
 	bindChangedFlagsToViper(v)
+	databaseNameExplicit := databaseNameExplicitlyConfigured(v)
 
 	// --- DSN from file (explicit override) ---
 	if v.GetString("database.dsn") == "" && v.GetString("database.dsn_file") != "" {
@@ -334,6 +354,37 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("failed to read database DSN file: %w", err)
 		} else {
 			v.Set("database.dsn", dsn)
+		}
+	}
+
+	// --- MySQL defaults file (explicit override) ---
+	myCnfHasDatabase := false
+	if myCnfPath := strings.TrimSpace(v.GetString("database.mycnf_file")); myCnfPath != "" {
+		settings, err := parseMyCnfFile(myCnfPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load database my.cnf file: %w", err)
+		}
+
+		if settings.Host != "" {
+			v.Set("database.host", settings.Host)
+		}
+		if settings.HasPort {
+			v.Set("database.port", settings.Port)
+		}
+		if settings.User != "" {
+			v.Set("database.user", settings.User)
+		}
+		if settings.Password != "" {
+			v.Set("database.password", settings.Password)
+		}
+		if settings.TLSMode != "" {
+			v.Set("database.tls.mode", settings.TLSMode)
+		}
+		if settings.HasDBName {
+			myCnfHasDatabase = true
+			if !databaseNameExplicit {
+				v.Set("database.database", settings.Database)
+			}
 		}
 	}
 
@@ -352,6 +403,33 @@ func Load() (*Config, error) {
 		}
 		v.Set("database.password", pwd)
 	}
+
+	// --- Effective database normalization ---
+	// If DSN is set and database.database was not explicitly configured, treat the
+	// default placeholder as unset so DSN can become the canonical database target.
+	if strings.TrimSpace(v.GetString("database.dsn")) != "" &&
+		!databaseNameExplicit &&
+		strings.TrimSpace(v.GetString("database.database")) == defaultDatabaseName {
+		v.Set("database.database", "")
+	}
+
+	// In my.cnf mode, force explicit database when not provided by user nor file.
+	if strings.TrimSpace(v.GetString("database.mycnf_file")) != "" &&
+		!databaseNameExplicit &&
+		!myCnfHasDatabase &&
+		strings.TrimSpace(v.GetString("database.database")) == defaultDatabaseName {
+		v.Set("database.database", "")
+	}
+
+	effectiveDatabase, _, err := resolveEffectiveDatabaseName(
+		v.GetString("database.database"),
+		v.GetString("database.dsn"),
+		v.GetString("database.mycnf_file"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve effective database name: %w", err)
+	}
+	v.Set("database.database", effectiveDatabase)
 
 	// --- Unmarshal (strict) ---
 	var cfg Config
@@ -409,6 +487,7 @@ func defineFlags() {
 		// Database connection flags
 		pflag.String("database.dsn", "", "Complete MySQL DSN (user:pass@tcp(host:port)/db)")
 		pflag.String("database.dsn_file", "", "Path to file containing database DSN (use @- for stdin)")
+		pflag.String("database.mycnf_file", "", "Path to MySQL defaults file (.my.cnf format)")
 
 		// Database discrete connection flags (used when DSN is not set)
 		pflag.String("database.host", "", "Database host")
@@ -528,6 +607,7 @@ func setDefaults(v *viper.Viper) {
 	// Database connection defaults
 	v.SetDefault("database.dsn", "")
 	v.SetDefault("database.dsn_file", "")
+	v.SetDefault("database.mycnf_file", "")
 
 	// Database discrete connection defaults
 	v.SetDefault("database.host", "localhost")
@@ -536,7 +616,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.password", "")
 	v.SetDefault("database.password_file", "")
 	v.SetDefault("database.password_prompt", false)
-	v.SetDefault("database.database", "test")
+	v.SetDefault("database.database", defaultDatabaseName)
 
 	// Database TLS defaults
 	v.SetDefault("database.tls.mode", "")
@@ -663,6 +743,158 @@ func readPasswordFile(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
+func readRawFile(path string) (string, error) {
+	var data []byte
+	var err error
+
+	if path == "@-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func parseMyCnfFile(path string) (myCnfSettings, error) {
+	raw, err := readRawFile(path)
+	if err != nil {
+		return myCnfSettings{}, err
+	}
+	return parseMyCnf(raw)
+}
+
+func parseMyCnf(raw string) (myCnfSettings, error) {
+	settings := myCnfSettings{}
+	section := ""
+
+	lines := strings.Split(raw, "\n")
+	for i, line := range lines {
+		lineno := i + 1
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
+			continue
+		}
+
+		key, value, ok := parseMyCnfKeyValue(line)
+		if !ok {
+			return myCnfSettings{}, fmt.Errorf("invalid my.cnf syntax on line %d", lineno)
+		}
+
+		key = strings.ToLower(key)
+		switch section {
+		case "client":
+			switch key {
+			case "host":
+				settings.Host = value
+			case "port":
+				if value == "" {
+					return myCnfSettings{}, fmt.Errorf("invalid my.cnf port on line %d: empty value", lineno)
+				}
+				port, err := parsePort(value)
+				if err != nil {
+					return myCnfSettings{}, fmt.Errorf("invalid my.cnf port on line %d: %w", lineno, err)
+				}
+				settings.Port = port
+				settings.HasPort = true
+			case "user":
+				settings.User = value
+			case "password":
+				settings.Password = value
+			case "database":
+				settings.Database = value
+				settings.HasDBName = true
+			case "ssl-mode":
+				tlsMode, err := mapMyCnfSSLMode(value)
+				if err != nil {
+					return myCnfSettings{}, fmt.Errorf("invalid my.cnf ssl-mode on line %d: %w", lineno, err)
+				}
+				settings.TLSMode = tlsMode
+			}
+		case "mysql":
+			if key == "database" && !settings.HasDBName {
+				settings.Database = value
+				settings.HasDBName = true
+			}
+		}
+	}
+
+	return settings, nil
+}
+
+func parseMyCnfKeyValue(line string) (key string, value string, ok bool) {
+	if parts := strings.SplitN(line, "=", 2); len(parts) == 2 {
+		key = strings.TrimSpace(parts[0])
+		value = strings.TrimSpace(parts[1])
+		value = stripOptionalQuotes(value)
+		return key, value, key != ""
+	}
+
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	key = strings.TrimSpace(parts[0])
+	value = strings.TrimSpace(strings.Join(parts[1:], " "))
+	value = stripOptionalQuotes(value)
+	return key, value, key != ""
+}
+
+func stripOptionalQuotes(value string) string {
+	if len(value) >= 2 {
+		if (value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"') {
+			return value[1 : len(value)-1]
+		}
+	}
+	return value
+}
+
+func parsePort(raw string) (int, error) {
+	port, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, err
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("port %d is out of valid range (1-65535)", port)
+	}
+	return port, nil
+}
+
+func mapMyCnfSSLMode(value string) (string, error) {
+	mode := strings.ToUpper(strings.TrimSpace(value))
+	switch mode {
+	case "":
+		return "", nil
+	case "DISABLED":
+		return "off", nil
+	case "REQUIRED", "PREFERRED":
+		return "skip-verify", nil
+	case "VERIFY_CA":
+		return "verify-ca", nil
+	case "VERIFY_IDENTITY":
+		return "verify-full", nil
+	default:
+		return "", fmt.Errorf("unsupported ssl-mode %q", value)
+	}
+}
+
+func databaseNameExplicitlyConfigured(v *viper.Viper) bool {
+	if _, ok := os.LookupEnv("TIGQL_DATABASE_DATABASE"); ok {
+		return true
+	}
+	if flag := pflag.CommandLine.Lookup("database.database"); flag != nil && flag.Changed {
+		return true
+	}
+	return v.InConfig("database.database")
+}
+
 func stringToStringSliceHookFunc(sep string) mapstructure.DecodeHookFunc {
 	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
 		if from.Kind() != reflect.String || to != reflect.TypeOf([]string{}) {
@@ -784,6 +1016,52 @@ func validatePatternMap(result *ValidationResult, field string, patternMap map[s
 }
 
 func (d *DatabaseConfig) validate(result *ValidationResult) {
+	if strings.TrimSpace(d.MyCnfFile) != "" && (strings.TrimSpace(d.ConnectionString) != "" || strings.TrimSpace(d.ConnectionStringFile) != "") {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "database.mycnf_file",
+			Message: "mycnf_file is mutually exclusive with dsn/dsn_file",
+			Hint:    "set either mycnf_file or dsn/dsn_file, not both",
+		})
+	}
+
+	if strings.TrimSpace(d.MyCnfFile) != "" {
+		settings, err := parseMyCnfFile(d.MyCnfFile)
+		if err != nil {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "database.mycnf_file",
+				Message: fmt.Sprintf("failed to parse my.cnf file: %v", err),
+				Hint:    "provide a valid MySQL defaults file with [client] settings",
+			})
+		} else {
+			if d.Host == "" && settings.Host != "" {
+				d.Host = settings.Host
+			}
+			if d.Port == 0 && settings.HasPort {
+				d.Port = settings.Port
+			}
+			if d.User == "" && settings.User != "" {
+				d.User = settings.User
+			}
+			if d.Password == "" && settings.Password != "" {
+				d.Password = settings.Password
+			}
+			if d.TLS.Mode == "" && settings.TLSMode != "" {
+				d.TLS.Mode = settings.TLSMode
+			}
+			if settings.HasDBName {
+				if strings.TrimSpace(d.Database) == "" {
+					d.Database = settings.Database
+				} else if d.Database != settings.Database {
+					result.Errors = append(result.Errors, ValidationError{
+						Field:   "database.database",
+						Message: fmt.Sprintf("database mismatch: database.database=%q but database.mycnf_file targets %q", d.Database, settings.Database),
+						Hint:    "either remove database.database or set it to match my.cnf database",
+					})
+				}
+			}
+		}
+	}
+
 	// Port range validation (only if not using connection string)
 	if d.ConnectionString == "" && (d.Port < 1 || d.Port > 65535) {
 		result.Errors = append(result.Errors, ValidationError{
@@ -843,6 +1121,40 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 			Message: "connection_timeout cannot be negative",
 		})
 	}
+
+	effectiveDatabase, _, err := resolveEffectiveDatabaseName(d.Database, d.ConnectionString, d.MyCnfFile)
+	if err != nil {
+		switch {
+		case strings.HasPrefix(err.Error(), "database.dsn"):
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "database.dsn",
+				Message: err.Error(),
+				Hint:    "set a valid MySQL DSN in database.dsn/database.dsn_file",
+			})
+		case strings.HasPrefix(err.Error(), "database.mycnf_file"):
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "database.mycnf_file",
+				Message: err.Error(),
+				Hint:    "set a valid my.cnf file and include [client] database or database.database",
+			})
+		case strings.Contains(err.Error(), "mismatch"):
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "database.database",
+				Message: err.Error(),
+				Hint:    "either remove database.database or set it to match the DSN/my.cnf database",
+			})
+		default:
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "database.database",
+				Message: err.Error(),
+				Hint:    "set database.database or include a /database in database.dsn/database.dsn_file or database.mycnf_file",
+			})
+		}
+		return
+	}
+
+	// Keep runtime behavior deterministic for callers that consume Database.Database.
+	d.Database = effectiveDatabase
 }
 
 func (t *DatabaseTLSConfig) validate(result *ValidationResult) {
@@ -1231,6 +1543,63 @@ func (d *DatabaseConfig) DSNWithoutDatabase() string {
 	}
 
 	return dsn
+}
+
+// EffectiveDatabaseName returns the canonical database name used for schema introspection
+// and role-aware query execution.
+func (d *DatabaseConfig) EffectiveDatabaseName() (name string, source string, err error) {
+	return resolveEffectiveDatabaseName(d.Database, d.ConnectionString, d.MyCnfFile)
+}
+
+func resolveEffectiveDatabaseName(databaseName string, connectionString string, myCnfFile string) (name string, source string, err error) {
+	configDatabase := strings.TrimSpace(databaseName)
+	dsn := strings.TrimSpace(connectionString)
+	myCnfPath := strings.TrimSpace(myCnfFile)
+	dsnDatabase, parseErr := parseDSNDatabaseName(dsn)
+	if parseErr != nil {
+		return "", "", parseErr
+	}
+
+	if configDatabase != "" {
+		if dsnDatabase != "" && configDatabase != dsnDatabase {
+			return "", "", fmt.Errorf(
+				"database mismatch: database.database=%q but database.dsn targets %q",
+				configDatabase,
+				dsnDatabase,
+			)
+		}
+		if myCnfPath != "" && dsn == "" {
+			return configDatabase, "mycnf", nil
+		}
+		return configDatabase, "database.database", nil
+	}
+
+	if dsnDatabase != "" {
+		return dsnDatabase, "dsn", nil
+	}
+
+	if myCnfPath != "" {
+		return "", "", fmt.Errorf(
+			"database.mycnf_file does not provide a database name and database.database is not set",
+		)
+	}
+
+	return "", "", fmt.Errorf(
+		"no effective database name configured: set database.database or include /<database> in database.dsn/database.dsn_file or database.mycnf_file",
+	)
+}
+
+func parseDSNDatabaseName(connectionString string) (string, error) {
+	dsn := strings.TrimSpace(connectionString)
+	if dsn == "" {
+		return "", nil
+	}
+
+	parsed, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", fmt.Errorf("database.dsn is invalid: %w", err)
+	}
+	return strings.TrimSpace(parsed.DBName), nil
 }
 
 // effectiveTLSParam returns the TLS parameter value for the DSN.

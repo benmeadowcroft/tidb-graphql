@@ -1,0 +1,61 @@
+# Quickstart development environment: TiDB + tidb-graphql
+#
+# Usage:
+#   docker compose -f examples/compose/quickstart/docker-compose.yml up
+#
+# GraphiQL interactive explorer: http://localhost:8080/graphql
+# TiDB MySQL protocol: localhost:4000
+
+services:
+  tidb:
+    image: pingcap/tidb:v8.5.5
+    command:
+      - "--config=/tidb.toml"
+    volumes:
+      - ./config/tidb/tidb.toml:/tidb.toml:ro
+      - tidb-data:/tmp/tidb
+    ports:
+      - "4000:4000"
+      - "10080:10080"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:10080/status"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  seed:
+    image: mysql:8
+    depends_on:
+      tidb:
+        condition: service_healthy
+    volumes:
+      - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - |
+        until mysqladmin --protocol=TCP --host=tidb --port=4000 --user=root ping --silent; do
+          sleep 1
+        done
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data.sql
+    restart: "no"
+
+  tidb-graphql:
+    image: ${TIGQL_IMAGE:-ghcr.io/benmeadowcroft/tidb-graphql:main}
+    build:
+      context: ../../../
+      dockerfile: Containerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+    volumes:
+      - ./config/tidb-graphql/tidb-graphql.example.yaml:/etc/tidb-graphql/tidb-graphql.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      tidb:
+        condition: service_healthy
+
+volumes:
+  tidb-data:

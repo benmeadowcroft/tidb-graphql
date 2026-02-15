@@ -50,32 +50,37 @@ That's it! You have a working GraphQL API backed by TiDB. No manual schema files
 ## Stopping and resetting
 
 ```bash
-docker compose down      # stop containers (data persists)
-docker compose down -v   # stop and delete all data (fresh start)
+docker compose -f examples/compose/quickstart/docker-compose.yml down      # stop containers (data persists)
+docker compose -f examples/compose/quickstart/docker-compose.yml down -v   # stop and delete all data (fresh start)
 ```
 
 ## Customizing
 
-The development environment can be customized with environment variables. Copy `.env.example` to `.env` and uncomment the values you want to change. Common overrides:
+The quickstart scenario stores app settings in:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TIGQL_SERVER_PORT` | `8080` | HTTP server port |
-| `TIGQL_OBSERVABILITY_LOGGING_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
-| `TIGQL_DATABASE_DATABASE` | `tidb_graphql_tutorial` | Database to expose via GraphQL |
+`examples/compose/quickstart/config/tidb-graphql/tidb-graphql.example.yaml`
+
+Edit that file to customize database/server/observability settings.  
+Use `.env` (from root `.env.example`) for runtime overrides like `TIGQL_IMAGE` and secrets.
+
+Common settings in the quickstart YAML:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `server.port` | `8080` | HTTP server port |
+| `observability.logging.format` | `text` | Log format (`json`, `text`) |
+| `database.database` | `tidb_graphql_tutorial` | Database to expose via GraphQL |
 
 See the [Configuration reference](../reference/configuration.md) for all available settings.
 
 ## Connecting to your own database
 
-To connect to an existing TiDB instance instead of the bundled one, set the database environment variables in your `.env` file or directly in `docker-compose.yml`:
+To connect to an existing TiDB instance instead of the bundled one, use the `remote-db` scenario:
 
 ```bash
-TIGQL_DATABASE_HOST=gateway01.us-west-2.prod.aws.tidbcloud.com
-TIGQL_DATABASE_PORT=4000
-TIGQL_DATABASE_USER=prefix.root
-TIGQL_DATABASE_PASSWORD=your-password
-TIGQL_DATABASE_DATABASE=your_database
+cp examples/compose/remote-db/.env.example examples/compose/remote-db/.env
+# Update TIGQL_DATABASE_DSN in examples/compose/remote-db/.env (or edit remote-db config YAML)
+docker compose --env-file examples/compose/remote-db/.env -f examples/compose/remote-db/docker-compose.yml up
 ```
 
 For more advanced setups (building from source, TLS/mTLS, DSN connection strings), see the [Build from source](../how-to/build-from-source.md) and [Database authentication](../how-to/database-auth.md) guides.

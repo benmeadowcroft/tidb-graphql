@@ -13,6 +13,7 @@ Examples:
 export TIGQL_DATABASE_HOST=localhost
 export TIGQL_SERVER_GRAPHQL_MAX_DEPTH=5
 export TIGQL_OBSERVABILITY_LOGGING_LEVEL=debug
+export TIGQL_DATABASE_MYCNF_FILE=/run/secrets/mysql-client.my.cnf
 ```
 
 List values (CORS, allow/deny lists) are comma-separated:
@@ -35,6 +36,16 @@ Examples:
   --database.user=root \
   --database.database=app_db
 ```
+
+Using a MySQL defaults file mode:
+
+```bash
+./bin/tidb-graphql \
+  --config=./local_config.yaml \
+  --database.mycnf_file=/run/secrets/mysql-client.my.cnf
+```
+
+`database.mycnf_file` is mutually exclusive with `database.dsn`/`database.dsn_file`.
 
 Version info:
 

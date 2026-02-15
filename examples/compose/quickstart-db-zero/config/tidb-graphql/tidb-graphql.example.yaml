@@ -1,0 +1,12 @@
+database:
+  mycnf_file: /run/secrets/tidb-zero.my.cnf
+
+server:
+  port: 8080
+  graphiql_enabled: true
+  tls_mode: off
+
+observability:
+  environment: development
+  logging:
+    format: text

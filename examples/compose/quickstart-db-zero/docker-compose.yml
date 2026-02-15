@@ -1,0 +1,32 @@
+# TiDB Zero quickstart scenario: seed sample data into a TiDB Zero instance and run tidb-graphql.
+#
+# Usage:
+#   scripts/tidb-zero-prepare --invite <code> --database tidb_graphql_tutorial
+#   docker compose -f examples/compose/quickstart-db-zero/docker-compose.yml up
+
+services:
+  seed:
+    image: mysql:8
+    volumes:
+      - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
+      - ../../../.auth/tidb-zero.my.cnf:/run/secrets/tidb-zero.my.cnf:ro
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - |
+        until mysqladmin --defaults-extra-file=/run/secrets/tidb-zero.my.cnf ping --silent; do
+          sleep 1
+        done
+        mysql --defaults-extra-file=/run/secrets/tidb-zero.my.cnf < /seed/sample-data.sql
+    restart: "no"
+
+  tidb-graphql:
+    image: ${TIGQL_IMAGE:-ghcr.io/benmeadowcroft/tidb-graphql:main}
+    volumes:
+      - ./config/tidb-graphql/tidb-graphql.example.yaml:/etc/tidb-graphql/tidb-graphql.yaml:ro
+      - ../../../.auth/tidb-zero.my.cnf:/run/secrets/tidb-zero.my.cnf:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      seed:
+        condition: service_completed_successfully

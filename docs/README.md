@@ -2,6 +2,11 @@
 
 This documentation is organized into four types of content. Pick the one that matches your intent and you will get what you need faster.
 
+## Compose scenarios
+If you need Docker/Podman startup patterns, use the scenario guide:
+
+- [Compose scenarios](../examples/compose/README.md)
+
 ## Tutorials
 If you want to get something working end-to-end and understand it as you go.
 
@@ -21,6 +26,7 @@ If you already know what you want to do, and just need the steps.
 - [Configure CORS for browser clients](how-to/cors.md)
 - [Run integration tests locally](how-to/integration-tests.md)
 - [Use config precedence correctly](how-to/config-precedence.md)
+- [Troubleshoot first run](how-to/troubleshooting-first-run.md)
 
 ## Technical Reference
 If you need authoritative, detailed, and complete information.

@@ -1,0 +1,16 @@
+# Remote DB scenario: run only tidb-graphql and connect to an existing TiDB database.
+#
+# Usage:
+#   cp examples/compose/remote-db/.env.example examples/compose/remote-db/.env
+#   docker compose --env-file examples/compose/remote-db/.env -f examples/compose/remote-db/docker-compose.yml up
+
+services:
+  tidb-graphql:
+    image: ${TIGQL_IMAGE:-ghcr.io/benmeadowcroft/tidb-graphql:main}
+    volumes:
+      - ./config/tidb-graphql/tidb-graphql.example.yaml:/etc/tidb-graphql/tidb-graphql.yaml:ro
+    ports:
+      - "8080:8080"
+    environment:
+      # Optional DSN override. If unset, values from config/tidb-graphql/tidb-graphql.example.yaml are used.
+      - TIGQL_DATABASE_DSN=${TIGQL_DATABASE_DSN:-}

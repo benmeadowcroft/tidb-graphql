@@ -1,0 +1,15 @@
+database:
+  host: host.docker.internal
+  port: 4000
+  user: root
+  database: test
+
+server:
+  port: 8080
+  graphiql_enabled: true
+  tls_mode: off
+
+observability:
+  environment: development
+  logging:
+    format: text

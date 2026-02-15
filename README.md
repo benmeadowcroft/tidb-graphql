@@ -10,10 +10,14 @@ Run:
 
 ```bash
 git clone https://github.com/benmeadowcroft/tidb-graphql.git && cd tidb-graphql
-docker compose up
+docker compose up -d
 ```
 
 This starts TiDB, tutorial sample data, `tidb-graphql`, and GraphiQL.
+
+> [!NOTE]
+> if you are using `podman compose`, due to an issue handling the `include:` it is recommended to explicitly provide the path to the scenarios compose file using the `-f` parameter, e.g.:
+> `docker compose up -f examples/compose/quickstart/docker-compose.yml -d`
 
 ## Run local code image (development)
 
@@ -21,7 +25,7 @@ If you are testing local code changes, build and run a local image explicitly:
 
 ```bash
 docker build -t tidb-graphql:dev -f Containerfile .
-TIGQL_IMAGE=tidb-graphql:dev docker compose up
+TIGQL_IMAGE=tidb-graphql:dev docker compose up -d
 ```
 
 ## Verify it works
@@ -65,7 +69,7 @@ curl -s -X POST http://localhost:8080/graphql \
 ## Prerequisites
 
 - Docker Compose v2 or Podman Compose
-- Port `8080` available
+- Port `8080` (for TiDB-GraphQL) & `4000` (for TiDB) available
 - Internet access for first-run image pulls (GHCR/Docker Hub)
 
 ## Choose a scenario
@@ -123,12 +127,6 @@ For deeper setup details, use:
 ## Contributing and local development
 
 Common development commands:
-
-```bash
-make build
-make test-unit
-make test-integration
-```
 
 Notes:
 - `make build` outputs `bin/tidb-graphql`.

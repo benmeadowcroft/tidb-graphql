@@ -11,6 +11,7 @@ Task-focused steps for common operations.
 - [Run integration tests locally](integration-tests.md)
 - [Use config precedence correctly](config-precedence.md)
 - [Build from source](build-from-source.md)
+- [Troubleshoot first run](troubleshooting-first-run.md)
 
 ---
 # Related Docs

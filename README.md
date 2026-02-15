@@ -15,6 +15,15 @@ docker compose up
 
 This starts TiDB, tutorial sample data, `tidb-graphql`, and GraphiQL.
 
+## Run local code image (development)
+
+If you are testing local code changes, build and run a local image explicitly:
+
+```bash
+docker build -t tidb-graphql:dev -f Containerfile .
+TIGQL_IMAGE=tidb-graphql:dev docker compose up
+```
+
 ## Verify it works
 
 Open [http://localhost:8080/graphql](http://localhost:8080/graphql) and run:
@@ -97,10 +106,7 @@ Podman users can replace `docker compose` with `podman compose`.
 
 ## Common first-run issues
 
-- `bind: address already in use` on `8080`: stop the process using port `8080`, or change published ports in your compose file.
-- You changed code but behavior looks unchanged: you are likely running a remote image tag. Build locally and run with `TIGQL_IMAGE=tidb-graphql:dev`.
-- Podman behavior differs from Docker Compose: validate with `make compose-validate` and prefer scenario-specific compose files from `examples/compose`.
-- `quickstart-db-zero` initially shows partial tables: this can happen while seeding completes; periodic schema refresh converges shortly after.
+- See [First-run troubleshooting](docs/how-to/troubleshooting-first-run.md) for quick diagnosis commands and fixes.
 
 For deeper setup details, use:
 - [Compose scenarios](examples/compose/README.md)

@@ -26,6 +26,7 @@ If you already know what you want to do, and just need the steps.
 - [Configure CORS for browser clients](how-to/cors.md)
 - [Run integration tests locally](how-to/integration-tests.md)
 - [Use config precedence correctly](how-to/config-precedence.md)
+- [Troubleshoot first run](how-to/troubleshooting-first-run.md)
 
 ## Technical Reference
 If you need authoritative, detailed, and complete information.

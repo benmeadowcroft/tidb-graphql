@@ -1,67 +1,133 @@
 # TiDB GraphQL
 
-TiDB GraphQL allows you to provide a rapid GraphQL API for your TiDB database.
+TiDB GraphQL is a SQL-first GraphQL server for teams who want a fast API over TiDB by introspecting a live schema into GraphQL.
 
-*This project is experimental!*
+This project is experimental.
 
-TiDB GraphQL is a SQL-first GraphQL server for TiDB. It introspects a live TiDB schema and exposes a GraphQL API over that schema.
+## Quick start
 
-The goal of the project is to explore a SQL-first approach to GraphQL with practical guardrails, so teams can get useful access quickly without handcrafting every GraphQL resolver.
-
-## Key features
-
-- **Database-first GraphQL**: schema is derived from live TiDB introspection, not hand-written types and resolvers.
-- **Immutable schema snapshots**: schema builds are atomic and refreshed safely without partial updates.
-- **Database-enforced authorization**: JWT claims map to TiDB Role Based Access Control, ensuring consistent access control.
-- **Built-in observability**: OpenTelemetry metrics, tracing, and logs with SQL commenter support.
-- **Guardrails by default**: indexed filter/order-by requirements and configurable query limits.
-
-## Getting started
-
-### Quick start
-
-You can use docker compose to get TiDB-GraphQL up and running quickly with some sample data:
+Run:
 
 ```bash
 git clone https://github.com/benmeadowcroft/tidb-graphql.git && cd tidb-graphql
 docker compose up
 ```
 
-This spins up the TiDB GraphQL server, a local TiDB server, all set up with the [tutorial data](./docs/tutorials/first-schema.md) so you can get up and running quickly.
+This starts TiDB, tutorial sample data, `tidb-graphql`, and GraphiQL.
 
-Next open the GraphiQL UI at [http://localhost:8080/graphql](http://localhost:8080/graphql) to interact with the generated GraphQL schema.
+## Verify it works
 
-### Compose scenarios
+Open [http://localhost:8080/graphql](http://localhost:8080/graphql) and run:
 
-There are a variety of example scenarios when you need a specific setup:
+```graphql
+query getUsers {
+  users {
+    id
+    fullName
+    email
+  }
+}
+```
+
+You should see user records from the tutorial dataset, for example:
+
+```json
+{
+  "data": {
+    "users": [
+      {
+        "id": "...",
+        "fullName": "...",
+        "email": "..."
+      }
+    ]
+  }
+}
+```
+
+Headless check (optional):
+
+```bash
+curl -s -X POST http://localhost:8080/graphql \
+  -H "content-type: application/json" \
+  -d '{"query":"query getUsers { users { id fullName email } }"}'
+```
+
+## Prerequisites
+
+- Docker Compose v2 or Podman Compose
+- Port `8080` available
+- Internet access for first-run image pulls (GHCR/Docker Hub)
+
+## Choose a scenario
+
+Use one of these compose scenarios:
+
+| Scenario | Use when | Guide |
+|---|---|---|
+| `quickstart` | You want a complete local demo (TiDB + sample data + GraphQL). | [quickstart README](examples/compose/quickstart/README.md) |
+| `quickstart-db-zero` | You want the same quickstart flow but with a remote TiDB Zero database. | [quickstart-db-zero README](examples/compose/quickstart-db-zero/README.md) |
+| `remote-db` | You already have a running TiDB and only need GraphQL. | [remote-db README](examples/compose/remote-db/README.md) |
+| `oidc-roles` | You want local OIDC/JWKS + role-based database auth testing. | [oidc-roles README](examples/compose/oidc-roles/README.md) |
 
 See [Compose scenarios](examples/compose/README.md) for details.
 
-### Next steps
+## Stop / reset
 
-If you are looking for how to build the project, configure it, or explore the schema, start with the docs:
+Stop default quickstart:
 
-- [Documentation home](docs/README.md)
-  - [Tutorials](docs/tutorials/README.md)
-  - [How-To guides](docs/how-to/README.md)
-  - [Technical reference](docs/reference/README.md)
-  - [Explanation](docs/explanation/README.md)
+```bash
+docker compose down
+```
 
-## Development workflow
+Reset default quickstart (remove volumes):
 
-This project uses `make` targets for common tasks:
+```bash
+docker compose down -v
+```
 
-### How to build
+Scenario-specific example:
 
-To build the project use `make build` from your terminal. The output of the build is the binary `bin/tidb-graphql`.
+```bash
+docker compose -f examples/compose/quickstart-db-zero/docker-compose.yml down
+docker compose -f examples/compose/quickstart-db-zero/docker-compose.yml down -v
+```
 
-### How to run tests
+Podman users can replace `docker compose` with `podman compose`.
 
-The project provides both unit tests (using `make test-unit`) and integration tests (using `make test-integration`);
+## Common first-run issues
+
+- `bind: address already in use` on `8080`: stop the process using port `8080`, or change published ports in your compose file.
+- You changed code but behavior looks unchanged: you are likely running a remote image tag. Build locally and run with `TIGQL_IMAGE=tidb-graphql:dev`.
+- Podman behavior differs from Docker Compose: validate with `make compose-validate` and prefer scenario-specific compose files from `examples/compose`.
+- `quickstart-db-zero` initially shows partial tables: this can happen while seeding completes; periodic schema refresh converges shortly after.
+
+For deeper setup details, use:
+- [Compose scenarios](examples/compose/README.md)
+- [Configuration precedence](docs/how-to/config-precedence.md)
+- [Your first schema tutorial](docs/tutorials/first-schema.md)
+
+## Next steps
+
+- [Tutorials](docs/tutorials/README.md)
+- [How-To guides](docs/how-to/README.md)
+- [Technical reference](docs/reference/README.md)
+- [Architecture and explanation docs](docs/explanation/README.md)
+
+## Contributing and local development
+
+Common development commands:
+
+```bash
+make build
+make test-unit
+make test-integration
+```
 
 Notes:
+- `make build` outputs `bin/tidb-graphql`.
 - `make test-unit` runs fast unit tests in `./internal/...`.
-- `make test-integration` requires credentials to a TiDB Database via environment variables or `.env.test` (see `.env.test.example`). You can use the free tier of [TiDB Cloud Starter](https://www.pingcap.com/tidb-cloud-starter/) to quickly provision a TiDB instance for integration testing.
+- `make test-integration` requires TiDB credentials via environment variables or `.env.test` (see `.env.test.example`).
 
 ## License
 

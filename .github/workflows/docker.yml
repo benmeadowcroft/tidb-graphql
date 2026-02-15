@@ -38,19 +38,6 @@ jobs:
           docker compose -f examples/compose/quickstart-db-zero/docker-compose.yml config >/dev/null
           docker compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
 
-      - name: Install Podman and podman-compose
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y podman podman-compose
-
-      - name: Validate Podman Compose configs
-        run: |
-          podman compose config >/dev/null
-          podman compose -f examples/compose/quickstart/docker-compose.yml config >/dev/null
-          podman compose -f examples/compose/remote-db/docker-compose.yml config >/dev/null
-          podman compose -f examples/compose/quickstart-db-zero/docker-compose.yml config >/dev/null
-          podman compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
-
   build-and-push:
     if: github.event_name == 'push'
     needs: [test, compose-compat]

@@ -15,15 +15,15 @@ This section describes how the GraphQL schema is derived from the TiDB schema.
 
 For each table `users`:
 
-- Collection query: `users(first, after, where, orderBy)` returns `UserConnection`.
+- Collection query: `users(first, after, last, before, where, orderBy)` returns `UserConnection`.
 - Primary key lookup: `user(id: ID!)` returns `User` (global Node ID).
 - Primary key raw lookup: `user_by_databaseId(databaseId: BigInt!)` returns `User` (name depends on PK column).
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
 
 Notes:
 - `orderBy` only accepts indexed fields and will error otherwise (see [Filters](./filters.md)).
-- `first` default is configurable (default `100`, via [`server.graphql_default_limit`](./configuration.md#server)).
-- `first` is capped at `100`.
+- `first` defaults to [`server.graphql_default_limit`](./configuration.md#server) (default `100`) when omitted.
+- `first` and `last` are capped at `100`.
 
 ## Root mutation fields
 
@@ -63,7 +63,7 @@ Pluralization uses the [Inflection library](https://github.com/jinzhu/inflection
 
 Many-to-one fields remain nullable even when the FK column is NOT NULL, because role-based access can hide the related row.
 
-Relationship fields are generated for one-to-many, many-to-many, and edge-list relationships when the related table has a primary key. They accept `first`, `after`, `orderBy`, and `where` (target table for many-to-many, junction table for edge-list).
+Relationship fields are generated for one-to-many, many-to-many, and edge-list relationships when the related table has a primary key. They accept `first`, `after`, `last`, `before`, `orderBy`, and `where` (target table for many-to-many, junction table for edge-list).
 For tables without primary keys, these to-many connection fields are not generated.
 
 ### Connection types
@@ -76,8 +76,9 @@ Each connection provides:
 - `totalCount` (lazy; filter-aware, cursor-agnostic)
 - `aggregate { count, countDistinct, avg, sum, min, max }` (lazy; filter-aware, cursor-agnostic)
 
-Connections are forward-only (`first`/`after`) and use stable ordering based on indexed columns (default PK ASC).
-For relationship connections, the first page (`after` omitted) is batched across parents to avoid N+1 lookups; cursor pages run per-parent seek queries.
+Connections support forward (`first`/`after`) and backward (`last`/`before`) pagination and use stable ordering based on indexed columns (default PK ASC).
+`pageInfo` uses lightweight semantics: forward mode sets `hasPreviousPage` when `after` is provided; backward mode sets `hasNextPage` when `before` is provided.
+For relationship connections, only forward first-page requests (no `after`, `before`, or `last`) are batched across parents to avoid N+1 lookups; cursor/backward pages run per-parent seek queries.
 
 ## Type mapping
 

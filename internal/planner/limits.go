@@ -63,13 +63,13 @@ func validateLimits(cost PlanCost, limits PlanLimits) error {
 }
 
 // isConnectionField returns true if the field uses Relay connection pagination
-// (has a "first" argument), indicating its children are connection wrappers
+// (has a "first" or "last" argument), indicating its children are connection wrappers
 // rather than actual data fields.
 func isConnectionField(field *ast.Field, fragments map[string]ast.Definition) bool {
 	if field == nil || field.Name == nil {
 		return false
 	}
-	if hasFirstArg(field) {
+	if hasFirstArg(field) || hasLastArg(field) {
 		return true
 	}
 	return hasConnectionSelections(field, fragments)
@@ -88,10 +88,10 @@ func hasConnectionSelections(field *ast.Field, fragments map[string]ast.Definiti
 				if s.Name == nil {
 					continue
 				}
-					switch s.Name.Value {
-					case "edges", "nodes", "pageInfo", "aggregate":
-						return true
-					}
+				switch s.Name.Value {
+				case "edges", "nodes", "pageInfo", "aggregate":
+					return true
+				}
 				if s.SelectionSet != nil && visit(s.SelectionSet.Selections) {
 					return true
 				}
@@ -209,9 +209,9 @@ func connectionDataSelections(field *ast.Field, fragments map[string]ast.Definit
 					if s.SelectionSet != nil {
 						appendDataSelections(s.SelectionSet.Selections)
 					}
-					case "pageInfo", "totalCount", "aggregate":
-						// No SQL cost — skip entirely
-					}
+				case "pageInfo", "totalCount", "aggregate":
+					// No SQL cost — skip entirely
+				}
 			case *ast.InlineFragment:
 				if s.SelectionSet != nil {
 					visit(s.SelectionSet.Selections)
@@ -373,10 +373,12 @@ func argInt(args map[string]interface{}, key string) (int, bool) {
 }
 
 func listLimitForField(field *ast.Field, args map[string]interface{}, fallback int) int {
-	if !hasLimitArg(field) && !hasFirstArg(field) {
+	if !hasLimitArg(field) && !hasFirstArg(field) && !hasLastArg(field) {
 		if _, ok := argInt(args, "limit"); !ok {
 			if _, ok := argInt(args, "first"); !ok {
-				return 1
+				if _, ok := argInt(args, "last"); !ok {
+					return 1
+				}
 			}
 		}
 	}
@@ -387,6 +389,9 @@ func listLimitForField(field *ast.Field, args map[string]interface{}, fallback i
 	if first, ok := argInt(args, "first"); ok {
 		return first
 	}
+	if last, ok := argInt(args, "last"); ok {
+		return last
+	}
 	// Check AST arguments without fallback so that a missing "limit" arg
 	// doesn't shadow a present "first" arg via the fallback value.
 	if limit := limitFromAST(field, 0); limit > 0 {
@@ -394,6 +399,9 @@ func listLimitForField(field *ast.Field, args map[string]interface{}, fallback i
 	}
 	if first := firstFromAST(field, 0); first > 0 {
 		return first
+	}
+	if last := lastFromAST(field, 0); last > 0 {
+		return last
 	}
 	return fallback
 }
@@ -404,6 +412,10 @@ func hasLimitArg(field *ast.Field) bool {
 
 func hasFirstArg(field *ast.Field) bool {
 	return hasArgNamed(field, "first")
+}
+
+func hasLastArg(field *ast.Field) bool {
+	return hasArgNamed(field, "last")
 }
 
 func hasArgNamed(field *ast.Field, name string) bool {
@@ -430,6 +442,28 @@ func firstFromAST(field *ast.Field, fallback int) int {
 			continue
 		}
 		if arg.Name.Value != "first" {
+			continue
+		}
+		if intVal, ok := arg.Value.(*ast.IntValue); ok {
+			if intVal.Value != "" {
+				if parsed, err := parseInt(intVal.Value); err == nil {
+					return parsed
+				}
+			}
+		}
+	}
+	return fallback
+}
+
+func lastFromAST(field *ast.Field, fallback int) int {
+	if field == nil {
+		return fallback
+	}
+	for _, arg := range field.Arguments {
+		if arg == nil || arg.Name == nil || arg.Value == nil {
+			continue
+		}
+		if arg.Name.Value != "last" {
 			continue
 		}
 		if intVal, ok := arg.Value.(*ast.IntValue); ok {

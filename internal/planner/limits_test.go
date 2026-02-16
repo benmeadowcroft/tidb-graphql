@@ -82,6 +82,18 @@ func TestEstimateCostConnection_Nodes(t *testing.T) {
 	require.Equal(t, 3, cost.Complexity)
 }
 
+func TestEstimateCostConnection_Last(t *testing.T) {
+	// conn(last:2) { nodes { id } } should have same cost as first:2.
+	field := connectionFieldWithArg("conn", "last", "2",
+		nodesField(&ast.Field{Name: &ast.Name{Value: "id"}}),
+	)
+
+	cost := EstimateCost(field, nil, DefaultListLimit, nil)
+	require.Equal(t, 2, cost.Depth)
+	require.Equal(t, 4, cost.Rows)
+	require.Equal(t, 3, cost.Complexity)
+}
+
 func TestEstimateCostConnection_MetadataIgnored(t *testing.T) {
 	// conn(first:2) { pageInfo { hasNextPage } totalCount aggregate { count } edges { node { id } } }
 	// Metadata fields should not affect cost.
@@ -233,12 +245,16 @@ func TestEstimateCostConnection_FragmentSpread(t *testing.T) {
 
 // connectionField builds an ast.Field with a "first" argument and the given child selections.
 func connectionField(name, first string, children ...ast.Selection) *ast.Field {
+	return connectionFieldWithArg(name, "first", first, children...)
+}
+
+func connectionFieldWithArg(name, argName, argValue string, children ...ast.Selection) *ast.Field {
 	return &ast.Field{
 		Name: &ast.Name{Value: name},
 		Arguments: []*ast.Argument{
 			{
-				Name:  &ast.Name{Value: "first"},
-				Value: &ast.IntValue{Value: first},
+				Name:  &ast.Name{Value: argName},
+				Value: &ast.IntValue{Value: argValue},
 			},
 		},
 		SelectionSet: &ast.SelectionSet{

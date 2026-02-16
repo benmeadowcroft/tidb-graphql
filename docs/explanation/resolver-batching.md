@@ -44,17 +44,17 @@ flowchart LR
 | Relationship shape | Resolver function | Batch helper | Batched when | Planner SQL strategy | Fallback |
 | --- | --- | --- | --- | --- | --- |
 | Many-to-one (object) | `makeManyToOneResolver` | `tryBatchManyToOne` | Parent rows available in batch state | `PlanManyToOneBatch`: single `IN (...)` lookup on target table with parent alias projection | Per-parent `PlanQuery(...IsManyToOne)` |
-| One-to-many (connection) | `makeOneToManyConnectionResolver` | `tryBatchOneToManyConnection` | **First page only** (`after` absent) and parent rows available | `PlanOneToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanOneToManyConnection` (used for cursor pages) |
-| Many-to-many (connection) | `makeManyToManyConnectionResolver` | `tryBatchManyToManyConnection` | **First page only** (`after` absent) and parent rows available | `PlanManyToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanManyToManyConnection` (used for cursor pages) |
-| Edge-list (connection) | `makeEdgeListConnectionResolver` | `tryBatchEdgeListConnection` | **First page only** (`after` absent) and parent rows available | `PlanEdgeListConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanEdgeListConnection` (used for cursor pages) |
+| One-to-many (connection) | `makeOneToManyConnectionResolver` | `tryBatchOneToManyConnection` | **Forward first page only** (`after`, `before`, and `last` absent) and parent rows available | `PlanOneToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanOneToManyConnection` (used for cursor/backward pages) |
+| Many-to-many (connection) | `makeManyToManyConnectionResolver` | `tryBatchManyToManyConnection` | **Forward first page only** (`after`, `before`, and `last` absent) and parent rows available | `PlanManyToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanManyToManyConnection` (used for cursor/backward pages) |
+| Edge-list (connection) | `makeEdgeListConnectionResolver` | `tryBatchEdgeListConnection` | **Forward first page only** (`after`, `before`, and `last` absent) and parent rows available | `PlanEdgeListConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanEdgeListConnection` (used for cursor/backward pages) |
 
 ## Batch strategies by resolver category
 
 ### Connection relationships
 
 - `tryBatchManyToOne` uses a straightforward `IN (...)` plan because each parent expects a single related row.
-- First-page/no-cursor requests are batched by `tryBatchOneToManyConnection`, `tryBatchManyToManyConnection`, and `tryBatchEdgeListConnection`.
-- Cursor pages (`after` present) intentionally fall back to per-parent seek queries for correctness and manageable SQL complexity.
+- First-page forward requests are batched by `tryBatchOneToManyConnection`, `tryBatchManyToManyConnection`, and `tryBatchEdgeListConnection`.
+- Cursor pages (`after` or `before` present) and backward windows (`last`) intentionally fall back to per-parent seek queries for correctness and manageable SQL complexity.
 - Batched connection data plans fetch `first + 1` rows per parent to compute `hasNextPage`, then trim to `first`.
 - `totalCount` remains lazy and filter-aware. It is computed from per-parent count plans when clients request `totalCount`.
 
@@ -68,7 +68,7 @@ Common skip reasons:
 - missing parent scope key (`missing_parent_key`)
 - missing seeded parent rows (`missing_parent_rows`)
 - planner preconditions not met (for example, required primary key missing for a windowed batch plan)
-- connection cursor requests (`after` present) on connection resolvers
+- connection cursor requests (`after`/`before`) and backward requests (`last`) on connection resolvers
 
 Fallback changes round-trip count, not response correctness.
 
@@ -97,7 +97,7 @@ Metrics include `relation_type` labels (for example `one_to_many`, `many_to_one`
 
 ## Known limits and future work
 
-- Connection batching is intentionally first-page focused; cursor pages still execute per-parent seek plans.
+- Connection batching is intentionally forward first-page focused; cursor/backward pages still execute per-parent seek plans.
 - Connection `totalCount` remains lazy per parent.
 - There is still duplication across connection batch helpers. A future improvement is a shared connection batch engine with relationship-specific planner hooks.
 

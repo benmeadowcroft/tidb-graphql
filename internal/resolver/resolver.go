@@ -243,10 +243,15 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 		connectionType := r.buildConnectionType(table, tableType)
 		connArgs := graphql.FieldConfigArgument{
 			"first": &graphql.ArgumentConfig{
-				Type:         r.nonNegativeIntScalar(),
-				DefaultValue: r.defaultLimit,
+				Type: r.nonNegativeIntScalar(),
 			},
 			"after": &graphql.ArgumentConfig{
+				Type: graphql.String,
+			},
+			"last": &graphql.ArgumentConfig{
+				Type: r.nonNegativeIntScalar(),
+			},
+			"before": &graphql.ArgumentConfig{
 				Type: graphql.String,
 			},
 		}
@@ -448,10 +453,15 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				connType := r.buildConnectionType(relatedTable, relatedType)
 				connArgs := graphql.FieldConfigArgument{
 					"first": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: r.defaultLimit,
+						Type: r.nonNegativeIntScalar(),
 					},
 					"after": &graphql.ArgumentConfig{
+						Type: graphql.String,
+					},
+					"last": &graphql.ArgumentConfig{
+						Type: r.nonNegativeIntScalar(),
+					},
+					"before": &graphql.ArgumentConfig{
 						Type: graphql.String,
 					},
 				}
@@ -479,10 +489,15 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				connType := r.buildConnectionType(relatedTable, relatedType)
 				connArgs := graphql.FieldConfigArgument{
 					"first": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: r.defaultLimit,
+						Type: r.nonNegativeIntScalar(),
 					},
 					"after": &graphql.ArgumentConfig{
+						Type: graphql.String,
+					},
+					"last": &graphql.ArgumentConfig{
+						Type: r.nonNegativeIntScalar(),
+					},
+					"before": &graphql.ArgumentConfig{
 						Type: graphql.String,
 					},
 				}
@@ -510,10 +525,15 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				connType := r.buildConnectionType(junctionTable, edgeType)
 				connArgs := graphql.FieldConfigArgument{
 					"first": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: r.defaultLimit,
+						Type: r.nonNegativeIntScalar(),
 					},
 					"after": &graphql.ArgumentConfig{
+						Type: graphql.String,
+					},
+					"last": &graphql.ArgumentConfig{
+						Type: r.nonNegativeIntScalar(),
+					},
+					"before": &graphql.ArgumentConfig{
 						Type: graphql.String,
 					},
 				}
@@ -1587,6 +1607,59 @@ func encodeCursorFromRow(row map[string]interface{}, plan *planner.ConnectionPla
 	return cursor.EncodeCursor(typeName, plan.OrderByKey, plan.OrderBy.Direction, values...)
 }
 
+func shouldBatchForwardConnection(args map[string]interface{}) bool {
+	if hasConnectionCursorArg(args, "after") || hasConnectionCursorArg(args, "before") {
+		return false
+	}
+	if args == nil {
+		return true
+	}
+	if last, ok := args["last"]; ok && last != nil {
+		return false
+	}
+	return true
+}
+
+func hasConnectionCursorArg(args map[string]interface{}, key string) bool {
+	if args == nil {
+		return false
+	}
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return false
+	}
+	if str, ok := raw.(string); ok {
+		return str != ""
+	}
+	return true
+}
+
+func reverseConnectionRows(rows []map[string]interface{}) {
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+}
+
+func shapeConnectionRows(rows []map[string]interface{}, plan *planner.ConnectionPlan) ([]map[string]interface{}, bool, bool) {
+	if plan == nil {
+		return rows, false, false
+	}
+	if plan.Mode == planner.PaginationModeBackward {
+		hasPrevious := len(rows) > plan.First
+		if hasPrevious {
+			rows = rows[:plan.First]
+		}
+		reverseConnectionRows(rows)
+		return rows, plan.HasBefore, hasPrevious
+	}
+
+	hasNext := len(rows) > plan.First
+	if hasNext {
+		rows = rows[:plan.First]
+	}
+	return rows, hasNext, plan.HasAfter
+}
+
 // makeConnectionResolver creates a resolver for root connection queries.
 func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
@@ -1618,14 +1691,10 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 			return nil, err
 		}
 
-		hasNext := len(results) > plan.First
-		if hasNext {
-			// Plans read first+1 rows; trim to requested size after hasNextPage probe.
-			results = results[:plan.First]
-		}
+		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
 		seedBatchRows(p, results)
-		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+		return r.buildConnectionResult(p.Context, results, plan, hasNext, hasPrev), nil
 	}
 }
 
@@ -1640,11 +1709,11 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
 		pkValue := source[pkFieldName]
 		if pkValue == nil {
-			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+			return r.buildConnectionResult(p.Context, nil, nil, false, false), nil
 		}
 
-		// Only batch when no cursor is provided.
-		if afterRaw, ok := p.Args["after"]; !ok || afterRaw == nil || afterRaw == "" {
+		// Batch only for forward first-page connection requests.
+		if shouldBatchForwardConnection(p.Args) {
 			if result, ok, err := r.tryBatchOneToManyConnection(p, parentTable, rel, pkValue); ok || err != nil {
 				return result, err
 			}
@@ -1683,14 +1752,10 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			return nil, err
 		}
 
-		hasNext := len(results) > plan.First
-		if hasNext {
-			// Plans read first+1 rows; trim to requested size after hasNextPage probe.
-			results = results[:plan.First]
-		}
+		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
 		seedBatchRows(p, results)
-		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+		return r.buildConnectionResult(p.Context, results, plan, hasNext, hasPrev), nil
 	}
 }
 
@@ -1705,11 +1770,11 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
 		pkValue := source[pkFieldName]
 		if pkValue == nil {
-			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+			return r.buildConnectionResult(p.Context, nil, nil, false, false), nil
 		}
 
-		// Only batch when no cursor is provided.
-		if afterRaw, ok := p.Args["after"]; !ok || afterRaw == nil || afterRaw == "" {
+		// Batch only for forward first-page connection requests.
+		if shouldBatchForwardConnection(p.Args) {
 			if result, ok, err := r.tryBatchManyToManyConnection(p, parentTable, rel, pkValue); ok || err != nil {
 				return result, err
 			}
@@ -1758,13 +1823,10 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			return nil, err
 		}
 
-		hasNext := len(results) > plan.First
-		if hasNext {
-			results = results[:plan.First]
-		}
+		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
 		seedBatchRows(p, results)
-		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+		return r.buildConnectionResult(p.Context, results, plan, hasNext, hasPrev), nil
 	}
 }
 
@@ -1779,11 +1841,11 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
 		pkValue := source[pkFieldName]
 		if pkValue == nil {
-			return r.buildConnectionResult(p.Context, nil, nil, false), nil
+			return r.buildConnectionResult(p.Context, nil, nil, false, false), nil
 		}
 
-		// Only batch when no cursor is provided.
-		if afterRaw, ok := p.Args["after"]; !ok || afterRaw == nil || afterRaw == "" {
+		// Batch only for forward first-page connection requests.
+		if shouldBatchForwardConnection(p.Args) {
 			if result, ok, err := r.tryBatchEdgeListConnection(p, parentTable, rel, pkValue); ok || err != nil {
 				return result, err
 			}
@@ -1829,17 +1891,14 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 			return nil, err
 		}
 
-		hasNext := len(results) > plan.First
-		if hasNext {
-			results = results[:plan.First]
-		}
+		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
-		return r.buildConnectionResult(p.Context, results, plan, hasNext), nil
+		return r.buildConnectionResult(p.Context, results, plan, hasNext, hasPrev), nil
 	}
 }
 
 // buildConnectionResult constructs the map that connection field resolvers read from.
-func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]interface{}, plan *planner.ConnectionPlan, hasNext bool) map[string]interface{} {
+func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]interface{}, plan *planner.ConnectionPlan, hasNext bool, hasPrev bool) map[string]interface{} {
 	if rows == nil {
 		rows = []map[string]interface{}{}
 	}
@@ -1855,12 +1914,10 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 		rows:          rows,
 		plan:          plan,
 		hasNext:       hasNext,
+		hasPrev:       hasPrev,
 		executor:      r.executor,
 		countCtx:      countCtx,
 		aggregateVals: make(map[string]map[string]interface{}),
-	}
-	if plan != nil {
-		result.hasPrev = plan.HasCursor
 	}
 
 	// Build edges
@@ -1881,11 +1938,6 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 	if len(edges) > 0 {
 		startCursor = edges[0]["cursor"]
 		endCursor = edges[len(edges)-1]["cursor"]
-	}
-
-	hasPrev := false
-	if plan != nil {
-		hasPrev = plan.HasCursor
 	}
 
 	connMap := map[string]interface{}{
@@ -2454,7 +2506,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 			}
 			return result, true, nil
 		}
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	state.IncrementCacheMiss()
 	if metrics != nil {
@@ -2465,7 +2517,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	parentValues := uniqueParentValues(parentRows, parentField)
 	if len(parentValues) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	// Keep original typed parent values so count queries can bind FK args correctly.
 	parentValueByKey := make(map[string]interface{}, len(parentValues))
@@ -2555,16 +2607,19 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 				OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
+				Mode:          planner.PaginationModeForward,
 				HasCursor:     false,
+				HasAfter:      false,
+				HasBefore:     false,
 			}
 
-			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext)
+			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext, false)
 		}
 	}
 
 	if len(groupedConnections) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	state.setConnectionRows(relKey, groupedConnections)
 
@@ -2574,7 +2629,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		}
 		return result, true, nil
 	}
-	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 }
 
 func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
@@ -2683,7 +2738,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 			}
 			return result, true, nil
 		}
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	state.IncrementCacheMiss()
 	if metrics != nil {
@@ -2694,7 +2749,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	parentValues := uniqueParentValues(parentRows, parentField)
 	if len(parentValues) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	parentValueByKey := make(map[string]interface{}, len(parentValues))
 	for _, value := range parentValues {
@@ -2791,16 +2846,19 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 				OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
+				Mode:          planner.PaginationModeForward,
 				HasCursor:     false,
+				HasAfter:      false,
+				HasBefore:     false,
 			}
 
-			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext)
+			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext, false)
 		}
 	}
 
 	if len(groupedConnections) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	state.setConnectionRows(relKey, groupedConnections)
 
@@ -2810,7 +2868,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		}
 		return result, true, nil
 	}
-	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 }
 
 func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
@@ -2918,7 +2976,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 			}
 			return result, true, nil
 		}
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	state.IncrementCacheMiss()
 	if metrics != nil {
@@ -2929,7 +2987,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	parentValues := uniqueParentValues(parentRows, parentField)
 	if len(parentValues) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	parentValueByKey := make(map[string]interface{}, len(parentValues))
 	for _, value := range parentValues {
@@ -3017,16 +3075,19 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 				OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
+				Mode:          planner.PaginationModeForward,
 				HasCursor:     false,
+				HasAfter:      false,
+				HasBefore:     false,
 			}
 
-			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext)
+			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext, false)
 		}
 	}
 
 	if len(groupedConnections) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
-		return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
 	state.setConnectionRows(relKey, groupedConnections)
 
@@ -3036,7 +3097,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		}
 		return result, true, nil
 	}
-	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
+	return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 }
 
 func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, fkValue interface{}) (map[string]interface{}, bool, error) {

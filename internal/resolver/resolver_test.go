@@ -174,6 +174,133 @@ func TestConnectionResolver_Empty(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestConnectionResolver_BackwardLastWithoutBefore(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "users"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "id"}},
+				}},
+			},
+		}},
+	}
+	args := map[string]interface{}{"last": 2}
+	plan, err := planner.PlanConnection(dbSchema, users, field, args)
+	require.NoError(t, err)
+
+	// Backward plans query in reverse order and are re-ordered before response.
+	rows := sqlmock.NewRows([]string{"id"}).
+		AddRow(4).
+		AddRow(3).
+		AddRow(2)
+	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+
+	resolverFn := r.makeConnectionResolver(users)
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    args,
+		Context: context.Background(),
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	conn, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	records, ok := conn["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, records, 2)
+	assert.EqualValues(t, 3, records[0]["databaseId"])
+	assert.EqualValues(t, 4, records[1]["databaseId"])
+
+	pageInfo, ok := conn["pageInfo"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, false, pageInfo["hasNextPage"])
+	assert.Equal(t, true, pageInfo["hasPreviousPage"])
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestConnectionResolver_BackwardBeforeSetsHasNextLightweight(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "users"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "id"}},
+				}},
+			},
+		}},
+	}
+	before := cursor.EncodeCursor("Users", "databaseId", "ASC", 4)
+	args := map[string]interface{}{
+		"last":   1,
+		"before": before,
+	}
+	plan, err := planner.PlanConnection(dbSchema, users, field, args)
+	require.NoError(t, err)
+
+	rows := sqlmock.NewRows([]string{"id"}).
+		AddRow(3).
+		AddRow(2)
+	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+
+	resolverFn := r.makeConnectionResolver(users)
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    args,
+		Context: context.Background(),
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	conn, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	records, ok := conn["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, records, 1)
+	assert.EqualValues(t, 3, records[0]["databaseId"])
+
+	pageInfo, ok := conn["pageInfo"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, pageInfo["hasNextPage"])
+	assert.Equal(t, true, pageInfo["hasPreviousPage"])
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestPKResolver(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
@@ -391,6 +518,10 @@ func TestRelationshipConnectionFields_Wiring(t *testing.T) {
 
 	tagsConn, ok := fields["tags"]
 	require.True(t, ok, "expected tags field")
+	require.True(t, hasArg(tagsConn, "first"), "expected tags first arg")
+	require.True(t, hasArg(tagsConn, "after"), "expected tags after arg")
+	require.True(t, hasArg(tagsConn, "last"), "expected tags last arg")
+	require.True(t, hasArg(tagsConn, "before"), "expected tags before arg")
 	require.True(t, hasArg(tagsConn, "where"), "expected tags where arg")
 
 	_, hasLegacyTagsConnection := fields["tagsConnection"]
@@ -398,6 +529,10 @@ func TestRelationshipConnectionFields_Wiring(t *testing.T) {
 
 	userTagsConn, ok := fields["userTags"]
 	require.True(t, ok, "expected userTags field")
+	require.True(t, hasArg(userTagsConn, "first"), "expected userTags first arg")
+	require.True(t, hasArg(userTagsConn, "after"), "expected userTags after arg")
+	require.True(t, hasArg(userTagsConn, "last"), "expected userTags last arg")
+	require.True(t, hasArg(userTagsConn, "before"), "expected userTags before arg")
 	require.True(t, hasArg(userTagsConn, "where"), "expected userTags where arg")
 
 	_, hasLegacyUserTagsConnection := fields["userTagsConnection"]
@@ -405,6 +540,10 @@ func TestRelationshipConnectionFields_Wiring(t *testing.T) {
 
 	postsConn, ok := fields["posts"]
 	require.True(t, ok, "expected posts field")
+	require.True(t, hasArg(postsConn, "first"), "expected posts first arg")
+	require.True(t, hasArg(postsConn, "after"), "expected posts after arg")
+	require.True(t, hasArg(postsConn, "last"), "expected posts last arg")
+	require.True(t, hasArg(postsConn, "before"), "expected posts before arg")
 	require.True(t, hasArg(postsConn, "where"), "expected posts where arg")
 
 	_, hasLegacyPostsConnection := fields["postsConnection"]
@@ -1325,6 +1464,10 @@ func TestCollectionFieldTypesAreNonNullConnections(t *testing.T) {
 
 	rootCollectionField := schema.QueryType().Fields()["users"]
 	require.NotNil(t, rootCollectionField)
+	require.True(t, hasArg(rootCollectionField, "first"), "expected users first arg")
+	require.True(t, hasArg(rootCollectionField, "after"), "expected users after arg")
+	require.True(t, hasArg(rootCollectionField, "last"), "expected users last arg")
+	require.True(t, hasArg(rootCollectionField, "before"), "expected users before arg")
 	_, ok := rootCollectionField.Type.(*graphql.NonNull)
 	require.True(t, ok, "expected non-null users root field")
 	_, ok = unwrapObjectType(t, rootCollectionField.Type).Fields()["nodes"]
@@ -1332,6 +1475,12 @@ func TestCollectionFieldTypesAreNonNullConnections(t *testing.T) {
 
 	userType := r.buildGraphQLType(users)
 	fields := userType.Fields()
+	require.True(t, hasArg(fields["posts"], "last"), "expected posts relationship last arg")
+	require.True(t, hasArg(fields["posts"], "before"), "expected posts relationship before arg")
+	require.True(t, hasArg(fields["roles"], "last"), "expected roles relationship last arg")
+	require.True(t, hasArg(fields["roles"], "before"), "expected roles relationship before arg")
+	require.True(t, hasArg(fields["userRoles"], "last"), "expected userRoles relationship last arg")
+	require.True(t, hasArg(fields["userRoles"], "before"), "expected userRoles relationship before arg")
 	_, ok = fields["posts"].Type.(*graphql.NonNull)
 	require.True(t, ok, "expected posts to be non-null")
 	_, ok = unwrapObjectType(t, fields["posts"].Type).Fields()["nodes"]
@@ -1752,6 +1901,85 @@ func TestOneToManyConnectionResolver_WithAfterSkipsBatching(t *testing.T) {
 	args := map[string]interface{}{
 		"first": 1,
 		"after": after,
+	}
+	plan, err := planner.PlanOneToManyConnection(posts, rel.RemoteColumn, 1, field, args)
+	require.NoError(t, err)
+	rows := sqlmock.NewRows([]string{"id"}).AddRow(101)
+	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+
+	resolverFn := r.makeOneToManyConnectionResolver(users, rel)
+	result, err := resolverFn(graphql.ResolveParams{
+		Source:  source,
+		Args:    args,
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+	conn, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	nodes, ok := conn["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, nodes, 1)
+	assert.EqualValues(t, 101, nodes[0]["databaseId"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestOneToManyConnectionResolver_WithLastSkipsBatching(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	ctx := NewBatchingContext(context.Background())
+	state, ok := GetBatchState(ctx)
+	require.True(t, ok)
+	parentKey := "users|list|"
+	source := map[string]interface{}{"databaseId": 1, batchParentKeyField: parentKey}
+	state.setParentRows(parentKey, []map[string]interface{}{source})
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		LocalColumn:      "id",
+		RemoteTable:      "posts",
+		RemoteColumn:     "user_id",
+		GraphQLFieldName: "posts",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "posts"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+				}},
+			},
+		}},
+	}
+
+	args := map[string]interface{}{
+		"last": 1,
 	}
 	plan, err := planner.PlanOneToManyConnection(posts, rel.RemoteColumn, 1, field, args)
 	require.NoError(t, err)

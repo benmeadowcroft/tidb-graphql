@@ -65,14 +65,14 @@ func TestRoleAuthorization(t *testing.T) {
 
 		resp := executeGraphQL(t, server.URL, token, `
 			{
-				auditLogs { id }
+				auditLogs { nodes { id } }
 			}
 		`)
 		requireAccessDenied(t, resp)
 
 		resp = executeGraphQL(t, server.URL, token, `
 			{
-				userAnalytics { id }
+				userAnalytics { nodes { id } }
 			}
 		`)
 		requireAccessDenied(t, resp)
@@ -83,7 +83,7 @@ func TestRoleAuthorization(t *testing.T) {
 
 		resp := executeGraphQL(t, server.URL, token, `
 			{
-				userAnalytics { id }
+				userAnalytics { nodes { id } }
 			}
 		`)
 		requireNoGraphQLErrors(t, resp)
@@ -91,7 +91,7 @@ func TestRoleAuthorization(t *testing.T) {
 
 		resp = executeGraphQL(t, server.URL, token, `
 			{
-				auditLogs { id }
+				auditLogs { nodes { id } }
 			}
 		`)
 		requireAccessDenied(t, resp)
@@ -102,7 +102,7 @@ func TestRoleAuthorization(t *testing.T) {
 
 		resp := executeGraphQL(t, server.URL, token, `
 			{
-				auditLogs { id }
+				auditLogs { nodes { id } }
 			}
 		`)
 		requireNoGraphQLErrors(t, resp)
@@ -121,31 +121,31 @@ func TestRoleAuthorization(t *testing.T) {
 		cases := []testCase{
 			{
 				role:      roles.viewer,
-				query:     `{ auditLogs { id } }`,
+				query:     `{ auditLogs { nodes { id } } }`,
 				expectErr: true,
 			},
 			{
 				role:      roles.analyst,
-				query:     `{ userAnalytics { id } }`,
+				query:     `{ userAnalytics { nodes { id } } }`,
 				expectErr: false,
 				field:     "userAnalytics",
 				length:    2,
 			},
 			{
 				role:      roles.admin,
-				query:     `{ auditLogs { id } }`,
+				query:     `{ auditLogs { nodes { id } } }`,
 				expectErr: false,
 				field:     "auditLogs",
 				length:    2,
 			},
 			{
 				role:      roles.viewer,
-				query:     `{ userAnalytics { id } }`,
+				query:     `{ userAnalytics { nodes { id } } }`,
 				expectErr: true,
 			},
 			{
 				role:      roles.admin,
-				query:     `{ userAnalytics { id } }`,
+				query:     `{ userAnalytics { nodes { id } } }`,
 				expectErr: false,
 				field:     "userAnalytics",
 				length:    2,
@@ -192,14 +192,14 @@ func TestRoleAuthorization(t *testing.T) {
 		adminToken := mintTokenWithRole(t, privateKey, jwksServer.URL, "tidb-graphql", "test-key", time.Now().Add(time.Hour), roles.admin)
 		viewerToken := mintTokenWithRole(t, privateKey, jwksServer.URL, "tidb-graphql", "test-key", time.Now().Add(time.Hour), roles.viewer)
 
-		resp := executeGraphQL(t, server.URL, adminToken, `{ auditLogs { id } }`)
+		resp := executeGraphQL(t, server.URL, adminToken, `{ auditLogs { nodes { id } } }`)
 		requireNoGraphQLErrors(t, resp)
 		requireDataListLen(t, resp, "auditLogs", 2)
 
-		resp = executeGraphQL(t, server.URL, viewerToken, `{ auditLogs { id } }`)
+		resp = executeGraphQL(t, server.URL, viewerToken, `{ auditLogs { nodes { id } } }`)
 		requireAccessDenied(t, resp)
 
-		resp = executeGraphQL(t, server.URL, adminToken, `{ auditLogs { id } }`)
+		resp = executeGraphQL(t, server.URL, adminToken, `{ auditLogs { nodes { id } } }`)
 		requireNoGraphQLErrors(t, resp)
 		requireDataListLen(t, resp, "auditLogs", 2)
 	})
@@ -414,7 +414,15 @@ func assertDataListLen(resp graphQLResponse, field string, expected int) error {
 	}
 	list, ok := raw.([]interface{})
 	if !ok {
-		return fmt.Errorf("unexpected data type for field %s", field)
+		conn, ok := raw.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected data type for field %s", field)
+		}
+		nodes, ok := conn["nodes"].([]interface{})
+		if !ok {
+			return fmt.Errorf("missing nodes list for field %s", field)
+		}
+		list = nodes
 	}
 	if len(list) != expected {
 		return fmt.Errorf("expected %d items for %s, got %d", expected, field, len(list))

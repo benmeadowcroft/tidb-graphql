@@ -28,15 +28,17 @@ func TestSetFiltering_Has(t *testing.T) {
 	query := `
 		{
 			products(where: { tags: { has: FEATURED } }, orderBy: { databaseId: ASC }) {
-				name
-				tags
+				nodes {
+					name
+					tags
+				}
 			}
 		}
 	`
 	result := graphql.Do(graphql.Params{Schema: schema, RequestString: query, Context: context.Background()})
 	require.Empty(t, result.Errors)
 
-	products := result.Data.(map[string]interface{})["products"].([]interface{})
+	products := requireCollectionNodes(t, result.Data.(map[string]interface{}), "products")
 	require.Len(t, products, 2)
 	names := []string{
 		products[0].(map[string]interface{})["name"].(string),
@@ -60,38 +62,44 @@ func TestSetFiltering_HasAnyAllNoneOf(t *testing.T) {
 	queryAny := `
 		{
 			products(where: { tags: { hasAnyOf: [FEATURED, LIMITED] } }, orderBy: { databaseId: ASC }) {
-				name
+				nodes {
+					name
+				}
 			}
 		}
 	`
 	resultAny := graphql.Do(graphql.Params{Schema: schema, RequestString: queryAny, Context: context.Background()})
 	require.Empty(t, resultAny.Errors)
-	productsAny := resultAny.Data.(map[string]interface{})["products"].([]interface{})
+	productsAny := requireCollectionNodes(t, resultAny.Data.(map[string]interface{}), "products")
 	require.Len(t, productsAny, 3)
 
 	queryAll := `
 		{
 			products(where: { tags: { hasAllOf: [FEATURED, SEASONAL] } }) {
-				name
+				nodes {
+					name
+				}
 			}
 		}
 	`
 	resultAll := graphql.Do(graphql.Params{Schema: schema, RequestString: queryAll, Context: context.Background()})
 	require.Empty(t, resultAll.Errors)
-	productsAll := resultAll.Data.(map[string]interface{})["products"].([]interface{})
+	productsAll := requireCollectionNodes(t, resultAll.Data.(map[string]interface{}), "products")
 	require.Len(t, productsAll, 1)
 	assert.Equal(t, "Black Widget", productsAll[0].(map[string]interface{})["name"])
 
 	queryNone := `
 		{
 			products(where: { tags: { hasNoneOf: [FEATURED, CLEARANCE] } }, orderBy: { databaseId: ASC }) {
-				name
+				nodes {
+					name
+				}
 			}
 		}
 	`
 	resultNone := graphql.Do(graphql.Params{Schema: schema, RequestString: queryNone, Context: context.Background()})
 	require.Empty(t, resultNone.Errors)
-	productsNone := resultNone.Data.(map[string]interface{})["products"].([]interface{})
+	productsNone := requireCollectionNodes(t, resultNone.Data.(map[string]interface{}), "products")
 	require.Len(t, productsNone, 2)
 	names := []string{
 		productsNone[0].(map[string]interface{})["name"].(string),
@@ -115,27 +123,31 @@ func TestSetFiltering_ExactEqAndNe(t *testing.T) {
 	queryEq := `
 		{
 			products(where: { tags: { eq: [NEW, FEATURED] } }) {
-				name
-				tags
+				nodes {
+					name
+					tags
+				}
 			}
 		}
 	`
 	resultEq := graphql.Do(graphql.Params{Schema: schema, RequestString: queryEq, Context: context.Background()})
 	require.Empty(t, resultEq.Errors)
-	productsEq := resultEq.Data.(map[string]interface{})["products"].([]interface{})
+	productsEq := requireCollectionNodes(t, resultEq.Data.(map[string]interface{}), "products")
 	require.Len(t, productsEq, 1)
 	assert.Equal(t, "Blue Widget", productsEq[0].(map[string]interface{})["name"])
 
 	queryNe := `
 		{
 			products(where: { tags: { ne: [FEATURED, NEW] } }, orderBy: { databaseId: ASC }) {
-				name
+				nodes {
+					name
+				}
 			}
 		}
 	`
 	resultNe := graphql.Do(graphql.Params{Schema: schema, RequestString: queryNe, Context: context.Background()})
 	require.Empty(t, resultNe.Errors)
-	productsNe := resultNe.Data.(map[string]interface{})["products"].([]interface{})
+	productsNe := requireCollectionNodes(t, resultNe.Data.(map[string]interface{}), "products")
 	require.Len(t, productsNe, 4)
 }
 
@@ -165,13 +177,15 @@ func TestSetFiltering_EmptyListSemantics(t *testing.T) {
 			query := `
 				{
 					products(where: { tags: ` + tc.filter + ` }) {
-						name
+						nodes {
+							name
+						}
 					}
 				}
 			`
 			result := graphql.Do(graphql.Params{Schema: schema, RequestString: query, Context: context.Background()})
 			require.Empty(t, result.Errors)
-			products := result.Data.(map[string]interface{})["products"].([]interface{})
+			products := requireCollectionNodes(t, result.Data.(map[string]interface{}), "products")
 			assert.Len(t, products, tc.expected)
 		})
 	}
@@ -218,14 +232,16 @@ func TestSetFiltering_MutationUpdateAndDelete(t *testing.T) {
 
 	lookup := `
 		{
-			products(where: { name: { eq: "Green Widget" } }, limit: 1) {
-				id
+			products(where: { name: { eq: "Green Widget" } }, first: 1) {
+				nodes {
+					id
+				}
 			}
 		}
 	`
 	lookupResult := graphql.Do(graphql.Params{Schema: schema, RequestString: lookup, Context: context.Background()})
 	require.Empty(t, lookupResult.Errors)
-	products := lookupResult.Data.(map[string]interface{})["products"].([]interface{})
+	products := requireCollectionNodes(t, lookupResult.Data.(map[string]interface{}), "products")
 	require.Len(t, products, 1)
 	productID := products[0].(map[string]interface{})["id"].(string)
 

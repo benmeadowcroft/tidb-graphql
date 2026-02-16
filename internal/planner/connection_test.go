@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"tidb-graphql/internal/cursor"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/sqlutil"
 
@@ -120,6 +121,52 @@ func TestParseFirst_Negative(t *testing.T) {
 	_, err := ParseFirst(args)
 	if err == nil {
 		t.Fatal("expected error for negative first")
+	}
+}
+
+func TestParseConnectionWindow_DefaultForward(t *testing.T) {
+	window, err := parseConnectionWindowWithDefault(nil, 15)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if window.mode != PaginationModeForward {
+		t.Fatalf("expected forward mode, got %q", window.mode)
+	}
+	if window.limit != 15 {
+		t.Fatalf("expected limit 15, got %d", window.limit)
+	}
+	if window.hasAfter || window.hasBefore {
+		t.Fatalf("expected no cursor args, got after=%v before=%v", window.hasAfter, window.hasBefore)
+	}
+}
+
+func TestParseConnectionWindow_LastWithoutBefore(t *testing.T) {
+	window, err := parseConnectionWindowWithDefault(map[string]interface{}{"last": 7}, 25)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if window.mode != PaginationModeBackward {
+		t.Fatalf("expected backward mode, got %q", window.mode)
+	}
+	if window.limit != 7 {
+		t.Fatalf("expected limit 7, got %d", window.limit)
+	}
+	if window.hasBefore {
+		t.Fatal("expected hasBefore=false")
+	}
+}
+
+func TestParseConnectionWindow_InvalidCombinations(t *testing.T) {
+	cases := []map[string]interface{}{
+		{"first": 1, "last": 1},
+		{"after": "a", "before": "b"},
+		{"before": "b"},
+		{"last": 1, "after": "a"},
+	}
+	for _, args := range cases {
+		if _, err := parseConnectionWindowWithDefault(args, 25); err == nil {
+			t.Fatalf("expected error for args=%v", args)
+		}
 	}
 }
 
@@ -244,6 +291,86 @@ func TestPlanConnection_Basic(t *testing.T) {
 	}
 	if !strings.Contains(plan.AggregateBase.SQL, "FROM `users`") {
 		t.Errorf("expected users table in aggregate base SQL, got: %s", plan.AggregateBase.SQL)
+	}
+}
+
+func TestPlanConnection_BackwardLast(t *testing.T) {
+	table := testTable()
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{table},
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "users"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	plan, err := PlanConnection(schema, table, field, map[string]interface{}{"last": 2})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.Mode != PaginationModeBackward {
+		t.Fatalf("expected backward mode, got %q", plan.Mode)
+	}
+	if plan.First != 2 {
+		t.Fatalf("expected page size 2, got %d", plan.First)
+	}
+	if plan.OrderBy.Direction != "ASC" {
+		t.Fatalf("expected canonical order ASC, got %s", plan.OrderBy.Direction)
+	}
+	if !strings.Contains(plan.Root.SQL, "ORDER BY `id` DESC") {
+		t.Fatalf("expected DESC traversal SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Root.SQL, "LIMIT 3") {
+		t.Fatalf("expected LIMIT 3 in SQL, got: %s", plan.Root.SQL)
+	}
+}
+
+func TestPlanConnection_BeforeCursorBackwardSeek(t *testing.T) {
+	table := testTable()
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{table},
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "users"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	before := cursor.EncodeCursor("User", "databaseId", "ASC", 5)
+	plan, err := PlanConnection(schema, table, field, map[string]interface{}{
+		"last":   1,
+		"before": before,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !plan.HasBefore || plan.HasAfter {
+		t.Fatalf("expected HasBefore=true and HasAfter=false, got before=%v after=%v", plan.HasBefore, plan.HasAfter)
+	}
+	if !strings.Contains(plan.Root.SQL, "<") {
+		t.Fatalf("expected before seek predicate in SQL, got: %s", plan.Root.SQL)
+	}
+	if !strings.Contains(plan.Root.SQL, "ORDER BY `id` DESC") {
+		t.Fatalf("expected DESC traversal SQL, got: %s", plan.Root.SQL)
 	}
 }
 

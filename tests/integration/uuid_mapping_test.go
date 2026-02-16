@@ -31,9 +31,11 @@ func TestUUIDMapping_QueryAndFilter(t *testing.T) {
 	query := `
 		{
 			uuidRecords(where: { uuidBin: { eq: "550E8400-E29B-41D4-A716-446655440000" } }) {
-				label
-				uuidBin
-				uuidText
+				nodes {
+					label
+					uuidBin
+					uuidText
+				}
 			}
 		}
 	`
@@ -41,7 +43,7 @@ func TestUUIDMapping_QueryAndFilter(t *testing.T) {
 	result := graphql.Do(graphql.Params{Schema: schema, RequestString: query, Context: context.Background()})
 	require.Empty(t, result.Errors)
 
-	rows := result.Data.(map[string]interface{})["uuidRecords"].([]interface{})
+	rows := requireCollectionNodes(t, result.Data.(map[string]interface{}), "uuidRecords")
 	require.Len(t, rows, 1)
 	row := rows[0].(map[string]interface{})
 	assert.Equal(t, "alpha", row["label"])
@@ -96,8 +98,10 @@ func TestUUIDMapping_InvalidStoredValueReturnsError(t *testing.T) {
 	query := `
 		{
 			uuidRecords(orderBy: { databaseId: ASC }) {
-				label
-				uuidText
+				nodes {
+					label
+					uuidText
+				}
 			}
 		}
 	`
@@ -106,7 +110,7 @@ func TestUUIDMapping_InvalidStoredValueReturnsError(t *testing.T) {
 	require.NotEmpty(t, result.Errors)
 	require.NotNil(t, result.Data)
 
-	rows := result.Data.(map[string]interface{})["uuidRecords"].([]interface{})
+	rows := requireCollectionNodes(t, result.Data.(map[string]interface{}), "uuidRecords")
 	require.Len(t, rows, 3)
 	assert.Equal(t, "alpha", rows[0].(map[string]interface{})["label"])
 	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", rows[0].(map[string]interface{})["uuidText"])
@@ -129,7 +133,9 @@ func TestUUIDMapping_InvalidFilterValueRejected(t *testing.T) {
 	query := `
 		{
 			uuidRecords(where: { uuidBin: { eq: "not-a-uuid" } }) {
-				label
+				nodes {
+					label
+				}
 			}
 		}
 	`

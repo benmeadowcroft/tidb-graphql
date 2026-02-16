@@ -95,9 +95,11 @@ func TestGenCol_VirtualQuery(t *testing.T) {
 	// Query virtual generated column (city extracted from JSON)
 	query := `
 		{
-			people(limit: 10) {
-				name
-				city
+			people(first: 10) {
+				nodes {
+					name
+					city
+				}
 			}
 		}
 	`
@@ -110,7 +112,7 @@ func TestGenCol_VirtualQuery(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	people := data["people"].([]interface{})
+	people := requireCollectionNodes(t, data, "people")
 	require.Len(t, people, 4, "Should have 4 people")
 
 	// Verify city values are extracted from JSON
@@ -141,9 +143,11 @@ func TestGenCol_StoredQuery(t *testing.T) {
 	// Query stored generated column (country extracted from JSON)
 	query := `
 		{
-			people(limit: 10) {
-				name
-				country
+			people(first: 10) {
+				nodes {
+					name
+					country
+				}
 			}
 		}
 	`
@@ -156,7 +160,7 @@ func TestGenCol_StoredQuery(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	people := data["people"].([]interface{})
+	people := requireCollectionNodes(t, data, "people")
 	require.Len(t, people, 4, "Should have 4 people")
 
 	// Verify country values are extracted from JSON
@@ -186,9 +190,11 @@ func TestGenCol_FilterVirtual(t *testing.T) {
 	// Filter on virtual generated column with index
 	query := `
 		{
-			people(where: { city: { eq: "New York" } }, limit: 10) {
-				name
-				city
+			people(where: { city: { eq: "New York" } }, first: 10) {
+				nodes {
+					name
+					city
+				}
 			}
 		}
 	`
@@ -201,7 +207,7 @@ func TestGenCol_FilterVirtual(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	people := data["people"].([]interface{})
+	people := requireCollectionNodes(t, data, "people")
 	require.Len(t, people, 1, "Should find exactly 1 person in New York")
 
 	person := people[0].(map[string]interface{})
@@ -227,11 +233,13 @@ func TestGenCol_FilterStored(t *testing.T) {
 	// Gadget D: 5.00 * 500 = 2500.00
 	query := `
 		{
-			productsComputeds(where: { totalValue: { gt: 1000 } }, limit: 10) {
-				name
-				price
-				quantity
-				totalValue
+			productsComputeds(where: { totalValue: { gt: 1000 } }, first: 10) {
+				nodes {
+					name
+					price
+					quantity
+					totalValue
+				}
 			}
 		}
 	`
@@ -244,7 +252,7 @@ func TestGenCol_FilterStored(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["productsComputeds"].([]interface{})
+	products := requireCollectionNodes(t, data, "productsComputeds")
 	require.Len(t, products, 2, "Should find 2 products with total_value > 1000")
 
 	// Verify the products are Widget B and Gadget D
@@ -309,11 +317,13 @@ func TestGenCol_ComputedNumeric(t *testing.T) {
 	// Query computed numeric column and verify calculation
 	query := `
 		{
-			productsComputeds(limit: 10) {
-				name
-				price
-				quantity
-				totalValue
+			productsComputeds(first: 10) {
+				nodes {
+					name
+					price
+					quantity
+					totalValue
+				}
 			}
 		}
 	`
@@ -326,7 +336,7 @@ func TestGenCol_ComputedNumeric(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["productsComputeds"].([]interface{})
+	products := requireCollectionNodes(t, data, "productsComputeds")
 	require.Len(t, products, 4, "Should have 4 products")
 
 	// Verify computed values
@@ -357,11 +367,13 @@ func TestGenCol_WithJSON(t *testing.T) {
 	// Query both JSON column and generated columns in same request
 	query := `
 		{
-			people(where: { name: { eq: "Alice" } }, limit: 1) {
-				name
-				addressInfo
-				city
-				country
+			people(where: { name: { eq: "Alice" } }, first: 1) {
+				nodes {
+					name
+					addressInfo
+					city
+					country
+				}
 			}
 		}
 	`
@@ -374,7 +386,7 @@ func TestGenCol_WithJSON(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	people := data["people"].([]interface{})
+	people := requireCollectionNodes(t, data, "people")
 	require.Len(t, people, 1, "Should find exactly 1 person")
 
 	person := people[0].(map[string]interface{})

@@ -23,6 +23,7 @@ const (
 type ConnectionPlan struct {
 	Root          SQLQuery // main data query (first+1 rows)
 	Count         SQLQuery // totalCount query (filter only, no cursor)
+	AggregateBase SQLQuery // base dataset query used for aggregate fields
 	Table         introspection.Table
 	Columns       []introspection.Column // selected + orderBy + PK columns
 	OrderBy       *OrderBy
@@ -179,10 +180,15 @@ func PlanConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := buildRootAggregateBaseSQL(table, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          rootSQL,
 		Count:         countSQL,
+		AggregateBase: aggregateBase,
 		Table:         table,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
@@ -240,10 +246,15 @@ func PlanOneToManyConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := BuildOneToManyAggregateBaseSQL(table, remoteColumn, fkValue, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
+		AggregateBase: aggregateBase,
 		Table:         table,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
@@ -314,10 +325,15 @@ func PlanManyToManyConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := BuildManyToManyAggregateBaseSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
+		AggregateBase: aggregateBase,
 		Table:         targetTable,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
@@ -372,10 +388,15 @@ func PlanEdgeListConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
+		AggregateBase: aggregateBase,
 		Table:         junctionTable,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
@@ -393,23 +414,40 @@ func BuildOneToManyCountSQL(
 	fkValue interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
-	builder := sq.Select("COUNT(*)").
-		From(sqlutil.QuoteIdentifier(table.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue})
-
-	if whereClause != nil && whereClause.Condition != nil {
-		builder = builder.Where(whereClause.Condition)
-	}
-
-	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
+	base, err := BuildOneToManyAggregateBaseSQL(table, remoteColumn, fkValue, whereClause)
 	if err != nil {
 		return SQLQuery{}, err
 	}
-	return SQLQuery{SQL: query, Args: args}, nil
+	return buildCountFromBaseSQL(base), nil
 }
 
 // BuildManyToManyCountSQL builds the count query for a many-to-many connection.
 func BuildManyToManyCountSQL(
+	targetTable introspection.Table,
+	junctionTable string,
+	junctionLocalFK string,
+	junctionRemoteFK string,
+	targetPK string,
+	fkValue interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	base, err := BuildManyToManyAggregateBaseSQL(
+		targetTable,
+		junctionTable,
+		junctionLocalFK,
+		junctionRemoteFK,
+		targetPK,
+		fkValue,
+		whereClause,
+	)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return buildCountFromBaseSQL(base), nil
+}
+
+// BuildManyToManyAggregateBaseSQL builds the base rowset query for many-to-many aggregates.
+func BuildManyToManyAggregateBaseSQL(
 	targetTable introspection.Table,
 	junctionTable string,
 	junctionLocalFK string,
@@ -424,7 +462,7 @@ func BuildManyToManyCountSQL(
 	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
 	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
 
-	builder := sq.Select("COUNT(*)").
+	builder := sq.Select("*").
 		From(quotedTarget).
 		Join(fmt.Sprintf("%s ON %s.%s = %s.%s", quotedJunction, quotedJunction, quotedRemoteFK, quotedTarget, quotedTargetPK)).
 		Where(sq.Eq{fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK): fkValue})
@@ -447,7 +485,43 @@ func BuildEdgeListCountSQL(
 	fkValue interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
-	builder := sq.Select("COUNT(*)").
+	base, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, whereClause)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return buildCountFromBaseSQL(base), nil
+}
+
+// BuildOneToManyAggregateBaseSQL builds the base rowset query for one-to-many aggregates.
+func BuildOneToManyAggregateBaseSQL(
+	table introspection.Table,
+	remoteColumn string,
+	fkValue interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	builder := sq.Select("*").
+		From(sqlutil.QuoteIdentifier(table.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue})
+
+	if whereClause != nil && whereClause.Condition != nil {
+		builder = builder.Where(whereClause.Condition)
+	}
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// BuildEdgeListAggregateBaseSQL builds the base rowset query for edge-list aggregates.
+func BuildEdgeListAggregateBaseSQL(
+	junctionTable introspection.Table,
+	junctionLocalFK string,
+	fkValue interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	builder := sq.Select("*").
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
 		Where(sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): fkValue})
 
@@ -697,7 +771,15 @@ func buildConnectionSQL(table introspection.Table, columns []introspection.Colum
 }
 
 func buildCountSQL(table introspection.Table, where *WhereClause) (SQLQuery, error) {
-	builder := sq.Select("COUNT(*)").
+	base, err := buildRootAggregateBaseSQL(table, where)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return buildCountFromBaseSQL(base), nil
+}
+
+func buildRootAggregateBaseSQL(table introspection.Table, where *WhereClause) (SQLQuery, error) {
+	builder := sq.Select("*").
 		From(sqlutil.QuoteIdentifier(table.Name))
 
 	if where != nil && where.Condition != nil {
@@ -711,4 +793,15 @@ func buildCountSQL(table introspection.Table, where *WhereClause) (SQLQuery, err
 		return SQLQuery{}, err
 	}
 	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+func buildCountFromBaseSQL(base SQLQuery) SQLQuery {
+	return SQLQuery{
+		SQL:  fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS __count", base.SQL),
+		Args: append([]interface{}(nil), base.Args...),
+	}
+}
+
+func BuildConnectionAggregateSQL(base SQLQuery, selection AggregateSelection) SQLQuery {
+	return PlanAggregateFromBaseSQL(base, selection)
 }

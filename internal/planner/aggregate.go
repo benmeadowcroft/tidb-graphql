@@ -55,14 +55,24 @@ type AggregateColumn struct {
 	ValueType  AggregateValueType // Determines how to scan the value
 }
 
+// PlanAggregateFromBaseSQL builds aggregate SQL over a pre-scoped base query.
+// The base query should define the dataset to aggregate over (filters/joins/etc).
+func PlanAggregateFromBaseSQL(base SQLQuery, selection AggregateSelection) SQLQuery {
+	selectClauses := buildAggregateSelectClauses(selection)
+	query := fmt.Sprintf(
+		"SELECT %s FROM (%s) AS __agg",
+		strings.Join(selectClauses, ", "),
+		base.SQL,
+	)
+	return SQLQuery{SQL: query, Args: base.Args}
+}
+
 // PlanAggregate builds SQL for aggregate queries on a table.
 func PlanAggregate(
 	table introspection.Table,
 	selection AggregateSelection,
 	filters *AggregateFilters,
 ) (SQLQuery, error) {
-	selectClauses := buildAggregateSelectClauses(selection)
-
 	base := sq.Select("*").From(sqlutil.QuoteIdentifier(table.Name))
 	if filters != nil && filters.Where != nil && filters.Where.Condition != nil {
 		base = base.Where(filters.Where.Condition)
@@ -85,13 +95,7 @@ func PlanAggregate(
 	// Wrap in subquery to apply filters before aggregation.
 	// This ensures ORDER BY + LIMIT filters the dataset, not the aggregate result.
 	// Example: "sum of the 50 most recent orders" vs "sum of all orders" (wrong).
-	query := fmt.Sprintf(
-		"SELECT %s FROM (%s) AS __agg",
-		strings.Join(selectClauses, ", "),
-		baseSQL,
-	)
-
-	return SQLQuery{SQL: query, Args: args}, nil
+	return PlanAggregateFromBaseSQL(SQLQuery{SQL: baseSQL, Args: args}, selection), nil
 }
 
 // PlanRelationshipAggregate builds SQL for aggregating related rows via a foreign key.
@@ -102,8 +106,6 @@ func PlanRelationshipAggregate(
 	fkValue interface{},
 	filters *AggregateFilters,
 ) (SQLQuery, error) {
-	selectClauses := buildAggregateSelectClauses(selection)
-
 	// Build WHERE combining relationship filter and user filter
 	fkCondition := sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue}
 	var finalCondition sq.Sqlizer = fkCondition
@@ -131,13 +133,7 @@ func PlanRelationshipAggregate(
 		return SQLQuery{}, err
 	}
 
-	query := fmt.Sprintf(
-		"SELECT %s FROM (%s) AS __agg",
-		strings.Join(selectClauses, ", "),
-		baseSQL,
-	)
-
-	return SQLQuery{SQL: query, Args: args}, nil
+	return PlanAggregateFromBaseSQL(SQLQuery{SQL: baseSQL, Args: args}, selection), nil
 }
 
 // PlanRelationshipAggregateBatch builds SQL for batched relationship aggregates with GROUP BY.

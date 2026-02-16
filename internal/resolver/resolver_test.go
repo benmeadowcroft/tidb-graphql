@@ -50,6 +50,16 @@ func hasArg(field *graphql.FieldDefinition, name string) bool {
 	return false
 }
 
+func unwrapObjectType(t *testing.T, typ graphql.Type) *graphql.Object {
+	t.Helper()
+	if nonNull, ok := typ.(*graphql.NonNull); ok {
+		typ = nonNull.OfType
+	}
+	obj, ok := typ.(*graphql.Object)
+	require.True(t, ok, "expected object type, got %T", typ)
+	return obj
+}
+
 func TestListResolver(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
@@ -363,6 +373,134 @@ func TestRelationshipConnectionFields_Wiring(t *testing.T) {
 	postsConn, ok := fields["postsConnection"]
 	require.True(t, ok, "expected postsConnection field")
 	require.True(t, hasArg(postsConn, "where"), "expected postsConnection where arg")
+}
+
+func TestConnectionAggregateSchemaWiring(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "name"},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "score", DataType: "int"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	users.Relationships = []introspection.Relationship{
+		{
+			IsOneToMany:      true,
+			LocalColumn:      "id",
+			RemoteTable:      "posts",
+			RemoteColumn:     "user_id",
+			GraphQLFieldName: "posts",
+		},
+	}
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	schema, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	queryFields := schema.QueryType().Fields()
+	_, hasStandaloneAggregate := queryFields["users_aggregate"]
+	assert.False(t, hasStandaloneAggregate, "standalone aggregate root field should not be generated")
+
+	usersConnection := queryFields["usersConnection"]
+	require.NotNil(t, usersConnection, "expected usersConnection root field")
+	usersConnObj := unwrapObjectType(t, usersConnection.Type)
+	_, hasConnectionAggregate := usersConnObj.Fields()["aggregate"]
+	assert.True(t, hasConnectionAggregate, "expected aggregate field on connection type")
+
+	userType := r.buildGraphQLType(users)
+	userFields := userType.Fields()
+	_, hasRelationshipAggregate := userFields["posts_aggregate"]
+	assert.False(t, hasRelationshipAggregate, "standalone relationship aggregate field should not be generated")
+
+	postsConnection, ok := userFields["postsConnection"]
+	require.True(t, ok, "expected postsConnection relationship field")
+	postsConnObj := unwrapObjectType(t, postsConnection.Type)
+	_, hasRelationshipConnectionAggregate := postsConnObj.Fields()["aggregate"]
+	assert.True(t, hasRelationshipConnectionAggregate, "expected aggregate field on relationship connection type")
+}
+
+func TestConnectionResultAggregate_CountOnlyUsesCountQuery(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "orders",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	countQuery, err := planner.BuildOneToManyCountSQL(table, "id", int64(1), nil)
+	require.NoError(t, err)
+	aggregateBase, err := planner.BuildOneToManyAggregateBaseSQL(table, "id", int64(1), nil)
+	require.NoError(t, err)
+
+	rows := sqlmock.NewRows([]string{"count"}).AddRow(3)
+	expectQuery(t, mock, countQuery.SQL, countQuery.Args, rows)
+
+	cr := &connectionResult{
+		plan:          &planner.ConnectionPlan{Count: countQuery, AggregateBase: aggregateBase, Table: table},
+		executor:      dbexec.NewStandardExecutor(db),
+		countCtx:      context.Background(),
+		aggregateVals: make(map[string]map[string]interface{}),
+	}
+
+	result, err := cr.aggregate(planner.AggregateSelection{Count: true})
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, result["count"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestConnectionResultAggregate_NonCountSeedsTotalCount(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "orders",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "amount", DataType: "decimal"},
+		},
+	}
+	countQuery, err := planner.BuildOneToManyCountSQL(table, "id", int64(1), nil)
+	require.NoError(t, err)
+	aggregateBase, err := planner.BuildOneToManyAggregateBaseSQL(table, "id", int64(1), nil)
+	require.NoError(t, err)
+
+	selection := planner.AggregateSelection{SumColumns: []string{"amount"}}
+	aggregateQuery := planner.BuildConnectionAggregateSQL(aggregateBase, selection)
+	aggRows := sqlmock.NewRows([]string{"count", "sum_amount"}).AddRow(3, 42.5)
+	expectQuery(t, mock, aggregateQuery.SQL, aggregateQuery.Args, aggRows)
+
+	cr := &connectionResult{
+		plan:          &planner.ConnectionPlan{Count: countQuery, AggregateBase: aggregateBase, Table: table},
+		executor:      dbexec.NewStandardExecutor(db),
+		countCtx:      context.Background(),
+		aggregateVals: make(map[string]map[string]interface{}),
+	}
+
+	result, err := cr.aggregate(selection)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, result["count"])
+	sum, ok := result["sum"].(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, 42.5, sum["amount"])
+
+	totalCount, err := cr.totalCount()
+	require.NoError(t, err)
+	assert.Equal(t, 3, totalCount)
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestSchemaDescriptionsFromComments(t *testing.T) {

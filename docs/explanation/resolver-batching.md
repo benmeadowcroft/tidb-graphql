@@ -50,7 +50,6 @@ flowchart LR
 | One-to-many (connection) | `makeOneToManyConnectionResolver` | `tryBatchOneToManyConnection` | **First page only** (`after` absent) and parent rows available | `PlanOneToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanOneToManyConnection` (used for cursor pages) |
 | Many-to-many (connection) | `makeManyToManyConnectionResolver` | `tryBatchManyToManyConnection` | **First page only** (`after` absent) and parent rows available | `PlanManyToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanManyToManyConnection` (used for cursor pages) |
 | Edge-list (connection) | `makeEdgeListConnectionResolver` | `tryBatchEdgeListConnection` | **First page only** (`after` absent) and parent rows available | `PlanEdgeListConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanEdgeListConnection` (used for cursor pages) |
-| Relationship aggregate | `makeRelationshipAggregateResolver` | `tryBatchRelationshipAggregate` | Parent rows available, and aggregate args remain batchable | `PlanRelationshipAggregateBatch`: grouped aggregates by relationship FK | Per-parent `PlanRelationshipAggregate` |
 
 ## Batch strategies by resolver category
 
@@ -67,11 +66,6 @@ flowchart LR
 - Batched connection data plans fetch `first + 1` rows per parent to compute `hasNextPage`, then trim to `first`.
 - `totalCount` remains lazy and filter-aware. It is computed from per-parent count plans when clients request `totalCount`.
 
-### Relationship aggregates
-
-- `tryBatchRelationshipAggregate` batches parent keys into one grouped aggregate query.
-- It intentionally skips batching when per-parent shaping arguments are present (`limit`, `offset`, or `orderBy` in aggregate filters), then falls back to per-parent aggregate execution.
-
 ## Fallback and skip conditions
 
 Batch helpers return `ok=false` when batching is not possible and let resolvers transparently fall back to per-parent execution.
@@ -83,7 +77,6 @@ Common skip reasons:
 - missing seeded parent rows (`missing_parent_rows`)
 - planner preconditions not met (for example, required primary key missing for a windowed batch plan)
 - connection cursor requests (`after` present) on connection resolvers
-- aggregate arguments requiring per-parent planning (`aggregate_filters`)
 
 Fallback changes round-trip count, not response correctness.
 
@@ -108,7 +101,7 @@ Batch behavior is instrumented with GraphQL metrics:
 - `graphql.batch.queries_saved`
 - `graphql.batch.skipped`
 
-Metrics include `relation_type` labels (for example `one_to_many`, `many_to_one`, `many_to_many`, `edge_list`, `aggregate`) and skip reasons for `graphql.batch.skipped`. Rising skip counts usually mean a query shape is bypassing batching (or batching context is missing).
+Metrics include `relation_type` labels (for example `one_to_many`, `many_to_one`, `many_to_many`, `edge_list`) and skip reasons for `graphql.batch.skipped`. Rising skip counts usually mean a query shape is bypassing batching (or batching context is missing).
 
 ## Known limits and future work
 

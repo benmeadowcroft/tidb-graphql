@@ -264,16 +264,6 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 	// Unique key queries
 	r.addUniqueKeyQueries(fields, table, tableType, r.singularQueryName(table))
 
-	// Aggregate query
-	aggregateFieldName := fieldName + "_aggregate"
-	aggregateType := r.buildAggregateFieldsType(table)
-
-	fields[aggregateFieldName] = &graphql.Field{
-		Type:    aggregateType,
-		Args:    r.aggregateArgs(table),
-		Resolve: r.makeAggregateResolver(table),
-	}
-
 	// Connection query (only for tables with primary keys)
 	if len(pkCols) > 0 {
 		connectionName := fieldName + "Connection"
@@ -501,18 +491,9 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				}
 			}
 
-			// Add aggregate field for this one-to-many relationship
-			aggregateFieldName := rel.GraphQLFieldName + "_aggregate"
-			aggregateType := r.buildAggregateFieldsType(relatedTable)
-			fields[aggregateFieldName] = &graphql.Field{
-				Type:    aggregateType,
-				Args:    r.aggregateArgs(relatedTable),
-				Resolve: r.makeRelationshipAggregateResolver(table, rel),
-			}
-
-			// Add connection field for one-to-many relationships (only if related table has PK)
-			relPKCols := introspection.PrimaryKeyColumns(relatedTable)
-			if len(relPKCols) > 0 {
+				// Add connection field for one-to-many relationships (only if related table has PK)
+				relPKCols := introspection.PrimaryKeyColumns(relatedTable)
+				if len(relPKCols) > 0 {
 				connFieldName := rel.GraphQLFieldName + "Connection"
 				connType := r.buildConnectionType(relatedTable, relatedType)
 				connArgs := graphql.FieldConfigArgument{
@@ -1639,6 +1620,7 @@ func (r *Resolver) buildConnectionType(table introspection.Table, tableType *gra
 
 	edgeType := r.buildEdgeType(table, tableType)
 	pageInfo := r.getPageInfoType()
+	aggregateType := r.buildAggregateFieldsType(table)
 
 	connType := graphql.NewObject(graphql.ObjectConfig{
 		Name: typeName,
@@ -1666,6 +1648,22 @@ func (r *Resolver) buildConnectionType(table introspection.Table, tableType *gra
 					return cr.totalCount()
 				},
 			},
+			"aggregate": &graphql.Field{
+				Type: graphql.NewNonNull(aggregateType),
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					source, ok := p.Source.(map[string]interface{})
+					if !ok {
+						return map[string]interface{}{"count": 0}, nil
+					}
+					cr, ok := source["__connectionResult"].(*connectionResult)
+					if !ok || cr == nil {
+						return map[string]interface{}{"count": 0}, nil
+					}
+					field := firstFieldAST(p.Info.FieldASTs)
+					selection := planner.ParseAggregateSelection(table, field, p.Info.Fragments)
+					return cr.aggregate(selection)
+				},
+			},
 		},
 	})
 
@@ -1691,6 +1689,9 @@ type connectionResult struct {
 	// totalCount is lazily computed
 	totalCountVal *int
 	totalCountMu  sync.Mutex
+	// aggregate results are cached per selection shape.
+	aggregateVals map[string]map[string]interface{}
+	aggregateMu   sync.Mutex
 }
 
 func (cr *connectionResult) totalCount() (int, error) {
@@ -1699,6 +1700,11 @@ func (cr *connectionResult) totalCount() (int, error) {
 
 	if cr.totalCountVal != nil {
 		return *cr.totalCountVal, nil
+	}
+	if cr.plan == nil || cr.executor == nil || cr.plan.Count.SQL == "" {
+		count := 0
+		cr.totalCountVal = &count
+		return count, nil
 	}
 
 	rows, err := cr.executor.QueryContext(cr.countCtx, cr.plan.Count.SQL, cr.plan.Count.Args...)
@@ -1719,6 +1725,102 @@ func (cr *connectionResult) totalCount() (int, error) {
 
 	cr.totalCountVal = &count
 	return count, nil
+}
+
+func (cr *connectionResult) aggregate(selection planner.AggregateSelection) (map[string]interface{}, error) {
+	columns := planner.BuildAggregateColumns(selection)
+	cacheKey := aggregateColumnsKey(columns)
+
+	cr.aggregateMu.Lock()
+	if cached, ok := cr.aggregateVals[cacheKey]; ok {
+		cr.aggregateMu.Unlock()
+		return cached, nil
+	}
+	cr.aggregateMu.Unlock()
+
+	// COUNT-only aggregate can be served directly from totalCount.
+	if len(columns) == 1 {
+		count, err := cr.totalCount()
+		if err != nil {
+			return nil, err
+		}
+		result := map[string]interface{}{"count": count}
+		cr.aggregateMu.Lock()
+		if existing, ok := cr.aggregateVals[cacheKey]; ok {
+			cr.aggregateMu.Unlock()
+			return existing, nil
+		}
+		cr.aggregateVals[cacheKey] = result
+		cr.aggregateMu.Unlock()
+		return result, nil
+	}
+
+	if cr.plan == nil || cr.plan.AggregateBase.SQL == "" || cr.executor == nil {
+		count, err := cr.totalCount()
+		if err != nil {
+			return nil, err
+		}
+		result := map[string]interface{}{"count": count}
+		cr.aggregateMu.Lock()
+		if existing, ok := cr.aggregateVals[cacheKey]; ok {
+			cr.aggregateMu.Unlock()
+			return existing, nil
+		}
+		cr.aggregateVals[cacheKey] = result
+		cr.aggregateMu.Unlock()
+		return result, nil
+	}
+
+	aggregateQuery := planner.BuildConnectionAggregateSQL(cr.plan.AggregateBase, selection)
+	rows, err := cr.executor.QueryContext(cr.countCtx, aggregateQuery.SQL, aggregateQuery.Args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	result, err := scanAggregateRow(rows, columns, cr.plan.Table)
+	if err != nil {
+		return nil, err
+	}
+
+	if count, ok := aggregateCountAsInt(result["count"]); ok {
+		cr.totalCountMu.Lock()
+		if cr.totalCountVal == nil {
+			c := count
+			cr.totalCountVal = &c
+		}
+		cr.totalCountMu.Unlock()
+		result["count"] = count
+	} else {
+		count, err := cr.totalCount()
+		if err != nil {
+			return nil, err
+		}
+		result["count"] = count
+	}
+
+	cr.aggregateMu.Lock()
+	if existing, ok := cr.aggregateVals[cacheKey]; ok {
+		cr.aggregateMu.Unlock()
+		return existing, nil
+	}
+	cr.aggregateVals[cacheKey] = result
+	cr.aggregateMu.Unlock()
+
+	return result, nil
+}
+
+func aggregateCountAsInt(value interface{}) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
 
 func encodeCursorFromRow(row map[string]interface{}, plan *planner.ConnectionPlan) string {
@@ -1997,6 +2099,7 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 		hasNext:  hasNext,
 		executor: r.executor,
 		countCtx: countCtx,
+		aggregateVals: make(map[string]map[string]interface{}),
 	}
 	if plan != nil {
 		result.hasPrev = plan.HasCursor
@@ -3052,22 +3155,32 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 				rows = rows[:first]
 			}
 
-			countQuery, err := planner.BuildOneToManyCountSQL(
-				relatedTable,
-				rel.RemoteColumn,
-				parentValue,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
+				countQuery, err := planner.BuildOneToManyCountSQL(
+					relatedTable,
+					rel.RemoteColumn,
+					parentValue,
+					whereClause,
+				)
+				if err != nil {
+					return nil, true, err
+				}
+				aggregateBase, err := planner.BuildOneToManyAggregateBaseSQL(
+					relatedTable,
+					rel.RemoteColumn,
+					parentValue,
+					whereClause,
+				)
+				if err != nil {
+					return nil, true, err
+				}
 
-			plan := &planner.ConnectionPlan{
-				Count:         countQuery,
-				Table:         relatedTable,
-				Columns:       selection,
-				OrderBy:       orderBy,
-				OrderByKey:    orderByKey,
+				plan := &planner.ConnectionPlan{
+					Count:         countQuery,
+					AggregateBase: aggregateBase,
+					Table:         relatedTable,
+					Columns:       selection,
+					OrderBy:       orderBy,
+					OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
 				HasCursor:     false,
@@ -3272,25 +3385,38 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 				rows = rows[:first]
 			}
 
-			countQuery, err := planner.BuildManyToManyCountSQL(
-				relatedTable,
-				rel.JunctionTable,
-				rel.JunctionLocalFK,
+				countQuery, err := planner.BuildManyToManyCountSQL(
+					relatedTable,
+					rel.JunctionTable,
+					rel.JunctionLocalFK,
 				rel.JunctionRemoteFK,
 				rel.RemoteColumn,
 				parentValue,
 				whereClause,
 			)
-			if err != nil {
-				return nil, true, err
-			}
+				if err != nil {
+					return nil, true, err
+				}
+				aggregateBase, err := planner.BuildManyToManyAggregateBaseSQL(
+					relatedTable,
+					rel.JunctionTable,
+					rel.JunctionLocalFK,
+					rel.JunctionRemoteFK,
+					rel.RemoteColumn,
+					parentValue,
+					whereClause,
+				)
+				if err != nil {
+					return nil, true, err
+				}
 
-			plan := &planner.ConnectionPlan{
-				Count:         countQuery,
-				Table:         relatedTable,
-				Columns:       selection,
-				OrderBy:       orderBy,
-				OrderByKey:    orderByKey,
+				plan := &planner.ConnectionPlan{
+					Count:         countQuery,
+					AggregateBase: aggregateBase,
+					Table:         relatedTable,
+					Columns:       selection,
+					OrderBy:       orderBy,
+					OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
 				HasCursor:     false,
@@ -3491,22 +3617,32 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 				rows = rows[:first]
 			}
 
-			countQuery, err := planner.BuildEdgeListCountSQL(
-				junctionTable,
-				rel.JunctionLocalFK,
-				parentValue,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
+				countQuery, err := planner.BuildEdgeListCountSQL(
+					junctionTable,
+					rel.JunctionLocalFK,
+					parentValue,
+					whereClause,
+				)
+				if err != nil {
+					return nil, true, err
+				}
+				aggregateBase, err := planner.BuildEdgeListAggregateBaseSQL(
+					junctionTable,
+					rel.JunctionLocalFK,
+					parentValue,
+					whereClause,
+				)
+				if err != nil {
+					return nil, true, err
+				}
 
-			plan := &planner.ConnectionPlan{
-				Count:         countQuery,
-				Table:         junctionTable,
-				Columns:       selection,
-				OrderBy:       orderBy,
-				OrderByKey:    orderByKey,
+				plan := &planner.ConnectionPlan{
+					Count:         countQuery,
+					AggregateBase: aggregateBase,
+					Table:         junctionTable,
+					Columns:       selection,
+					OrderBy:       orderBy,
+					OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
 				HasCursor:     false,

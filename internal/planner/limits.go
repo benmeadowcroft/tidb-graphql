@@ -88,10 +88,10 @@ func hasConnectionSelections(field *ast.Field, fragments map[string]ast.Definiti
 				if s.Name == nil {
 					continue
 				}
-				switch s.Name.Value {
-				case "edges", "nodes", "pageInfo":
-					return true
-				}
+					switch s.Name.Value {
+					case "edges", "nodes", "pageInfo", "aggregate":
+						return true
+					}
 				if s.SelectionSet != nil && visit(s.SelectionSet.Selections) {
 					return true
 				}
@@ -125,7 +125,7 @@ func hasConnectionSelections(field *ast.Field, fragments map[string]ast.Definiti
 // connectionDataSelections extracts the actual data field selections from a
 // connection field by unwrapping Relay scaffolding. It looks inside
 // edges → node and nodes for real column fields, and skips pageInfo,
-// totalCount, and cursor which have no SQL cost.
+// totalCount, aggregate, and cursor which have no SQL cost.
 func connectionDataSelections(field *ast.Field, fragments map[string]ast.Definition) []ast.Selection {
 	if field.SelectionSet == nil {
 		return nil
@@ -209,9 +209,9 @@ func connectionDataSelections(field *ast.Field, fragments map[string]ast.Definit
 					if s.SelectionSet != nil {
 						appendDataSelections(s.SelectionSet.Selections)
 					}
-				case "pageInfo", "totalCount":
-					// No SQL cost — skip entirely
-				}
+					case "pageInfo", "totalCount", "aggregate":
+						// No SQL cost — skip entirely
+					}
 			case *ast.InlineFragment:
 				if s.SelectionSet != nil {
 					visit(s.SelectionSet.Selections)

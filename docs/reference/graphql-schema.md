@@ -20,7 +20,6 @@ For each table `users`:
 - Primary key lookup: `user(id: ID!)` returns `User` (global Node ID).
 - Primary key raw lookup: `user_by_databaseId(databaseId: BigInt!)` returns `User` (name depends on PK column).
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
-- Aggregate query: `users_aggregate(...)` returns `UsersAggregate`.
 
 Notes:
 - `limit` default is configurable (default `100`, via [`server.graphql_list_limit_default`](./configuration.md#server)).
@@ -79,6 +78,7 @@ Each connection provides:
 - `nodes { ... }` (GitHub-style shortcut)
 - `pageInfo { hasNextPage hasPreviousPage startCursor endCursor }`
 - `totalCount` (lazy; filter-aware, cursor-agnostic)
+- `aggregate { count, countDistinct, avg, sum, min, max }` (lazy; filter-aware, cursor-agnostic)
 
 Connections are forward-only (`first`/`after`) and use stable ordering based on indexed columns (default PK ASC).
 For relationship connections, the first page (`after` omitted) is batched across parents to avoid N+1 lookups; cursor pages run per-parent seek queries.

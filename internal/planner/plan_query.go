@@ -483,10 +483,6 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 
 	visitConnectionSelections(field.SelectionSet.Selections)
 
-	if len(selected) == 0 {
-		return EnsureColumns(table, table.Columns, orderBy.Columns)
-	}
-
 	// Always include PK columns (for id field / cursor generation)
 	for _, col := range table.Columns {
 		if col.IsPrimaryKey {
@@ -494,9 +490,15 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 		}
 	}
 
-	// Always include orderBy columns (for cursor generation)
-	for _, colName := range orderBy.Columns {
-		selected[colName] = struct{}{}
+	// Always include orderBy columns (for cursor generation).
+	if orderBy != nil {
+		for _, colName := range orderBy.Columns {
+			selected[colName] = struct{}{}
+		}
+	}
+
+	if len(selected) == 0 {
+		return table.Columns
 	}
 
 	// Build result preserving table column order

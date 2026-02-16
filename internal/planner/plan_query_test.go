@@ -495,6 +495,36 @@ func TestSelectedColumnsForConnection_EdgesNodeViaFragment(t *testing.T) {
 	assert.Equal(t, []string{"id", "created_at"}, names)
 }
 
+func TestSelectedColumnsForConnection_MetadataOnlyUsesCursorColumns(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "email"},
+			{Name: "created_at"},
+		},
+	}
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "usersConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{Name: &ast.Name{Value: "totalCount"}},
+			&ast.Field{
+				Name: &ast.Name{Value: "aggregate"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "count"}},
+				}},
+			},
+		}},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Direction: "ASC"}
+	cols := SelectedColumnsForConnection(table, field, nil, orderBy)
+	names := columnNamesOnly(cols)
+
+	assert.Equal(t, []string{"id", "created_at"}, names)
+}
+
 func columnNamesOnly(cols []introspection.Column) []string {
 	names := make([]string, 0, len(cols))
 	for _, c := range cols {

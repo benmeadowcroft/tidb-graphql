@@ -214,6 +214,39 @@ func TestBuildCountSQL(t *testing.T) {
 	}
 }
 
+func TestPlanConnection_Basic(t *testing.T) {
+	table := testTable()
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{table},
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "usersConnection"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	args := map[string]interface{}{"first": 2}
+	plan, err := PlanConnection(schema, table, field, args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if plan.AggregateBase.SQL == "" {
+		t.Fatal("expected aggregate base SQL to be populated")
+	}
+	if !strings.Contains(plan.AggregateBase.SQL, "FROM `users`") {
+		t.Errorf("expected users table in aggregate base SQL, got: %s", plan.AggregateBase.SQL)
+	}
+}
+
 func TestOrderByKey(t *testing.T) {
 	table := testTable()
 
@@ -272,6 +305,9 @@ func TestPlanManyToManyConnection_Basic(t *testing.T) {
 	if !strings.Contains(plan.Count.SQL, "COUNT") {
 		t.Errorf("expected COUNT in count SQL, got: %s", plan.Count.SQL)
 	}
+	if !strings.Contains(plan.AggregateBase.SQL, "FROM `users`") {
+		t.Errorf("expected aggregate base SQL to reference target table, got: %s", plan.AggregateBase.SQL)
+	}
 }
 
 func TestPlanEdgeListConnection_Basic(t *testing.T) {
@@ -327,6 +363,9 @@ func TestPlanEdgeListConnection_Basic(t *testing.T) {
 	}
 	if !strings.Contains(plan.Count.SQL, "COUNT") {
 		t.Errorf("expected COUNT in count SQL, got: %s", plan.Count.SQL)
+	}
+	if !strings.Contains(plan.AggregateBase.SQL, "FROM `user_tags`") {
+		t.Errorf("expected aggregate base SQL to reference junction table, got: %s", plan.AggregateBase.SQL)
 	}
 }
 

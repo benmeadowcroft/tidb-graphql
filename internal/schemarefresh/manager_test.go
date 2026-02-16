@@ -1,8 +1,9 @@
 package schemarefresh
 
 import (
+	"context"
 	"crypto/sha256"
-	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -12,32 +13,93 @@ import (
 	"testing"
 	"time"
 
-	"context"
 	"tidb-graphql/internal/logging"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-type fingerprintRow struct {
-	tableName  string
-	createTime sql.NullTime
-	updateTime sql.NullTime
+type structuralFingerprintFixture struct {
+	tables      [][]string
+	columns     [][]string
+	primaryKeys [][]string
+	foreignKeys [][]string
+	indexes     [][]string
 }
 
-func expectedFingerprint(rows []fingerprintRow) string {
+func hashRows(rows [][]string) string {
 	hash := sha256.New()
 	for _, row := range rows {
-		createTimestamp := ""
-		if row.createTime.Valid {
-			createTimestamp = row.createTime.Time.UTC().Format(time.RFC3339Nano)
+		for _, value := range row {
+			_, _ = fmt.Fprintf(hash, "%d:%s|", len(value), value)
 		}
-		updateTimestamp := ""
-		if row.updateTime.Valid {
-			updateTimestamp = row.updateTime.Time.UTC().Format(time.RFC3339Nano)
-		}
-		fmt.Fprintf(hash, "%s|%s|%s\n", row.tableName, createTimestamp, updateTimestamp)
+		_, _ = hash.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func expectedStructuralFingerprint(fixture structuralFingerprintFixture) string {
+	return combineComponentHashes(map[string]string{
+		"tables":       hashRows(fixture.tables),
+		"columns":      hashRows(fixture.columns),
+		"primary_keys": hashRows(fixture.primaryKeys),
+		"foreign_keys": hashRows(fixture.foreignKeys),
+		"indexes":      hashRows(fixture.indexes),
+	})
+}
+
+func expectedLightweightFingerprint(rows [][]string) string {
+	return combineComponentHashes(map[string]string{
+		"table_timestamps": hashRows(rows),
+	})
+}
+
+func rowsFromStrings(columns []string, values [][]string) *sqlmock.Rows {
+	rows := sqlmock.NewRows(columns)
+	for _, record := range values {
+		args := make([]driver.Value, 0, len(record))
+		for _, value := range record {
+			args = append(args, value)
+		}
+		rows.AddRow(args...)
+	}
+	return rows
+}
+
+func expectTiDBStructuralFingerprintQueries(mock sqlmock.Sqlmock, databaseName string, fixture structuralFingerprintFixture) {
+	mock.ExpectQuery("TABLE_TYPE IN \\('BASE TABLE', 'VIEW'\\)").
+		WithArgs(databaseName).
+		WillReturnRows(rowsFromStrings(
+			[]string{"TABLE_NAME", "TABLE_TYPE"},
+			fixture.tables,
+		))
+
+	mock.ExpectQuery("FROM INFORMATION_SCHEMA.COLUMNS").
+		WithArgs(databaseName).
+		WillReturnRows(rowsFromStrings(
+			[]string{"TABLE_NAME", "COLUMN_NAME", "ORDINAL_POSITION", "DATA_TYPE", "COLUMN_TYPE", "IS_NULLABLE", "COLUMN_DEFAULT", "EXTRA"},
+			fixture.columns,
+		))
+
+	mock.ExpectQuery("CONSTRAINT_NAME = 'PRIMARY'").
+		WithArgs(databaseName).
+		WillReturnRows(rowsFromStrings(
+			[]string{"TABLE_NAME", "COLUMN_NAME", "ORDINAL_POSITION"},
+			fixture.primaryKeys,
+		))
+
+	mock.ExpectQuery("REFERENCED_TABLE_NAME IS NOT NULL").
+		WithArgs(databaseName).
+		WillReturnRows(rowsFromStrings(
+			[]string{"TABLE_NAME", "CONSTRAINT_NAME", "COLUMN_NAME", "REFERENCED_TABLE_NAME", "REFERENCED_COLUMN_NAME", "ORDINAL_POSITION", "POSITION_IN_UNIQUE_CONSTRAINT"},
+			fixture.foreignKeys,
+		))
+
+	mock.ExpectQuery("FROM INFORMATION_SCHEMA.STATISTICS").
+		WithArgs(databaseName).
+		WillReturnRows(rowsFromStrings(
+			[]string{"TABLE_NAME", "INDEX_NAME", "NON_UNIQUE", "SEQ_IN_INDEX", "COLUMN_NAME", "COLLATION", "SUB_PART", "NULLABLE", "INDEX_TYPE"},
+			fixture.indexes,
+		))
 }
 
 func testLogger() *logging.Logger {
@@ -52,23 +114,28 @@ func TestComputeFingerprint(t *testing.T) {
 	}
 	defer db.Close()
 
-	when := time.Date(2025, 1, 15, 10, 30, 45, 0, time.UTC)
-	rows := []fingerprintRow{
-		{
-			tableName:  "alpha",
-			createTime: sql.NullTime{Time: when, Valid: true},
-			updateTime: sql.NullTime{Time: when.Add(2 * time.Hour), Valid: true},
+	fixture := structuralFingerprintFixture{
+		tables: [][]string{
+			{"alpha", "BASE TABLE"},
+			{"v_alpha", "VIEW"},
 		},
-		{tableName: "beta", createTime: sql.NullTime{Valid: false}, updateTime: sql.NullTime{Valid: false}},
+		columns: [][]string{
+			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+			{"alpha", "name", "2", "varchar", "varchar(255)", "NO", "", ""},
+			{"v_alpha", "id", "1", "bigint", "bigint(20)", "NO", "", ""},
+		},
+		primaryKeys: [][]string{
+			{"alpha", "id", "1"},
+		},
+		foreignKeys: [][]string{
+			{"alpha", "fk_alpha_parent", "parent_id", "parent", "id", "1", "1"},
+		},
+		indexes: [][]string{
+			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+			{"alpha", "idx_name", "1", "1", "name", "A", "", "YES", "BTREE"},
+		},
 	}
-
-	mockRows := sqlmock.NewRows([]string{"TABLE_NAME", "CREATE_TIME", "UPDATE_TIME"}).
-		AddRow(rows[0].tableName, rows[0].createTime, rows[0].updateTime).
-		AddRow(rows[1].tableName, rows[1].createTime, rows[1].updateTime)
-
-	mock.ExpectQuery("SELECT TABLE_NAME, CREATE_TIME, UPDATE_TIME").
-		WithArgs("testdb").
-		WillReturnRows(mockRows)
+	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
 
 	manager := &Manager{
 		db:           db,
@@ -81,9 +148,53 @@ func TestComputeFingerprint(t *testing.T) {
 		t.Fatalf("computeFingerprint failed: %v", err)
 	}
 
-	expected := expectedFingerprint(rows)
+	expected := expectedStructuralFingerprint(fixture)
 	if fingerprint != expected {
 		t.Fatalf("fingerprint mismatch: got %s want %s", fingerprint, expected)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestComputeFingerprint_FallsBackToLightweight(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("TABLE_TYPE IN \\('BASE TABLE', 'VIEW'\\)").
+		WithArgs("testdb").
+		WillReturnError(fmt.Errorf("structural query unsupported"))
+
+	lightweightRows := [][]string{
+		{"alpha", "2025-02-01 12:00:00", "2025-02-01 12:05:00"},
+	}
+	mock.ExpectQuery("CREATE_TIME").
+		WithArgs("testdb").
+		WillReturnRows(rowsFromStrings(
+			[]string{"TABLE_NAME", "CREATE_TIME", "UPDATE_TIME"},
+			lightweightRows,
+		))
+
+	manager := &Manager{
+		db:           db,
+		databaseName: "testdb",
+		logger:       testLogger(),
+	}
+
+	fingerprint, err := manager.computeFingerprintDetails(t.Context())
+	if err != nil {
+		t.Fatalf("computeFingerprintDetails failed: %v", err)
+	}
+	if fingerprint.Mode != fingerprintModeTiDBLightweight {
+		t.Fatalf("fingerprint mode mismatch: got %s want %s", fingerprint.Mode, fingerprintModeTiDBLightweight)
+	}
+	expected := expectedLightweightFingerprint(lightweightRows)
+	if fingerprint.Value != expected {
+		t.Fatalf("fingerprint mismatch: got %s want %s", fingerprint.Value, expected)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -98,22 +209,23 @@ func TestRefreshOnce_NoChange_BacksOff(t *testing.T) {
 	}
 	defer db.Close()
 
-	when := time.Date(2025, 1, 15, 10, 30, 45, 0, time.UTC)
-	rows := []fingerprintRow{
-		{
-			tableName:  "alpha",
-			createTime: sql.NullTime{Time: when, Valid: true},
-			updateTime: sql.NullTime{Time: when.Add(5 * time.Minute), Valid: true},
+	fixture := structuralFingerprintFixture{
+		tables: [][]string{
+			{"alpha", "BASE TABLE"},
+		},
+		columns: [][]string{
+			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+		},
+		primaryKeys: [][]string{
+			{"alpha", "id", "1"},
+		},
+		foreignKeys: [][]string{},
+		indexes: [][]string{
+			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
 		},
 	}
-	expected := expectedFingerprint(rows)
-
-	mockRows := sqlmock.NewRows([]string{"TABLE_NAME", "CREATE_TIME", "UPDATE_TIME"}).
-		AddRow(rows[0].tableName, rows[0].createTime, rows[0].updateTime)
-
-	mock.ExpectQuery("SELECT TABLE_NAME, CREATE_TIME, UPDATE_TIME").
-		WithArgs("testdb").
-		WillReturnRows(mockRows)
+	expected := expectedStructuralFingerprint(fixture)
+	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
 
 	manager := &Manager{
 		db:           db,
@@ -123,10 +235,18 @@ func TestRefreshOnce_NoChange_BacksOff(t *testing.T) {
 		maxInterval:  time.Minute,
 	}
 	manager.active.Store(&snapshotSet{
-		Default:     &Snapshot{Fingerprint: expected},
-		ByRole:      map[string]*Snapshot{},
-		Fingerprint: expected,
-		BuiltAt:     time.Now(),
+		Default:         &Snapshot{Fingerprint: expected},
+		ByRole:          map[string]*Snapshot{},
+		Fingerprint:     expected,
+		FingerprintMode: fingerprintModeTiDBStructural,
+		FingerprintComponents: map[string]string{
+			"tables":       hashRows(fixture.tables),
+			"columns":      hashRows(fixture.columns),
+			"primary_keys": hashRows(fixture.primaryKeys),
+			"foreign_keys": hashRows(fixture.foreignKeys),
+			"indexes":      hashRows(fixture.indexes),
+		},
+		BuiltAt: time.Now(),
 	})
 
 	interval := manager.minInterval
@@ -148,22 +268,23 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 	}
 	defer db.Close()
 
-	when := time.Date(2025, 2, 1, 12, 0, 0, 0, time.UTC)
-	fingerprintRows := []fingerprintRow{
-		{
-			tableName:  "alpha",
-			createTime: sql.NullTime{Time: when, Valid: true},
-			updateTime: sql.NullTime{Time: when.Add(30 * time.Minute), Valid: true},
+	fixture := structuralFingerprintFixture{
+		tables: [][]string{
+			{"alpha", "BASE TABLE"},
+		},
+		columns: [][]string{
+			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+		},
+		primaryKeys: [][]string{
+			{"alpha", "id", "1"},
+		},
+		foreignKeys: [][]string{},
+		indexes: [][]string{
+			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
 		},
 	}
-	expected := expectedFingerprint(fingerprintRows)
-
-	mockFingerprintRows := sqlmock.NewRows([]string{"TABLE_NAME", "CREATE_TIME", "UPDATE_TIME"}).
-		AddRow(fingerprintRows[0].tableName, fingerprintRows[0].createTime, fingerprintRows[0].updateTime)
-
-	mock.ExpectQuery("SELECT TABLE_NAME, CREATE_TIME, UPDATE_TIME").
-		WithArgs("testdb").
-		WillReturnRows(mockFingerprintRows)
+	expected := expectedStructuralFingerprint(fixture)
+	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
 
 	// Introspection getTables query.
 	mockTables := sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"})

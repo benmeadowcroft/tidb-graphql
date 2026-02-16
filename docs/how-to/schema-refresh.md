@@ -14,12 +14,23 @@ The server rebuilds the schema snapshot and swaps it atomically.
 
 ## Adaptive polling
 
-Polling is designed to be safe and low-impact. It hashes `INFORMATION_SCHEMA.TABLES` metadata (table name, `CREATE_TIME`, and `UPDATE_TIME`) to detect change.
+Polling is designed to be safe and low-impact. By default it uses a TiDB-first structural fingerprint
+that hashes metadata from:
+
+- `INFORMATION_SCHEMA.TABLES` (base tables and views)
+- `INFORMATION_SCHEMA.COLUMNS`
+- `INFORMATION_SCHEMA.KEY_COLUMN_USAGE` (primary keys and foreign keys)
+- `INFORMATION_SCHEMA.STATISTICS` (indexes)
+
+If structural fingerprinting fails, it falls back to a lightweight table timestamp fingerprint based on
+`INFORMATION_SCHEMA.TABLES` (`CREATE_TIME`/`UPDATE_TIME` for base tables).
+
+Polling cadence is controlled by:
 
 ```yaml
-schema_refresh:
-  polling_enabled: true
-  polling_interval: 1m
+server:
+  schema_refresh_min_interval: 30s
+  schema_refresh_max_interval: 5m
 ```
 
 When a change is detected, the schema rebuilds in the background and swaps in.

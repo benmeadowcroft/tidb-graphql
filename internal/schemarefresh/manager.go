@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,11 +83,30 @@ type Manager struct {
 }
 
 type snapshotSet struct {
-	Default     *Snapshot
-	ByRole      map[string]*Snapshot
-	Fingerprint string
-	BuiltAt     time.Time
+	Default               *Snapshot
+	ByRole                map[string]*Snapshot
+	Fingerprint           string
+	FingerprintMode       string
+	FingerprintComponents map[string]string
+	BuiltAt               time.Time
 }
+
+type fingerprintDetails struct {
+	Value      string
+	Mode       string
+	Components map[string]string
+}
+
+type fingerprintComponent struct {
+	name  string
+	query string
+}
+
+const (
+	fingerprintModeTiDBStructural  = "tidb_structural"
+	fingerprintModeTiDBLightweight = "tidb_lightweight"
+	fingerprintModeUnknown         = "unknown"
+)
 
 // NewManager builds the initial schema snapshot and returns a manager.
 func NewManager(cfg Config) (*Manager, error) {
@@ -135,17 +156,18 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	start := time.Now()
-	fingerprint, err := manager.computeFingerprint(context.Background())
+	fingerprint, err := manager.computeFingerprintDetails(context.Background())
 	if err != nil {
 		manager.logger.Warn("failed to compute schema fingerprint", slog.String("error", err.Error()))
 	}
 
 	state, err := manager.buildSnapshotSet(context.Background(), fingerprint)
-	manager.recordRefresh(time.Since(start), err == nil, "startup")
 	if err != nil {
+		manager.recordRefresh(time.Since(start), false, "startup", fingerprint.Mode)
 		return nil, err
 	}
 	manager.active.Store(state)
+	manager.recordRefresh(time.Since(start), true, "startup", state.FingerprintMode)
 
 	return manager, nil
 }
@@ -223,10 +245,12 @@ func (m *Manager) currentState() *snapshotSet {
 		case *Snapshot:
 			// Backward-compatible fallback for tests/older in-memory values.
 			return &snapshotSet{
-				Default:     v,
-				ByRole:      map[string]*Snapshot{},
-				Fingerprint: v.Fingerprint,
-				BuiltAt:     v.BuiltAt,
+				Default:               v,
+				ByRole:                map[string]*Snapshot{},
+				Fingerprint:           v.Fingerprint,
+				FingerprintMode:       fingerprintModeUnknown,
+				FingerprintComponents: map[string]string{},
+				BuiltAt:               v.BuiltAt,
 			}
 		}
 	}
@@ -241,20 +265,20 @@ func (m *Manager) RefreshNow() error {
 // RefreshNowContext forces a schema rebuild and swap with context support.
 func (m *Manager) RefreshNowContext(ctx context.Context) error {
 	start := time.Now()
-	fingerprint, err := m.computeFingerprint(ctx)
+	fingerprint, err := m.computeFingerprintDetails(ctx)
 	if err != nil {
-		m.recordRefresh(time.Since(start), false, "manual")
+		m.recordRefresh(time.Since(start), false, "manual", fingerprint.Mode)
 		return err
 	}
 
 	state, err := m.buildSnapshotSet(ctx, fingerprint)
 	if err != nil {
-		m.recordRefresh(time.Since(start), false, "manual")
+		m.recordRefresh(time.Since(start), false, "manual", fingerprint.Mode)
 		return err
 	}
 
 	m.active.Store(state)
-	m.recordRefresh(time.Since(start), true, "manual")
+	m.recordRefresh(time.Since(start), true, "manual", state.FingerprintMode)
 	return nil
 }
 
@@ -340,42 +364,61 @@ func (m *Manager) roleQueryer(ctx context.Context, role string) (introspection.Q
 
 func (m *Manager) refreshOnce(ctx context.Context, interval *time.Duration) {
 	start := time.Now()
-	fingerprint, err := m.computeFingerprint(ctx)
+	fingerprint, err := m.computeFingerprintDetails(ctx)
 	if err != nil {
 		m.logger.Warn("schema fingerprint check failed", slog.String("error", err.Error()))
-		m.recordRefresh(time.Since(start), false, "poll")
+		m.recordRefresh(time.Since(start), false, "poll", fingerprint.Mode)
 		*interval = m.minInterval
 		return
 	}
 
 	current := m.currentState()
-	if current != nil && fingerprint == current.Fingerprint {
-		m.recordRefresh(time.Since(start), true, "poll_no_change")
+	if current != nil && fingerprint.Value == current.Fingerprint {
+		m.recordRefresh(time.Since(start), true, "poll_no_change", fingerprint.Mode)
 		*interval = nextInterval(*interval, m.minInterval, m.maxInterval)
 		return
 	}
 
-	m.logger.Info("schema change detected, rebuilding", slog.String("fingerprint", fingerprint))
+	// Component-level diff keeps refresh logs actionable for operators:
+	// they can see whether a rebuild came from indexes, keys, columns, etc.
+	changedComponents := changedFingerprintComponents(
+		mapOrEmpty(currentFingerprintComponents(current)),
+		mapOrEmpty(fingerprint.Components),
+	)
+	m.logger.Info("schema change detected, rebuilding",
+		slog.String("fingerprint", fingerprint.Value),
+		slog.String("fingerprint_mode", fingerprint.Mode),
+		slog.Any("changed_components", changedComponents),
+	)
 	state, err := m.buildSnapshotSet(ctx, fingerprint)
 	if err != nil {
 		m.logger.Error("failed to rebuild schema", slog.String("error", err.Error()))
-		m.recordRefresh(time.Since(start), false, "poll")
+		m.recordRefresh(time.Since(start), false, "poll", fingerprint.Mode)
 		*interval = m.minInterval
 		return
 	}
 
 	m.active.Store(state)
 	*interval = m.minInterval
-	m.recordRefresh(time.Since(start), true, "poll")
-	m.logger.Info("schema refresh complete", slog.String("fingerprint", fingerprint))
+	m.recordRefresh(time.Since(start), true, "poll", state.FingerprintMode)
+	m.logger.Info("schema refresh complete",
+		slog.String("fingerprint", state.Fingerprint),
+		slog.String("fingerprint_mode", state.FingerprintMode),
+	)
 }
 
-func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint string) (*snapshotSet, error) {
+func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint fingerprintDetails) (*snapshotSet, error) {
+	if fingerprint.Value == "" {
+		recomputed, err := m.computeFingerprintDetails(ctx)
+		if err == nil {
+			fingerprint = recomputed
+		}
+	}
 	defaultQueryer, defaultCleanup, err := m.introspectionQueryer(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize introspection role: %w", err)
 	}
-	defaultSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint, defaultQueryer)
+	defaultSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint.Value, defaultQueryer)
 	if defaultCleanup != nil {
 		defaultCleanup()
 	}
@@ -384,23 +427,27 @@ func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint string) (*sn
 	}
 
 	state := &snapshotSet{
-		Default:     defaultSnapshot,
-		ByRole:      map[string]*Snapshot{},
-		Fingerprint: defaultSnapshot.Fingerprint,
-		BuiltAt:     defaultSnapshot.BuiltAt,
+		Default:               defaultSnapshot,
+		ByRole:                map[string]*Snapshot{},
+		Fingerprint:           defaultSnapshot.Fingerprint,
+		FingerprintMode:       defaultOrUnknownMode(fingerprint.Mode),
+		FingerprintComponents: mapOrEmpty(fingerprint.Components),
+		BuiltAt:               defaultSnapshot.BuiltAt,
 	}
 
 	if len(m.roleSchemas) == 0 {
 		return state, nil
 	}
 
+	// Role snapshots are built as a single unit so requests never observe a
+	// partially refreshed role set after a schema change.
 	roleSnapshots := make(map[string]*Snapshot, len(m.roleSchemas))
 	for _, role := range m.roleSchemas {
 		roleQueryer, roleCleanup, err := m.roleQueryer(ctx, role)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize role queryer for %s: %w", role, err)
 		}
-		roleSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint, roleQueryer)
+		roleSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint.Value, roleQueryer)
 		if roleCleanup != nil {
 			roleCleanup()
 		}
@@ -470,6 +517,19 @@ func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, fingerprint stri
 }
 
 func (m *Manager) computeFingerprint(ctx context.Context) (string, error) {
+	fingerprint, err := m.computeFingerprintDetails(ctx)
+	if err != nil {
+		return "", err
+	}
+	return fingerprint.Value, nil
+}
+
+func (m *Manager) computeFingerprintDetails(ctx context.Context) (fingerprintDetails, error) {
+	fallback := fingerprintDetails{
+		Mode:       fingerprintModeUnknown,
+		Components: map[string]string{},
+	}
+
 	tracer := otel.Tracer("tidb-graphql/introspection")
 	ctx, span := tracer.Start(ctx, "introspection.compute_fingerprint")
 	defer span.End()
@@ -477,62 +537,208 @@ func (m *Manager) computeFingerprint(ctx context.Context) (string, error) {
 	queryer, cleanup, err := m.introspectionQueryer(ctx)
 	if err != nil {
 		span.RecordError(err)
-		return "", err
+		return fallback, err
 	}
 	if cleanup != nil {
 		defer cleanup()
 	}
 
+	details, err := m.computeTiDBStructuralFingerprint(ctx, queryer)
+	if err == nil {
+		span.SetAttributes(
+			attribute.String("db.schema", m.databaseName),
+			attribute.String("schema.fingerprint_mode", details.Mode),
+		)
+		return details, nil
+	}
+
+	// Fallback preserves availability when structural metadata is unavailable
+	// (engine differences or metadata access limits), while still detecting broad changes.
+	if m.logger != nil {
+		m.logger.Warn("tidb structural fingerprint failed, falling back to lightweight fingerprint",
+			slog.String("error", err.Error()),
+		)
+	}
+	fallback, fallbackErr := m.computeTiDBLightweightFingerprint(ctx, queryer)
+	if fallbackErr != nil {
+		span.RecordError(err)
+		span.RecordError(fallbackErr)
+		return fingerprintDetails{
+			Mode:       fingerprintModeUnknown,
+			Components: map[string]string{},
+		}, fmt.Errorf("failed to compute fingerprints (tidb_structural and tidb_lightweight): structural error: %w; fallback error: %v", err, fallbackErr)
+	}
+
+	span.SetAttributes(
+		attribute.String("db.schema", m.databaseName),
+		attribute.String("schema.fingerprint_mode", fallback.Mode),
+	)
+	return fallback, nil
+}
+
+func (m *Manager) computeTiDBStructuralFingerprint(ctx context.Context, queryer introspection.Queryer) (fingerprintDetails, error) {
+	// Structural mode fingerprints only behavior-relevant metadata.
+	// Comments are intentionally excluded to avoid churn without API/runtime impact.
+	components := []fingerprintComponent{
+		{
+			name: "tables",
+			query: `
+				SELECT TABLE_NAME, TABLE_TYPE
+				FROM INFORMATION_SCHEMA.TABLES
+				WHERE TABLE_SCHEMA = ?
+					AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+				ORDER BY TABLE_NAME, TABLE_TYPE
+			`,
+		},
+		{
+			name: "columns",
+			query: `
+				SELECT
+					TABLE_NAME,
+					COLUMN_NAME,
+					CAST(ORDINAL_POSITION AS CHAR),
+					DATA_TYPE,
+					COLUMN_TYPE,
+					IS_NULLABLE,
+					COALESCE(COLUMN_DEFAULT, ''),
+					EXTRA
+				FROM INFORMATION_SCHEMA.COLUMNS
+				WHERE TABLE_SCHEMA = ?
+				ORDER BY TABLE_NAME, ORDINAL_POSITION, COLUMN_NAME
+			`,
+		},
+		{
+			name: "primary_keys",
+			query: `
+				SELECT
+					TABLE_NAME,
+					COLUMN_NAME,
+					CAST(ORDINAL_POSITION AS CHAR)
+				FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+				WHERE TABLE_SCHEMA = ?
+					AND CONSTRAINT_NAME = 'PRIMARY'
+				ORDER BY TABLE_NAME, ORDINAL_POSITION, COLUMN_NAME
+			`,
+		},
+		{
+			name: "foreign_keys",
+			query: `
+				SELECT
+					TABLE_NAME,
+					CONSTRAINT_NAME,
+					COLUMN_NAME,
+					COALESCE(REFERENCED_TABLE_NAME, ''),
+					COALESCE(REFERENCED_COLUMN_NAME, ''),
+					CAST(ORDINAL_POSITION AS CHAR),
+					COALESCE(CAST(POSITION_IN_UNIQUE_CONSTRAINT AS CHAR), '')
+				FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+				WHERE TABLE_SCHEMA = ?
+					AND REFERENCED_TABLE_NAME IS NOT NULL
+				ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION, COLUMN_NAME
+			`,
+		},
+		{
+			name: "indexes",
+			query: `
+				SELECT
+					TABLE_NAME,
+					INDEX_NAME,
+					CAST(NON_UNIQUE AS CHAR),
+					CAST(SEQ_IN_INDEX AS CHAR),
+					COALESCE(COLUMN_NAME, ''),
+					COALESCE(COLLATION, ''),
+					COALESCE(CAST(SUB_PART AS CHAR), ''),
+					COALESCE(NULLABLE, ''),
+					COALESCE(INDEX_TYPE, '')
+				FROM INFORMATION_SCHEMA.STATISTICS
+				WHERE TABLE_SCHEMA = ?
+				ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME
+			`,
+		},
+	}
+
+	componentHashes := make(map[string]string, len(components))
+	for _, component := range components {
+		hash, _, err := m.hashComponentQuery(ctx, queryer, component.query, m.databaseName)
+		if err != nil {
+			return fingerprintDetails{}, fmt.Errorf("failed to hash %s component: %w", component.name, err)
+		}
+		componentHashes[component.name] = hash
+	}
+
+	return fingerprintDetails{
+		Value:      combineComponentHashes(componentHashes),
+		Mode:       fingerprintModeTiDBStructural,
+		Components: componentHashes,
+	}, nil
+}
+
+func (m *Manager) computeTiDBLightweightFingerprint(ctx context.Context, queryer introspection.Queryer) (fingerprintDetails, error) {
 	query := `
-		SELECT TABLE_NAME, CREATE_TIME, UPDATE_TIME
+		SELECT
+			TABLE_NAME,
+			COALESCE(CAST(CREATE_TIME AS CHAR), ''),
+			COALESCE(CAST(UPDATE_TIME AS CHAR), '')
 		FROM INFORMATION_SCHEMA.TABLES
 		WHERE TABLE_SCHEMA = ?
 			AND TABLE_TYPE = 'BASE TABLE'
 		ORDER BY TABLE_NAME
 	`
-
-	rows, err := queryer.QueryContext(ctx, query, m.databaseName)
+	componentHash, _, err := m.hashComponentQuery(ctx, queryer, query, m.databaseName)
 	if err != nil {
-		span.RecordError(err)
-		return "", err
+		return fingerprintDetails{}, err
+	}
+
+	componentHashes := map[string]string{
+		"table_timestamps": componentHash,
+	}
+	return fingerprintDetails{
+		Value:      combineComponentHashes(componentHashes),
+		Mode:       fingerprintModeTiDBLightweight,
+		Components: componentHashes,
+	}, nil
+}
+
+func (m *Manager) hashComponentQuery(ctx context.Context, queryer introspection.Queryer, query string, args ...any) (string, int, error) {
+	rows, err := queryer.QueryContext(ctx, query, args...)
+	if err != nil {
+		return "", 0, err
 	}
 	defer rows.Close()
 
+	columns, err := rows.Columns()
+	if err != nil {
+		return "", 0, err
+	}
+	values := make([]sql.NullString, len(columns))
+	scanTargets := make([]any, len(columns))
+	for i := range values {
+		scanTargets[i] = &values[i]
+	}
+
 	hash := sha256.New()
-	tableCount := 0
+	rowCount := 0
 	for rows.Next() {
-		tableCount++
-		var tableName string
-		var createTime sql.NullTime
-		var updateTime sql.NullTime
-		if err := rows.Scan(&tableName, &createTime, &updateTime); err != nil {
-			span.RecordError(err)
-			return "", err
+		rowCount++
+		if err := rows.Scan(scanTargets...); err != nil {
+			return "", 0, err
 		}
-		createTimestamp := ""
-		if createTime.Valid {
-			createTimestamp = createTime.Time.UTC().Format(time.RFC3339Nano)
+
+		// Length-prefixed cells avoid hash ambiguity from delimiter collisions.
+		for _, value := range values {
+			cell := ""
+			if value.Valid {
+				cell = value.String
+			}
+			_, _ = fmt.Fprintf(hash, "%d:%s|", len(cell), cell)
 		}
-		updateTimestamp := ""
-		if updateTime.Valid {
-			updateTimestamp = updateTime.Time.UTC().Format(time.RFC3339Nano)
-		}
-		_, _ = fmt.Fprintf(hash, "%s|%s|%s\n", tableName, createTimestamp, updateTimestamp)
+		_, _ = hash.Write([]byte{'\n'})
 	}
 	if err := rows.Err(); err != nil {
-		span.RecordError(err)
-		return "", err
+		return "", 0, err
 	}
 
-	fingerprint := hex.EncodeToString(hash.Sum(nil))
-
-	// Add span attributes
-	span.SetAttributes(
-		attribute.String("db.schema", m.databaseName),
-		attribute.Int("schema.table_count", tableCount),
-	)
-
-	return fingerprint, nil
+	return hex.EncodeToString(hash.Sum(nil)), rowCount, nil
 }
 
 func nextInterval(current, minInterval, maxInterval time.Duration) time.Duration {
@@ -546,11 +752,77 @@ func nextInterval(current, minInterval, maxInterval time.Duration) time.Duration
 	return next
 }
 
-func (m *Manager) recordRefresh(duration time.Duration, success bool, trigger string) {
+func (m *Manager) recordRefresh(duration time.Duration, success bool, trigger string, fingerprintMode string) {
 	if m.metrics == nil {
 		return
 	}
-	m.metrics.RecordRefresh(context.Background(), duration, success, trigger)
+	m.metrics.RecordRefresh(context.Background(), duration, success, trigger, defaultOrUnknownMode(fingerprintMode))
+}
+
+func combineComponentHashes(componentHashes map[string]string) string {
+	if len(componentHashes) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(componentHashes))
+	for key := range componentHashes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	hash := sha256.New()
+	for _, key := range keys {
+		_, _ = fmt.Fprintf(hash, "%s=%s\n", key, componentHashes[key])
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func changedFingerprintComponents(previous map[string]string, current map[string]string) []string {
+	// Compare over the union of keys so added/removed components are surfaced too.
+	keySet := make(map[string]struct{}, len(previous)+len(current))
+	for key := range previous {
+		keySet[key] = struct{}{}
+	}
+	for key := range current {
+		keySet[key] = struct{}{}
+	}
+	keys := make([]string, 0, len(keySet))
+	for key := range keySet {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	changed := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if previous[key] != current[key] {
+			changed = append(changed, key)
+		}
+	}
+	return changed
+}
+
+func mapOrEmpty(input map[string]string) map[string]string {
+	if len(input) == 0 {
+		return map[string]string{}
+	}
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+func currentFingerprintComponents(state *snapshotSet) map[string]string {
+	if state == nil {
+		return nil
+	}
+	return state.FingerprintComponents
+}
+
+func defaultOrUnknownMode(mode string) string {
+	if strings.TrimSpace(mode) == "" {
+		return fingerprintModeUnknown
+	}
+	return mode
 }
 
 func forbiddenRoleHandler() http.Handler {

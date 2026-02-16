@@ -83,10 +83,11 @@ func InitSchemaRefreshMetrics(logger *slog.Logger) (*SchemaRefreshMetrics, error
 }
 
 // RecordRefresh records a schema refresh attempt.
-func (m *SchemaRefreshMetrics) RecordRefresh(ctx context.Context, duration time.Duration, success bool, trigger string) {
+func (m *SchemaRefreshMetrics) RecordRefresh(ctx context.Context, duration time.Duration, success bool, trigger string, fingerprintMode string) {
 	attrs := []attribute.KeyValue{
 		attribute.String("trigger", trigger),
 		attribute.Bool("success", success),
+		attribute.String("fingerprint_mode", fingerprintMode),
 	}
 
 	m.refreshCounter.Add(ctx, 1, metric.WithAttributes(attrs...))

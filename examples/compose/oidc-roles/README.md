@@ -4,7 +4,7 @@ This scenario starts TiDB, seeds sample data and roles, runs a local JWKS server
 
 Primary app settings are in:
 
-`examples/compose/oidc-roles/config/tidb-graphql/tidb-graphql.example.yaml`
+[examples/compose/oidc-roles/config/tidb-graphql/tidb-graphql.example.yaml](./config/tidb-graphql/tidb-graphql.example.yaml)
 
 ## Start
 
@@ -17,8 +17,11 @@ docker compose -f examples/compose/oidc-roles/docker-compose.yml up
 In a separate shell from the project root:
 
 ```bash
-go run ./scripts/jwt-mint --issuer http://localhost:9000 --audience tidb-graphql --kid local-key --db_role app_viewer
+go run ./scripts/jwt-mint --issuer https://jwks:9000 --audience tidb-graphql --kid local-key --db_role app_viewer
 ```
+
+> [!NOTE]
+> The issuer is set to `https://jwks:9000` as `jwks` is the service name in [docker-compose.yml](docker-compose.yml). The same issuer is also set in the [tidb-graphql.example.yaml](./config/tidb-graphql/tidb-graphql.example.yaml) configuration.
 
 ## Call GraphQL with token
 

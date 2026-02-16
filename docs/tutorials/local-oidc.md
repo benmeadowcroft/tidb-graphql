@@ -12,7 +12,8 @@ First, we will generate some local keys. These artefacts will be used by our lig
 go run ./scripts/jwt-generate-keys
 ```
 
-This writes keys and a self-signed cert under `.auth/` directory.
+This writes JWT signing keys under `.auth/`. The JWKS server will generate its
+own self-signed TLS certificate on first start.
 
 ## 2) Start the local JWKS server
 
@@ -50,8 +51,7 @@ Enabling OpenID Connect turns on the authentication portion of the TiDB GraphQL 
 server:
   # enable self signed TLS/HTTPS for server
   port: 8080
-  tls_enabled: true
-  tls_cert_mode: selfsigned
+  tls_mode: auto
 
   auth:
     # enable authentication
@@ -81,8 +81,7 @@ database:
 server:
   # enable self-signed TLS/HTTPS for server
   port: 8080
-  tls_enabled: true
-  tls_cert_mode: selfsigned
+  tls_mode: auto
 
   auth:
     # enable authentication

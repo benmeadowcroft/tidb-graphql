@@ -406,6 +406,47 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Contains(t, result.Error(), "db_role_introspection_role")
 	})
 
+	t.Run("db role enabled requires positive role schema max", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Auth.DBRoleEnabled = true
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.OIDCIssuerURL = "https://issuer.test"
+		cfg.Server.Auth.OIDCAudience = "aud"
+		cfg.Server.Auth.DBRoleIntrospectionRole = "app_introspect"
+		cfg.Server.Auth.RoleSchemaMaxRoles = 0
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "role_schema_max_roles")
+	})
+
+	t.Run("db role enabled validates role schema include globs", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Auth.DBRoleEnabled = true
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.OIDCIssuerURL = "https://issuer.test"
+		cfg.Server.Auth.OIDCAudience = "aud"
+		cfg.Server.Auth.DBRoleIntrospectionRole = "app_introspect"
+		cfg.Server.Auth.RoleSchemaMaxRoles = 64
+		cfg.Server.Auth.RoleSchemaInclude = []string{"[bad"}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "role_schema_include")
+	})
+
+	t.Run("db role enabled validates role schema exclude globs", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Auth.DBRoleEnabled = true
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.OIDCIssuerURL = "https://issuer.test"
+		cfg.Server.Auth.OIDCAudience = "aud"
+		cfg.Server.Auth.DBRoleIntrospectionRole = "app_introspect"
+		cfg.Server.Auth.RoleSchemaMaxRoles = 64
+		cfg.Server.Auth.RoleSchemaExclude = []string{"[bad"}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "role_schema_exclude")
+	})
+
 	t.Run("OIDC enabled requires issuer and audience", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Server.Auth.OIDCEnabled = true

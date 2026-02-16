@@ -216,6 +216,14 @@ Authentication (under `server.auth`):
 - `server.auth.db_role_claim_name` (string, default: `db_role`)
 - `server.auth.db_role_validation_enabled` (bool, default: `true`)
 - `server.auth.db_role_introspection_role` (string, default: empty; role used only during schema refresh)
+- `server.auth.role_schema_include` (list of string, default: `["*"]`; role glob patterns to include for role-specific schemas)
+- `server.auth.role_schema_exclude` (list of string, default: empty; role glob patterns to exclude from role-specific schemas)
+- `server.auth.role_schema_max_roles` (int, default: `64`; maximum number of role-specific schemas to build)
+
+When `server.auth.db_role_enabled` is true, the server builds role-specific GraphQL schemas
+from discovered database roles. Discovery is filtered by `role_schema_include`/`role_schema_exclude`
+(case-insensitive glob matching), and startup/refresh fails if selected roles exceed `role_schema_max_roles`.
+An explicitly empty include list is treated as `["*"]`.
 
 Rate limiting:
 - `server.rate_limit_enabled` (bool, default: `false`)

@@ -12,7 +12,8 @@ First, we will generate some local keys. These artefacts will be used by our lig
 go run ./scripts/jwt-generate-keys
 ```
 
-This writes keys and a self-signed cert under `.auth/` directory.
+This writes JWT signing keys under `.auth/`. The JWKS server will generate its
+own self-signed TLS certificate on first start.
 
 ## 2) Start the local JWKS server
 
@@ -50,14 +51,14 @@ Enabling OpenID Connect turns on the authentication portion of the TiDB GraphQL 
 server:
   # enable self signed TLS/HTTPS for server
   port: 8080
-  tls_enabled: true
-  tls_cert_mode: selfsigned
+  tls_mode: auto
 
-  # enable authentication
-  oidc_enabled: true
-  oidc_issuer_url: "https://localhost:9000"
-  oidc_audience: "tidb-graphql"
-  oidc_skip_tls_verify: true
+  auth:
+    # enable authentication
+    oidc_enabled: true
+    oidc_issuer_url: "https://localhost:9000"
+    oidc_audience: "tidb-graphql"
+    oidc_skip_tls_verify: true
 ```
 
 Note: `oidc_skip_tls_verify` is a dev-only escape hatch for the self-signed cert. It logs a warning.
@@ -68,7 +69,7 @@ If you plan to use TiDB's RBAC with TiDB GraphQL then you must configure the dat
 
 After you have created a suitable database user, you should update the `database` settings of the config file to use these credentials.
 
-Within the config file, you will also update the `server.db_role_*` settings to use the newly provisioned role.
+Within the config file, you will also update the `server.auth.db_role_*` settings to use the newly provisioned role.
 
 ```yaml
 database:
@@ -80,20 +81,20 @@ database:
 server:
   # enable self-signed TLS/HTTPS for server
   port: 8080
-  tls_enabled: true
-  tls_cert_mode: selfsigned
+  tls_mode: auto
 
-  # enable authentication
-  oidc_enabled: true
-  oidc_issuer_url: "https://localhost:9000"
-  oidc_audience: "tidb-graphql"
-  oidc_skip_tls_verify: true
+  auth:
+    # enable authentication
+    oidc_enabled: true
+    oidc_issuer_url: "https://localhost:9000"
+    oidc_audience: "tidb-graphql"
+    oidc_skip_tls_verify: true
 
-  # enable authorization
-  db_role_enabled: true
-  db_role_claim_name: "db_role"  # JWT claim containing the role name
-  db_role_validation: true       # Validate role against discovered roles
-  db_role_introspection_role: "app_introspect" # role to assume for introspection
+    # enable authorization
+    db_role_enabled: true
+    db_role_claim_name: "db_role"  # JWT claim containing the role name
+    db_role_validation_enabled: true  # Validate role against discovered roles
+    db_role_introspection_role: "app_introspect" # role to assume for introspection
 ```
 
 ## 6) Call GraphQL with the token

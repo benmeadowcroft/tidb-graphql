@@ -25,25 +25,27 @@ See [Secure local dev with OIDC/JWKS](../tutorials/local-oidc.md) for more detai
 Production (OIDC provider):
 ```yaml
 server:
-  oidc_enabled: true
-  oidc_issuer_url: "https://issuer.example.com"
-  oidc_audience: "tidb-graphql"
-  oidc_clock_skew: 2m
-  oidc_skip_tls_verify: false
+  auth:
+    oidc_enabled: true
+    oidc_issuer_url: "https://issuer.example.com"
+    oidc_audience: "tidb-graphql"
+    oidc_clock_skew: 2m
+    oidc_skip_tls_verify: false
 ```
 
 Local dev (self-signed JWKS):
 ```yaml
 server:
-  oidc_enabled: true
-  oidc_issuer_url: "https://localhost:9000"
-  oidc_audience: "tidb-graphql"
-  oidc_skip_tls_verify: true
+  auth:
+    oidc_enabled: true
+    oidc_issuer_url: "https://localhost:9000"
+    oidc_audience: "tidb-graphql"
+    oidc_skip_tls_verify: true
 ```
 
 Notes:
-- `oidc_issuer_url` must be HTTPS.
-- `oidc_skip_tls_verify` is for local dev with self-signed certs and logs a warning.
+- `server.auth.oidc_issuer_url` must be HTTPS.
+- `server.auth.oidc_skip_tls_verify` is for local dev with self-signed certs and logs a warning.
 
 ## 3) Restart the TiDB GraphQL server
 

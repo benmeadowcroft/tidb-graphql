@@ -4,7 +4,7 @@ Goal: set up a TiDB user with minimal privileges that relies entirely on roles f
 
 ## Why this matters
 
-When `db_role_enabled` is true, tidb-graphql uses `SET ROLE` to restrict access based on JWT claims. However, SET ROLE only affects **role-based privileges**, not direct user grants. If your database user has `SELECT ON *.*` or `SELECT ON database.*`, those privileges would remain active regardless of what role is set. If overly broad grants are detected when role based authorization is enabled the system will fail to start.
+When `server.auth.db_role_enabled` is true, tidb-graphql uses `SET ROLE` to restrict access based on JWT claims. However, SET ROLE only affects **role-based privileges**, not direct user grants. If your database user has `SELECT ON *.*` or `SELECT ON database.*`, those privileges would remain active regardless of what role is set. If overly broad grants are detected when role based authorization is enabled the system will fail to start.
 
 For role-based authorization to work correctly, your database user must:
 1. Have **no direct SELECT privileges** on the target database
@@ -121,14 +121,15 @@ database:
   database: "tidb_graphql_tutorial"
 
 server:
-  oidc_enabled: true
-  oidc_issuer_url: "https://your-issuer.example.com"
-  oidc_audience: "tidb-graphql"
+  auth:
+    oidc_enabled: true
+    oidc_issuer_url: "https://your-issuer.example.com"
+    oidc_audience: "tidb-graphql"
 
-  db_role_enabled: true
-  db_role_claim_name: "db_role"  # JWT claim containing the role name
-  db_role_validation: true       # Validate role against discovered roles
-  db_role_introspection_role: "app_introspect" # role to assume for introspection
+    db_role_enabled: true
+    db_role_claim_name: "db_role"  # JWT claim containing the role name
+    db_role_validation_enabled: true  # Validate role against discovered roles
+    db_role_introspection_role: "app_introspect" # role to assume for introspection
 ```
 
 Notes:
@@ -159,7 +160,7 @@ go run ./scripts/jwt-mint --issuer https://localhost:9000 --audience tidb-graphq
 
 ## 7) Start the server
 
-When tidb-graphql starts with `db_role_enabled: true`, it validates that the database user doesn't have overly broad privileges. If validation passes, you'll see a log message like:
+When tidb-graphql starts with `server.auth.db_role_enabled: true`, it validates that the database user doesn't have overly broad privileges. If validation passes, you'll see a log message like:
 
 ```
 INFO database user privileges validated for role-based authorization

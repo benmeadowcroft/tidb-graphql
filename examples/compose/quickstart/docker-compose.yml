@@ -56,6 +56,8 @@ services:
     depends_on:
       tidb:
         condition: service_healthy
+      seed:
+        condition: service_completed_successfully
 
 volumes:
   tidb-data:

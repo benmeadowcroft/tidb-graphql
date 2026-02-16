@@ -107,19 +107,6 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 				return nil, err
 			}
 			return &Plan{Root: planned, Table: ctx.RelatedTable, Columns: selected}, nil
-		case ctx.IsOneToMany:
-			limit := GetArgInt(args, "limit", defaultLimit)
-			offset := GetArgInt(args, "offset", 0)
-			orderBy, err := ParseOrderBy(ctx.RelatedTable, args)
-			if err != nil {
-				return nil, err
-			}
-			selected := SelectedColumns(ctx.RelatedTable, field, options.fragments)
-			planned, err := PlanOneToMany(ctx.RelatedTable, selected, ctx.RemoteColumn, ctx.Value, limit, offset, orderBy)
-			if err != nil {
-				return nil, err
-			}
-			return &Plan{Root: planned, Table: ctx.RelatedTable, Columns: selected}, nil
 		default:
 			return nil, errors.New("relationship context missing direction")
 		}
@@ -128,41 +115,6 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 	fieldName := field.Name.Value
 
 	for _, table := range dbSchema.Tables {
-		listField := introspection.GraphQLQueryName(table)
-		if fieldName == listField {
-			limit := GetArgInt(args, "limit", defaultLimit)
-			offset := GetArgInt(args, "offset", 0)
-			orderBy, err := ParseOrderBy(table, args)
-			if err != nil {
-				return nil, err
-			}
-
-			// Parse WHERE clause if provided
-			var whereClause *WhereClause
-			if whereArg, ok := args["where"]; ok {
-				if whereMap, ok := whereArg.(map[string]interface{}); ok {
-					whereClause, err = BuildWhereClause(table, whereMap)
-					if err != nil {
-						return nil, fmt.Errorf("invalid WHERE clause: %w", err)
-					}
-
-					// Validate that at least one indexed column is used
-					if whereClause != nil {
-						if err := ValidateIndexedColumns(table, whereClause.UsedColumns); err != nil {
-							return nil, err
-						}
-					}
-				}
-			}
-
-			selected := SelectedColumns(table, field, options.fragments)
-			planned, err := PlanTableList(table, selected, limit, offset, orderBy, whereClause)
-			if err != nil {
-				return nil, err
-			}
-			return &Plan{Root: planned, Table: table, Columns: selected}, nil
-		}
-
 		singleField := introspection.GraphQLSingleQueryName(table)
 		// Primary key lookup uses the singular field name (e.g., "user" not "user_by_pk")
 		if fieldName == singleField {
@@ -483,10 +435,6 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 
 	visitConnectionSelections(field.SelectionSet.Selections)
 
-	if len(selected) == 0 {
-		return EnsureColumns(table, table.Columns, orderBy.Columns)
-	}
-
 	// Always include PK columns (for id field / cursor generation)
 	for _, col := range table.Columns {
 		if col.IsPrimaryKey {
@@ -494,9 +442,15 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 		}
 	}
 
-	// Always include orderBy columns (for cursor generation)
-	for _, colName := range orderBy.Columns {
-		selected[colName] = struct{}{}
+	// Always include orderBy columns (for cursor generation).
+	if orderBy != nil {
+		for _, colName := range orderBy.Columns {
+			selected[colName] = struct{}{}
+		}
+	}
+
+	if len(selected) == 0 {
+		return table.Columns
 	}
 
 	// Build result preserving table column order

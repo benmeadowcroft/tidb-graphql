@@ -196,7 +196,7 @@ database:
 - `server.graphql_max_depth` (int, default: `5`)
 - `server.graphql_max_complexity` (int, default: `0` = unlimited)
 - `server.graphql_max_rows` (int, default: `0` = unlimited)
-- `server.graphql_default_limit` (int, default: `100`)
+- `server.graphql_default_limit` (int, default: `100`) - default forward page size (`first` when omitted) for root and relationship connection collection fields
 - `server.schema_refresh_min_interval` (duration, default: `30s`)
 - `server.schema_refresh_max_interval` (duration, default: `5m`)
 - `server.read_timeout` (duration, default: `15s`)

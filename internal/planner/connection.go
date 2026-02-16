@@ -19,30 +19,53 @@ const (
 	MaxConnectionLimit = 100
 )
 
+type PaginationMode string
+
+const (
+	PaginationModeForward  PaginationMode = "forward"
+	PaginationModeBackward PaginationMode = "backward"
+)
+
 // ConnectionPlan holds the planned SQL for a connection query.
 type ConnectionPlan struct {
 	Root          SQLQuery // main data query (first+1 rows)
 	Count         SQLQuery // totalCount query (filter only, no cursor)
+	AggregateBase SQLQuery // base dataset query used for aggregate fields
 	Table         introspection.Table
 	Columns       []introspection.Column // selected + orderBy + PK columns
 	OrderBy       *OrderBy
 	OrderByKey    string                 // GraphQL orderBy field name
 	CursorColumns []introspection.Column // columns encoded in cursor
 	First         int
-	HasCursor     bool // whether an after cursor was provided
+	Mode          PaginationMode
+	HasCursor     bool // whether any cursor was provided
+	HasAfter      bool
+	HasBefore     bool
 }
 
 // connectionArgs holds the parsed common arguments for connection queries.
 type connectionArgs struct {
-	first         int
+	limit         int
 	orderBy       *OrderBy
+	sqlOrderBy    *OrderBy
 	orderByKey    string
 	typeName      string
 	cursorCols    []introspection.Column
 	seekCondition sq.Sqlizer
-	hasCursor     bool
+	mode          PaginationMode
+	hasAfter      bool
+	hasBefore     bool
 	whereClause   *WhereClause
 	selected      []introspection.Column
+}
+
+type connectionWindow struct {
+	mode      PaginationMode
+	limit     int
+	hasAfter  bool
+	hasBefore bool
+	after     string
+	before    string
 }
 
 // seekBuilder builds a cursor seek condition from column names, values, and direction.
@@ -77,7 +100,7 @@ func parseConnectionArgs(
 		return nil, fmt.Errorf("connections require a primary key on table %s", table.Name)
 	}
 
-	first, err := ParseFirst(args)
+	window, err := parseConnectionWindowWithDefault(args, defaultLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -90,32 +113,39 @@ func parseConnectionArgs(
 	orderByKey := OrderByKey(table, orderBy.Columns)
 	typeName := introspection.GraphQLTypeName(table)
 	cursorCols := CursorColumns(table, orderBy)
+	sqlOrderBy := orderBy
+	if window.mode == PaginationModeBackward {
+		sqlOrderBy = reverseOrderBy(orderBy)
+	}
 
-	// Parse after cursor
+	// Parse cursor
 	var seekCondition sq.Sqlizer
-	hasCursor := false
-	if afterRaw, ok := args["after"]; ok && afterRaw != nil {
-		afterStr, ok := afterRaw.(string)
-		if !ok {
-			return nil, fmt.Errorf("after must be a string")
+	if window.hasAfter || window.hasBefore {
+		cursorArgName := "after"
+		rawCursor := window.after
+		seekDirection := orderBy.Direction
+		if window.hasBefore {
+			cursorArgName = "before"
+			rawCursor = window.before
+			seekDirection = reverseDirection(orderBy.Direction)
 		}
-		cType, cKey, cDir, cVals, err := cursor.DecodeCursor(afterStr)
+
+		cType, cKey, cDir, cVals, err := cursor.DecodeCursor(rawCursor)
 		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
+			return nil, fmt.Errorf("invalid %s cursor: %w", cursorArgName, err)
 		}
 		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Direction, cType, cKey, cDir); err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
+			return nil, fmt.Errorf("invalid %s cursor: %w", cursorArgName, err)
 		}
 		parsedValues, err := cursor.ParseCursorValues(cVals, cursorCols)
 		if err != nil {
-			return nil, fmt.Errorf("invalid after cursor: %w", err)
+			return nil, fmt.Errorf("invalid %s cursor: %w", cursorArgName, err)
 		}
 		colNames := make([]string, len(cursorCols))
 		for i, c := range cursorCols {
 			colNames[i] = c.Name
 		}
-		seekCondition = buildSeek(colNames, parsedValues, orderBy.Direction)
-		hasCursor = true
+		seekCondition = buildSeek(colNames, parsedValues, seekDirection)
 	}
 
 	// Parse WHERE clause
@@ -138,13 +168,16 @@ func parseConnectionArgs(
 	selected := SelectedColumnsForConnection(table, field, options.fragments, orderBy)
 
 	return &connectionArgs{
-		first:         first,
+		limit:         window.limit,
 		orderBy:       orderBy,
+		sqlOrderBy:    sqlOrderBy,
 		orderByKey:    orderByKey,
 		typeName:      typeName,
 		cursorCols:    cursorCols,
 		seekCondition: seekCondition,
-		hasCursor:     hasCursor,
+		mode:          window.mode,
+		hasAfter:      window.hasAfter,
+		hasBefore:     window.hasBefore,
 		whereClause:   whereClause,
 		selected:      selected,
 	}, nil
@@ -168,8 +201,8 @@ func PlanConnection(
 		return nil, err
 	}
 
-	// Build root SQL: SELECT columns WHERE (filter AND seek) ORDER BY LIMIT first+1
-	rootSQL, err := buildConnectionSQL(table, ca.selected, ca.whereClause, ca.seekCondition, ca.orderBy, ca.first+1)
+	// Build root SQL: SELECT columns WHERE (filter AND seek) ORDER BY LIMIT pageSize+1
+	rootSQL, err := buildConnectionSQL(table, ca.selected, ca.whereClause, ca.seekCondition, ca.sqlOrderBy, ca.limit+1)
 	if err != nil {
 		return nil, err
 	}
@@ -179,17 +212,25 @@ func PlanConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := buildRootAggregateBaseSQL(table, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          rootSQL,
 		Count:         countSQL,
+		AggregateBase: aggregateBase,
 		Table:         table,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
 		OrderByKey:    ca.orderByKey,
 		CursorColumns: ca.cursorCols,
-		First:         ca.first,
-		HasCursor:     ca.hasCursor,
+		First:         ca.limit,
+		Mode:          ca.mode,
+		HasCursor:     ca.hasAfter || ca.hasBefore,
+		HasAfter:      ca.hasAfter,
+		HasBefore:     ca.hasBefore,
 	}, nil
 }
 
@@ -227,8 +268,8 @@ func PlanOneToManyConnection(
 		builder = builder.Where(ca.seekCondition)
 	}
 
-	builder = builder.OrderBy(orderByClauses(ca.orderBy)...).
-		Limit(uint64(ca.first + 1)).
+	builder = builder.OrderBy(orderByClauses(ca.sqlOrderBy)...).
+		Limit(uint64(ca.limit + 1)).
 		PlaceholderFormat(sq.Question)
 
 	query, sqlArgs, err := builder.ToSql()
@@ -240,17 +281,25 @@ func PlanOneToManyConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := BuildOneToManyAggregateBaseSQL(table, remoteColumn, fkValue, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
+		AggregateBase: aggregateBase,
 		Table:         table,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
 		OrderByKey:    ca.orderByKey,
 		CursorColumns: ca.cursorCols,
-		First:         ca.first,
-		HasCursor:     ca.hasCursor,
+		First:         ca.limit,
+		Mode:          ca.mode,
+		HasCursor:     ca.hasAfter || ca.hasBefore,
+		HasAfter:      ca.hasAfter,
+		HasBefore:     ca.hasBefore,
 	}, nil
 }
 
@@ -301,8 +350,8 @@ func PlanManyToManyConnection(
 		builder = builder.Where(ca.seekCondition)
 	}
 
-	builder = builder.OrderBy(orderByClausesQualified(targetTable.Name, ca.orderBy)...).
-		Limit(uint64(ca.first + 1)).
+	builder = builder.OrderBy(orderByClausesQualified(targetTable.Name, ca.sqlOrderBy)...).
+		Limit(uint64(ca.limit + 1)).
 		PlaceholderFormat(sq.Question)
 
 	query, sqlArgs, err := builder.ToSql()
@@ -314,17 +363,25 @@ func PlanManyToManyConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := BuildManyToManyAggregateBaseSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
+		AggregateBase: aggregateBase,
 		Table:         targetTable,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
 		OrderByKey:    ca.orderByKey,
 		CursorColumns: ca.cursorCols,
-		First:         ca.first,
-		HasCursor:     ca.hasCursor,
+		First:         ca.limit,
+		Mode:          ca.mode,
+		HasCursor:     ca.hasAfter || ca.hasBefore,
+		HasAfter:      ca.hasAfter,
+		HasBefore:     ca.hasBefore,
 	}, nil
 }
 
@@ -359,8 +416,8 @@ func PlanEdgeListConnection(
 		builder = builder.Where(ca.seekCondition)
 	}
 
-	builder = builder.OrderBy(orderByClauses(ca.orderBy)...).
-		Limit(uint64(ca.first + 1)).
+	builder = builder.OrderBy(orderByClauses(ca.sqlOrderBy)...).
+		Limit(uint64(ca.limit + 1)).
 		PlaceholderFormat(sq.Question)
 
 	query, sqlArgs, err := builder.ToSql()
@@ -372,17 +429,25 @@ func PlanEdgeListConnection(
 	if err != nil {
 		return nil, err
 	}
+	aggregateBase, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, ca.whereClause)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ConnectionPlan{
 		Root:          SQLQuery{SQL: query, Args: sqlArgs},
 		Count:         countQuery,
+		AggregateBase: aggregateBase,
 		Table:         junctionTable,
 		Columns:       ca.selected,
 		OrderBy:       ca.orderBy,
 		OrderByKey:    ca.orderByKey,
 		CursorColumns: ca.cursorCols,
-		First:         ca.first,
-		HasCursor:     ca.hasCursor,
+		First:         ca.limit,
+		Mode:          ca.mode,
+		HasCursor:     ca.hasAfter || ca.hasBefore,
+		HasAfter:      ca.hasAfter,
+		HasBefore:     ca.hasBefore,
 	}, nil
 }
 
@@ -393,23 +458,40 @@ func BuildOneToManyCountSQL(
 	fkValue interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
-	builder := sq.Select("COUNT(*)").
-		From(sqlutil.QuoteIdentifier(table.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue})
-
-	if whereClause != nil && whereClause.Condition != nil {
-		builder = builder.Where(whereClause.Condition)
-	}
-
-	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
+	base, err := BuildOneToManyAggregateBaseSQL(table, remoteColumn, fkValue, whereClause)
 	if err != nil {
 		return SQLQuery{}, err
 	}
-	return SQLQuery{SQL: query, Args: args}, nil
+	return buildCountFromBaseSQL(base), nil
 }
 
 // BuildManyToManyCountSQL builds the count query for a many-to-many connection.
 func BuildManyToManyCountSQL(
+	targetTable introspection.Table,
+	junctionTable string,
+	junctionLocalFK string,
+	junctionRemoteFK string,
+	targetPK string,
+	fkValue interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	base, err := BuildManyToManyAggregateBaseSQL(
+		targetTable,
+		junctionTable,
+		junctionLocalFK,
+		junctionRemoteFK,
+		targetPK,
+		fkValue,
+		whereClause,
+	)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return buildCountFromBaseSQL(base), nil
+}
+
+// BuildManyToManyAggregateBaseSQL builds the base rowset query for many-to-many aggregates.
+func BuildManyToManyAggregateBaseSQL(
 	targetTable introspection.Table,
 	junctionTable string,
 	junctionLocalFK string,
@@ -424,7 +506,7 @@ func BuildManyToManyCountSQL(
 	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
 	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
 
-	builder := sq.Select("COUNT(*)").
+	builder := sq.Select("*").
 		From(quotedTarget).
 		Join(fmt.Sprintf("%s ON %s.%s = %s.%s", quotedJunction, quotedJunction, quotedRemoteFK, quotedTarget, quotedTargetPK)).
 		Where(sq.Eq{fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK): fkValue})
@@ -447,7 +529,43 @@ func BuildEdgeListCountSQL(
 	fkValue interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
-	builder := sq.Select("COUNT(*)").
+	base, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, whereClause)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return buildCountFromBaseSQL(base), nil
+}
+
+// BuildOneToManyAggregateBaseSQL builds the base rowset query for one-to-many aggregates.
+func BuildOneToManyAggregateBaseSQL(
+	table introspection.Table,
+	remoteColumn string,
+	fkValue interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	builder := sq.Select("*").
+		From(sqlutil.QuoteIdentifier(table.Name)).
+		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue})
+
+	if whereClause != nil && whereClause.Condition != nil {
+		builder = builder.Where(whereClause.Condition)
+	}
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+// BuildEdgeListAggregateBaseSQL builds the base rowset query for edge-list aggregates.
+func BuildEdgeListAggregateBaseSQL(
+	junctionTable introspection.Table,
+	junctionLocalFK string,
+	fkValue interface{},
+	whereClause *WhereClause,
+) (SQLQuery, error) {
+	builder := sq.Select("*").
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
 		Where(sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): fkValue})
 
@@ -603,36 +721,166 @@ func PlanEdgeListConnectionBatch(
 	)
 }
 
+// parseConnectionWindowWithDefault parses connection pagination arguments and
+// resolves the pagination mode and requested page size.
+func parseConnectionWindowWithDefault(args map[string]interface{}, fallback int) (connectionWindow, error) {
+	if fallback <= 0 {
+		fallback = DefaultConnectionLimit
+	}
+	window := connectionWindow{
+		mode:  PaginationModeForward,
+		limit: normalizeFirstLimit(fallback),
+	}
+	if args == nil {
+		return window, nil
+	}
+
+	first, hasFirst, err := parseConnectionLimitArg(args, "first")
+	if err != nil {
+		return connectionWindow{}, err
+	}
+	last, hasLast, err := parseConnectionLimitArg(args, "last")
+	if err != nil {
+		return connectionWindow{}, err
+	}
+
+	after, hasAfter, err := parseOptionalStringArg(args, "after")
+	if err != nil {
+		return connectionWindow{}, err
+	}
+	before, hasBefore, err := parseOptionalStringArg(args, "before")
+	if err != nil {
+		return connectionWindow{}, err
+	}
+
+	if hasFirst && hasLast {
+		return connectionWindow{}, fmt.Errorf("cannot use both first and last")
+	}
+	if hasAfter && hasBefore {
+		return connectionWindow{}, fmt.Errorf("cannot use both after and before")
+	}
+	if hasBefore && !hasLast {
+		return connectionWindow{}, fmt.Errorf("before requires last")
+	}
+	if hasLast && hasAfter {
+		return connectionWindow{}, fmt.Errorf("last cannot be used with after")
+	}
+	if hasFirst && hasBefore {
+		return connectionWindow{}, fmt.Errorf("before cannot be used with first")
+	}
+
+	if hasLast {
+		window.mode = PaginationModeBackward
+		window.limit = last
+	} else if hasFirst {
+		window.mode = PaginationModeForward
+		window.limit = first
+	}
+
+	window.hasAfter = hasAfter
+	window.after = after
+	window.hasBefore = hasBefore
+	window.before = before
+
+	return window, nil
+}
+
 // ParseFirst extracts the "first" argument for connection queries.
 func ParseFirst(args map[string]interface{}) (int, error) {
-	if args == nil {
-		return DefaultConnectionLimit, nil
+	return ParseFirstWithDefault(args, DefaultConnectionLimit)
+}
+
+// ParseFirstWithDefault extracts the "first" argument for connection queries
+// using the supplied fallback when the argument is omitted.
+func ParseFirstWithDefault(args map[string]interface{}, fallback int) (int, error) {
+	if fallback <= 0 {
+		fallback = DefaultConnectionLimit
 	}
-	raw, ok := args["first"]
+	if args == nil {
+		return normalizeFirstLimit(fallback), nil
+	}
+	value, hasFirst, err := parseConnectionLimitArg(args, "first")
+	if err != nil {
+		return 0, err
+	}
+	if !hasFirst {
+		return normalizeFirstLimit(fallback), nil
+	}
+	return value, nil
+}
+
+func normalizeFirstLimit(limit int) int {
+	if limit < 0 {
+		return 0
+	}
+	if limit > MaxConnectionLimit {
+		return MaxConnectionLimit
+	}
+	return limit
+}
+
+func parseConnectionLimitArg(args map[string]interface{}, name string) (int, bool, error) {
+	if args == nil {
+		return 0, false, nil
+	}
+	raw, ok := args[name]
 	if !ok || raw == nil {
-		return DefaultConnectionLimit, nil
+		return 0, false, nil
 	}
 	switch v := raw.(type) {
 	case int:
-		// first=0 is intentional: callers can request pageInfo/totalCount only.
 		if v < 0 {
-			return 0, fmt.Errorf("first must be non-negative")
+			return 0, false, fmt.Errorf("%s must be non-negative", name)
 		}
 		if v > MaxConnectionLimit {
-			return MaxConnectionLimit, nil
+			return MaxConnectionLimit, true, nil
 		}
-		return v, nil
+		return v, true, nil
 	case float64:
 		iv := int(v)
 		if iv < 0 {
-			return 0, fmt.Errorf("first must be non-negative")
+			return 0, false, fmt.Errorf("%s must be non-negative", name)
 		}
 		if iv > MaxConnectionLimit {
-			return MaxConnectionLimit, nil
+			return MaxConnectionLimit, true, nil
 		}
-		return iv, nil
+		return iv, true, nil
 	default:
-		return 0, fmt.Errorf("first must be an integer")
+		return 0, false, fmt.Errorf("%s must be an integer", name)
+	}
+}
+
+func parseOptionalStringArg(args map[string]interface{}, name string) (string, bool, error) {
+	if args == nil {
+		return "", false, nil
+	}
+	raw, ok := args[name]
+	if !ok || raw == nil {
+		return "", false, nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return "", false, fmt.Errorf("%s must be a string", name)
+	}
+	return value, true, nil
+}
+
+func reverseDirection(direction string) string {
+	if strings.EqualFold(direction, "DESC") {
+		return "ASC"
+	}
+	return "DESC"
+}
+
+func reverseOrderBy(orderBy *OrderBy) *OrderBy {
+	if orderBy == nil {
+		return nil
+	}
+	columns := make([]string, len(orderBy.Columns))
+	copy(columns, orderBy.Columns)
+	return &OrderBy{
+		Columns:   columns,
+		Direction: reverseDirection(orderBy.Direction),
 	}
 }
 
@@ -697,7 +945,15 @@ func buildConnectionSQL(table introspection.Table, columns []introspection.Colum
 }
 
 func buildCountSQL(table introspection.Table, where *WhereClause) (SQLQuery, error) {
-	builder := sq.Select("COUNT(*)").
+	base, err := buildRootAggregateBaseSQL(table, where)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	return buildCountFromBaseSQL(base), nil
+}
+
+func buildRootAggregateBaseSQL(table introspection.Table, where *WhereClause) (SQLQuery, error) {
+	builder := sq.Select("*").
 		From(sqlutil.QuoteIdentifier(table.Name))
 
 	if where != nil && where.Condition != nil {
@@ -711,4 +967,15 @@ func buildCountSQL(table introspection.Table, where *WhereClause) (SQLQuery, err
 		return SQLQuery{}, err
 	}
 	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+func buildCountFromBaseSQL(base SQLQuery) SQLQuery {
+	return SQLQuery{
+		SQL:  fmt.Sprintf("SELECT COUNT(*) FROM (%s) AS __count", base.SQL),
+		Args: append([]interface{}(nil), base.Args...),
+	}
+}
+
+func BuildConnectionAggregateSQL(base SQLQuery, selection AggregateSelection) SQLQuery {
+	return PlanAggregateFromBaseSQL(base, selection)
 }

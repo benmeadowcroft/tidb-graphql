@@ -36,8 +36,10 @@ func TestOrderByIndexedPrefix(t *testing.T) {
 
 	query := `
 		{
-			posts(orderBy: { userId_createdAt: ASC }, limit: 10) {
-				databaseId
+			posts(orderBy: { userId_createdAt: ASC }, first: 10) {
+				nodes {
+					databaseId
+				}
 			}
 		}
 	`
@@ -49,7 +51,7 @@ func TestOrderByIndexedPrefix(t *testing.T) {
 	require.Empty(t, result.Errors)
 
 	data := result.Data.(map[string]interface{})
-	posts := data["posts"].([]interface{})
+	posts := requireCollectionNodes(t, data, "posts")
 	require.Len(t, posts, 4)
 
 	require.EqualValues(t, 1, posts[0].(map[string]interface{})["databaseId"])
@@ -71,8 +73,10 @@ func TestOrderByNonLeftmostRejected(t *testing.T) {
 
 	query := `
 		{
-			posts(orderBy: { createdAt: ASC }, limit: 10) {
-				id
+			posts(orderBy: { createdAt: ASC }, first: 10) {
+				nodes {
+					id
+				}
 			}
 		}
 	`

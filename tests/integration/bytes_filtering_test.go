@@ -28,8 +28,10 @@ func TestBytesFiltering_QueryAndFilter(t *testing.T) {
 	query := `
 		{
 			files(where: { payload: { eq: "SGVsbG8=" } }) {
-				name
-				payload
+				nodes {
+					name
+					payload
+				}
 			}
 		}
 	`
@@ -37,7 +39,7 @@ func TestBytesFiltering_QueryAndFilter(t *testing.T) {
 	result := graphql.Do(graphql.Params{Schema: schema, RequestString: query, Context: context.Background()})
 	require.Empty(t, result.Errors)
 
-	files := result.Data.(map[string]interface{})["files"].([]interface{})
+	files := requireCollectionNodes(t, result.Data.(map[string]interface{}), "files")
 	require.Len(t, files, 1)
 	record := files[0].(map[string]interface{})
 	assert.Equal(t, "alpha", record["name"])
@@ -88,7 +90,9 @@ func TestBytesFiltering_InvalidBase64Rejected(t *testing.T) {
 	query := `
 		{
 			files(where: { payload: { eq: "%%%invalid%%%" } }) {
-				name
+				nodes {
+					name
+				}
 			}
 		}
 	`

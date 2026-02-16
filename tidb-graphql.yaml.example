@@ -49,7 +49,7 @@ server:
   graphql_max_depth: 5         # Maximum GraphQL query depth
   graphql_max_complexity: 0    # Maximum estimated complexity (0 = unlimited)
   graphql_max_rows: 0          # Maximum estimated rows per request (0 = unlimited)
-  graphql_default_limit: 100   # Default list limit for GraphQL list queries
+  graphql_default_limit: 100   # Default page size for GraphQL connection collection queries
   schema_refresh_min_interval: 30s  # Minimum interval between schema refresh checks
   schema_refresh_max_interval: 5m   # Maximum interval between schema refresh checks
   graphiql_enabled: false      # Enable GraphiQL UI for /graphql (dev only)

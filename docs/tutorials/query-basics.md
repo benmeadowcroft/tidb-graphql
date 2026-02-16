@@ -28,9 +28,11 @@ Using the schema created from the [sample-data.sql](./sample-data.sql) we will q
 ```graphql
 query BasicUserQuery {
   users {
-  	fullName
-    email
-    status
+    nodes {
+      fullName
+      email
+      status
+    }
   }
 }
 ```
@@ -46,9 +48,11 @@ For example, we can filter the users to those who do not have certain statuses:
 ```graphql
 query {
   users(where: { status: { notIn: ["pending" "inactive"] } }) {
-    fullName
-    email
-    status
+    nodes {
+      fullName
+      email
+      status
+    }
   }
 }
 ```
@@ -62,37 +66,52 @@ Sorting uses `orderBy` with a list of fields and directions:
 ```graphql
 query {
   users(orderBy:{createdAt:DESC}) {
-    fullName
-    email
-    status
+    nodes {
+      fullName
+      email
+      status
+    }
   }
 }
 ```
 
-## 5) Limit and pagination of results
+## 5) Cursor pagination of results
 
-TiDB GraphQL includes support for limiting results sets, along with offsets to support pagination of result sets.
+TiDB GraphQL uses cursor pagination on collection fields.
 
-For example, returning the first 2 results (using limit):
+For example, returning the first 2 results:
 
 ```graphql
 query {
-  users(orderBy:{createdAt:DESC}, limit:2) {
-    fullName
-    email
-    status
+  users(orderBy:{createdAt:DESC}, first:2) {
+    edges {
+      cursor
+      node {
+        fullName
+        email
+        status
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
   }
 }
 ```
 
-Next, returning the next 2 results (using limit + offset)
+Next, returning the next 2 results using the previous `endCursor`:
 
 ```graphql
 query {
-  users(orderBy:{createdAt:DESC}, limit:2, offset:2) {
-    fullName
-    email
-    status
+  users(orderBy:{createdAt:DESC}, first:2, after:"<cursor-from-previous-page>") {
+    edges {
+      node {
+        fullName
+        email
+        status
+      }
+    }
   }
 }
 ```

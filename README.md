@@ -34,10 +34,12 @@ Open [http://localhost:8080/graphql](http://localhost:8080/graphql) and run:
 
 ```graphql
 query getUsers {
-  users {
-    id
-    fullName
-    email
+  users(first: 3) {
+    nodes {
+      id
+      fullName
+      email
+    }
   }
 }
 ```
@@ -47,13 +49,15 @@ You should see user records from the tutorial dataset, for example:
 ```json
 {
   "data": {
-    "users": [
-      {
-        "id": "...",
-        "fullName": "...",
-        "email": "..."
-      }
-    ]
+    "users": {
+      "nodes": [
+        {
+          "id": "...",
+          "fullName": "...",
+          "email": "..."
+        }
+      ]
+    }
   }
 }
 ```
@@ -63,7 +67,7 @@ Headless check (optional):
 ```bash
 curl -s -X POST http://localhost:8080/graphql \
   -H "content-type: application/json" \
-  -d '{"query":"query getUsers { users { id fullName email } }"}'
+  -d '{"query":"query getUsers { users(first: 3) { nodes { id fullName email } } }"}'
 ```
 
 ## Prerequisites

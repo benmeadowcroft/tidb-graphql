@@ -13,7 +13,7 @@ import (
 	"tidb-graphql/internal/schemafilter"
 )
 
-func TestTryBatchManyToMany_Chunking(t *testing.T) {
+func TestTryBatchManyToManyConnection_Chunking(t *testing.T) {
 	parentCount := batchMaxInClause + 1
 
 	executor := &fakeExecutor{responses: [][][]any{
@@ -62,13 +62,18 @@ func TestTryBatchManyToMany_Chunking(t *testing.T) {
 	field := &ast.Field{
 		Name: &ast.Name{Value: "tags"},
 		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
-			&ast.Field{Name: &ast.Name{Value: "id"}},
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "id"}},
+				}},
+			},
 		}},
 	}
 
-	results, ok, err := r.tryBatchManyToMany(graphql.ResolveParams{
+	results, ok, err := r.tryBatchManyToManyConnection(graphql.ResolveParams{
 		Source:  parentRows[parentCount-1],
-		Args:    map[string]interface{}{"limit": 10, "offset": 0},
+		Args:    map[string]interface{}{"first": 10},
 		Context: ctx,
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
@@ -76,8 +81,10 @@ func TestTryBatchManyToMany_Chunking(t *testing.T) {
 	}, users, rel, parentCount)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Len(t, results, 1)
-	assert.EqualValues(t, 11001, results[0]["id"])
+	nodes, ok := results["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, nodes, 1)
+	assert.EqualValues(t, 11001, nodes[0]["id"])
 
 	assert.Equal(t, 2, executor.calls)
 	require.Len(t, executor.args, 2)
@@ -85,7 +92,7 @@ func TestTryBatchManyToMany_Chunking(t *testing.T) {
 	assert.Len(t, executor.args[1], 3)
 }
 
-func TestTryBatchEdgeList_Chunking(t *testing.T) {
+func TestTryBatchEdgeListConnection_Chunking(t *testing.T) {
 	parentCount := batchMaxInClause + 1
 
 	executor := &fakeExecutor{responses: [][][]any{
@@ -132,13 +139,18 @@ func TestTryBatchEdgeList_Chunking(t *testing.T) {
 	field := &ast.Field{
 		Name: &ast.Name{Value: "userTags"},
 		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
-			&ast.Field{Name: &ast.Name{Value: "tagId"}},
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "tagId"}},
+				}},
+			},
 		}},
 	}
 
-	results, ok, err := r.tryBatchEdgeList(graphql.ResolveParams{
+	results, ok, err := r.tryBatchEdgeListConnection(graphql.ResolveParams{
 		Source:  parentRows[parentCount-1],
-		Args:    map[string]interface{}{"limit": 10, "offset": 0},
+		Args:    map[string]interface{}{"first": 10},
 		Context: ctx,
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
@@ -146,9 +158,11 @@ func TestTryBatchEdgeList_Chunking(t *testing.T) {
 	}, users, rel, parentCount)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Len(t, results, 1)
-	assert.EqualValues(t, 999, results[0]["tagId"])
-	_, hasUserID := results[0]["userId"]
+	nodes, ok := results["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, nodes, 1)
+	assert.EqualValues(t, 999, nodes[0]["tagId"])
+	_, hasUserID := nodes[0]["userId"]
 	assert.True(t, hasUserID)
 
 	assert.Equal(t, 2, executor.calls)

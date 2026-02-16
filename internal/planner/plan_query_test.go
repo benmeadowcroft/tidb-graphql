@@ -27,14 +27,8 @@ func TestPlanQuery_ListField(t *testing.T) {
 		"limit":  5,
 		"offset": 2,
 	})
-	require.NoError(t, err)
-	require.NotNil(t, plan)
-	assert.Equal(t, "users", plan.Table.Name)
-	assertSQLMatches(t, plan.Root.SQL,
-		"SELECT `id`, `username` FROM `users` LIMIT ? OFFSET ?",
-		"SELECT `id`, `username` FROM `users` LIMIT 5 OFFSET 2",
-	)
-	assertLimitOffsetArgs(t, plan.Root.SQL, plan.Root.Args, 5, 2)
+	require.Error(t, err)
+	assert.Nil(t, plan)
 }
 
 func TestPlanQuery_ListFieldProjection(t *testing.T) {
@@ -59,13 +53,8 @@ func TestPlanQuery_ListFieldProjection(t *testing.T) {
 		}},
 	}
 	plan, err := PlanQuery(dbSchema, field, nil)
-	require.NoError(t, err)
-	require.NotNil(t, plan)
-	assertSQLMatches(t, plan.Root.SQL,
-		"SELECT `id`, `username` FROM `users` LIMIT ? OFFSET ?",
-		"SELECT `id`, `username` FROM `users` LIMIT 100 OFFSET 0",
-	)
-	assertLimitOffsetArgs(t, plan.Root.SQL, plan.Root.Args, 100, 0)
+	require.Error(t, err)
+	assert.Nil(t, plan)
 }
 
 func TestPlanQuery_ListFieldProjectionIncludesRelationshipKey(t *testing.T) {
@@ -103,13 +92,8 @@ func TestPlanQuery_ListFieldProjectionIncludesRelationshipKey(t *testing.T) {
 		}},
 	}
 	plan, err := PlanQuery(dbSchema, field, nil)
-	require.NoError(t, err)
-	require.NotNil(t, plan)
-	assertSQLMatches(t, plan.Root.SQL,
-		"SELECT `id`, `account_id` FROM `users` LIMIT ? OFFSET ?",
-		"SELECT `id`, `account_id` FROM `users` LIMIT 100 OFFSET 0",
-	)
-	assertLimitOffsetArgs(t, plan.Root.SQL, plan.Root.Args, 100, 0)
+	require.Error(t, err)
+	assert.Nil(t, plan)
 }
 
 func TestPlanQuery_ListFieldDefaults(t *testing.T) {
@@ -127,14 +111,8 @@ func TestPlanQuery_ListFieldDefaults(t *testing.T) {
 
 	field := &ast.Field{Name: &ast.Name{Value: "users"}}
 	plan, err := PlanQuery(dbSchema, field, nil)
-	require.NoError(t, err)
-	require.NotNil(t, plan)
-	assert.Equal(t, "users", plan.Table.Name)
-	assertSQLMatches(t, plan.Root.SQL,
-		"SELECT `id`, `username` FROM `users` LIMIT ? OFFSET ?",
-		"SELECT `id`, `username` FROM `users` LIMIT 100 OFFSET 0",
-	)
-	assertLimitOffsetArgs(t, plan.Root.SQL, plan.Root.Args, 100, 0)
+	require.Error(t, err)
+	assert.Nil(t, plan)
 }
 
 func TestPlanQuery_ListFieldRejectsNegativeLimit(t *testing.T) {
@@ -206,12 +184,8 @@ func TestPlanQuery_ListFieldOrderBy(t *testing.T) {
 			"lastName_firstName": "ASC",
 		},
 	})
-	require.NoError(t, err)
-	require.NotNil(t, plan)
-	assertSQLMatches(t, plan.Root.SQL,
-		"SELECT `id`, `last_name`, `first_name` FROM `users` ORDER BY `last_name` ASC, `first_name` ASC, `id` ASC LIMIT ? OFFSET ?",
-		"SELECT `id`, `last_name`, `first_name` FROM `users` ORDER BY `last_name` ASC, `first_name` ASC, `id` ASC LIMIT 100 OFFSET 0",
-	)
+	require.Error(t, err)
+	assert.Nil(t, plan)
 }
 
 func TestPlanQuery_ListFieldOrderByInvalid(t *testing.T) {
@@ -406,14 +380,8 @@ func TestPlanQuery_RelationshipOneToMany(t *testing.T) {
 		Value:        7,
 		IsOneToMany:  true,
 	}))
-	require.NoError(t, err)
-	require.NotNil(t, plan)
-	assert.Equal(t, "posts", plan.Table.Name)
-	assertSQLMatches(t, plan.Root.SQL,
-		"SELECT `id`, `user_id`, `title` FROM `posts` WHERE `user_id` = ? LIMIT ? OFFSET ?",
-		"SELECT `id`, `user_id`, `title` FROM `posts` WHERE `user_id` = ? LIMIT 12 OFFSET 4",
-	)
-	assertWhereLimitOffsetArgs(t, plan.Root.SQL, plan.Root.Args, []interface{}{7}, 12, 4)
+	require.Error(t, err)
+	assert.Nil(t, plan)
 }
 
 func TestSelectedColumnsForConnection_RootFragmentSpread(t *testing.T) {
@@ -490,6 +458,36 @@ func TestSelectedColumnsForConnection_EdgesNodeViaFragment(t *testing.T) {
 
 	orderBy := &OrderBy{Columns: []string{"id"}, Direction: "ASC"}
 	cols := SelectedColumnsForConnection(table, field, fragments, orderBy)
+	names := columnNamesOnly(cols)
+
+	assert.Equal(t, []string{"id", "created_at"}, names)
+}
+
+func TestSelectedColumnsForConnection_MetadataOnlyUsesCursorColumns(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "email"},
+			{Name: "created_at"},
+		},
+	}
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "usersConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{Name: &ast.Name{Value: "totalCount"}},
+			&ast.Field{
+				Name: &ast.Name{Value: "aggregate"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "count"}},
+				}},
+			},
+		}},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Direction: "ASC"}
+	cols := SelectedColumnsForConnection(table, field, nil, orderBy)
 	names := columnNamesOnly(cols)
 
 	assert.Equal(t, []string{"id", "created_at"}, names)

@@ -28,11 +28,13 @@ func TestWhereFiltering_Eq(t *testing.T) {
 	// Test: Filter products by exact price match (uses indexed column)
 	query := `
 		{
-			products(where: { price: { eq: 29.99 } }, limit: 10) {
-				id
-				sku
-				name
-				price
+			products(where: { price: { eq: 29.99 } }, first: 10) {
+				nodes {
+					id
+					sku
+					name
+					price
+				}
 			}
 		}
 	`
@@ -45,7 +47,7 @@ func TestWhereFiltering_Eq(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// Should return only products with price = 29.99
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product with price 29.99")
@@ -69,10 +71,12 @@ func TestWhereFiltering_Gt(t *testing.T) {
 	// Test: Filter products with price > 50 (uses indexed column)
 	query := `
 		{
-			products(where: { price: { gt: 50 } }, limit: 10) {
-				id
-				name
-				price
+			products(where: { price: { gt: 50 } }, first: 10) {
+				nodes {
+					id
+					name
+					price
+				}
 			}
 		}
 	`
@@ -85,7 +89,7 @@ func TestWhereFiltering_Gt(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// All products should have price > 50
 	for _, p := range products {
@@ -109,10 +113,12 @@ func TestWhereFiltering_GteLte(t *testing.T) {
 	// Test: Filter products with price between 20 and 50 (uses indexed column)
 	query := `
 		{
-			products(where: { price: { gte: 20, lte: 50 } }, limit: 10) {
-				id
-				name
-				price
+			products(where: { price: { gte: 20, lte: 50 } }, first: 10) {
+				nodes {
+					id
+					name
+					price
+				}
 			}
 		}
 	`
@@ -125,7 +131,7 @@ func TestWhereFiltering_GteLte(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// All products should have 20 <= price <= 50
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product in range")
@@ -151,9 +157,11 @@ func TestWhereFiltering_In(t *testing.T) {
 	// Test: Filter products by ID IN list (uses indexed PK column)
 	query := `
 		{
-			products(where: { databaseId: { in: [1, 2, 3] } }, limit: 10) {
-				databaseId
-				name
+			products(where: { databaseId: { in: [1, 2, 3] } }, first: 10) {
+				nodes {
+					databaseId
+					name
+				}
 			}
 		}
 	`
@@ -166,7 +174,7 @@ func TestWhereFiltering_In(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// Should return exactly 3 products
 	require.Equal(t, 3, len(products), "Should return exactly 3 products")
@@ -191,10 +199,12 @@ func TestWhereFiltering_Like(t *testing.T) {
 	// Test: Filter products by SKU pattern (uses indexed sku column)
 	query := `
 		{
-			products(where: { sku: { like: "WIDGET%" } }, limit: 10) {
-				id
-				sku
-				name
+			products(where: { sku: { like: "WIDGET%" } }, first: 10) {
+				nodes {
+					id
+					sku
+					name
+				}
 			}
 		}
 	`
@@ -207,7 +217,7 @@ func TestWhereFiltering_Like(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// All products should have SKU starting with "WIDGET"
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one Widget product")
@@ -232,10 +242,12 @@ func TestWhereFiltering_IsNull(t *testing.T) {
 	// Test: Filter manufacturers with NULL email (uses indexed email column)
 	query := `
 		{
-			manufacturers(where: { email: { isNull: true } }, limit: 10) {
-				id
-				name
-				email
+			manufacturers(where: { email: { isNull: true } }, first: 10) {
+				nodes {
+					id
+					name
+					email
+				}
 			}
 		}
 	`
@@ -248,7 +260,7 @@ func TestWhereFiltering_IsNull(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	manufacturers := data["manufacturers"].([]interface{})
+	manufacturers := requireCollectionNodes(t, data, "manufacturers")
 
 	// All manufacturers should have null email
 	for _, m := range manufacturers {
@@ -271,10 +283,12 @@ func TestWhereFiltering_IsNotNull(t *testing.T) {
 	// Test: Filter manufacturers with non-NULL email (uses indexed email column)
 	query := `
 		{
-			manufacturers(where: { email: { isNull: false } }, limit: 10) {
-				id
-				name
-				email
+			manufacturers(where: { email: { isNull: false } }, first: 10) {
+				nodes {
+					id
+					name
+					email
+				}
 			}
 		}
 	`
@@ -287,7 +301,7 @@ func TestWhereFiltering_IsNotNull(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	manufacturers := data["manufacturers"].([]interface{})
+	manufacturers := requireCollectionNodes(t, data, "manufacturers")
 
 	// All manufacturers should have non-null email
 	require.GreaterOrEqual(t, len(manufacturers), 1, "Should have at least one manufacturer with email")
@@ -318,11 +332,13 @@ func TestWhereFiltering_AND(t *testing.T) {
 						{ databaseId: { gte: 1 } }
 					]
 				},
-				limit: 10
+				first: 10
 			) {
-				databaseId
-				name
-				price
+				nodes {
+					databaseId
+					name
+					price
+				}
 			}
 		}
 	`
@@ -335,7 +351,7 @@ func TestWhereFiltering_AND(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// All products should meet both conditions
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product matching both conditions")
@@ -369,11 +385,13 @@ func TestWhereFiltering_OR(t *testing.T) {
 						{ price: { gt: 100 } }
 					]
 				},
-				limit: 10
+				first: 10
 			) {
-				id
-				name
-				price
+				nodes {
+					id
+					name
+					price
+				}
 			}
 		}
 	`
@@ -386,7 +404,7 @@ func TestWhereFiltering_OR(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// All products should meet at least one condition
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product matching either condition")
@@ -424,11 +442,13 @@ func TestWhereFiltering_ComplexANDOR(t *testing.T) {
 						{ price: { gte: 100 } }
 					]
 				},
-				limit: 10
+				first: 10
 			) {
-				id
-				name
-				price
+				nodes {
+					id
+					name
+					price
+				}
 			}
 		}
 	`
@@ -441,7 +461,7 @@ func TestWhereFiltering_ComplexANDOR(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	products := data["products"].([]interface{})
+	products := requireCollectionNodes(t, data, "products")
 
 	// All products should be either in range [20, 50] OR >= 100
 	require.GreaterOrEqual(t, len(products), 1, "Should have at least one product matching the complex condition")
@@ -468,9 +488,11 @@ func TestWhereFiltering_IndexedCol(t *testing.T) {
 	// Test: Query with non-indexed column should fail
 	query := `
 		{
-			products(where: { name: { eq: "Blue Widget" } }, limit: 10) {
-				id
-				name
+			products(where: { name: { eq: "Blue Widget" } }, first: 10) {
+				nodes {
+					id
+					name
+				}
 			}
 		}
 	`

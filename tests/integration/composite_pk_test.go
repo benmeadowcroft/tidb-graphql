@@ -228,10 +228,12 @@ func TestCompositePK_ListQuery(t *testing.T) {
 	// Test: List query still works for tables with composite PK
 	query := `
 		{
-			orderItems(where: {orderId: {eq: 100}}, limit: 10) {
-				orderId
-				productId
-				quantity
+			orderItems(where: {orderId: {eq: 100}}, first: 10) {
+				nodes {
+					orderId
+					productId
+					quantity
+				}
 			}
 		}
 	`
@@ -244,7 +246,7 @@ func TestCompositePK_ListQuery(t *testing.T) {
 	require.NotNil(t, result.Data, "Result data should not be nil")
 
 	data := result.Data.(map[string]interface{})
-	items := data["orderItems"].([]interface{})
+	items := requireCollectionNodes(t, data, "orderItems")
 
 	assert.Len(t, items, 3, "Order 100 should have 3 items")
 }

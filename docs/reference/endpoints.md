@@ -5,7 +5,7 @@ All endpoints are served on the configured `server.port` (default `8080`).
 ## /graphql
 
 - Method: `POST` (GraphQL queries and mutations)
-  - Protected by OIDC when `server.oidc_enabled` is true.
+  - Protected by OIDC when `server.auth.oidc_enabled` is true.
 
 - Method: `GET` (GraphiQL UI)
   - Only exposed when `server.graphiql_enabled` is true.
@@ -31,7 +31,7 @@ Example response:
 
 - Method: `POST`
   - Triggers a schema rebuild and atomic swap.
-  - Protected by OIDC when `server.oidc_enabled` is true.
+  - Protected by OIDC when `server.auth.oidc_enabled` is true.
 
 ## /metrics
 

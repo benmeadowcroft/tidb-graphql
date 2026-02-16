@@ -6,7 +6,7 @@
 # This stack starts:
 # - TiDB with sample data
 # - role grants + restricted DB user
-# - local JWKS server at http://localhost:9000
+# - local JWKS server at https://localhost:9000
 # - tidb-graphql with OIDC + DB role authorization enabled
 
 services:
@@ -16,7 +16,7 @@ services:
       - "--config=/tidb.toml"
     volumes:
       - ./config/tidb/tidb.toml:/tidb.toml:ro
-      - tidb-data:/tmp/tidb
+      - tidb-roles-data:/tmp/tidb
     ports:
       - "4000:4000"
       - "10080:10080"
@@ -34,6 +34,7 @@ services:
         condition: service_healthy
     volumes:
       - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
+      - ./seed/roles.sql:/seed/roles.sql:ro
     entrypoint: /bin/sh
     command:
       - -ec
@@ -42,21 +43,22 @@ services:
           sleep 1
         done
         mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data.sql
-    restart: "no"
-
-  seed-roles:
-    image: mysql:8
-    depends_on:
-      seed-data:
-        condition: service_completed_successfully
-    volumes:
-      - ./seed/roles.sql:/seed/roles.sql:ro
-    entrypoint: /bin/sh
-    command:
-      - -ec
-      - |
         mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/roles.sql
     restart: "no"
+
+  # seed-roles:
+  #   image: mysql:8
+  #   depends_on:
+  #     seed-data:
+  #       condition: service_completed_successfully
+  #   volumes:
+  #     - ./seed/roles.sql:/seed/roles.sql:ro
+  #   entrypoint: /bin/sh
+  #   command:
+  #     - -ec
+  #     - |
+  #       mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/roles.sql
+  #   restart: "no"
 
   jwks:
     image: golang:1.25
@@ -68,9 +70,25 @@ services:
       - -ec
       - |
         go run ./scripts/jwt-generate-keys --dir /workspace/.auth
-        go run ./scripts/jwks-server --addr :9000 --issuer http://jwks:9000 --public-key /workspace/.auth/jwt_public.pem --tls=false --kid local-key
+        go run ./scripts/jwks-server --addr :9000 --issuer https://jwks:9000 --public-key /workspace/.auth/jwt_public.pem --kid local-key
     ports:
       - "9000:9000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "go",
+          "run",
+          "./scripts/jwks-healthcheck",
+          "--url",
+          "https://localhost:9000/.well-known/openid-configuration",
+          "--expected-issuer",
+          "https://jwks:9000",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
 
   tidb-graphql:
     image: ${TIGQL_IMAGE:-ghcr.io/benmeadowcroft/tidb-graphql:main}
@@ -85,12 +103,12 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      seed-roles:
+      seed-data:
         condition: service_completed_successfully
       jwks:
-        condition: service_started
+        condition: service_healthy
       tidb:
         condition: service_healthy
 
 volumes:
-  tidb-data:
+  tidb-roles-data:

@@ -8,6 +8,10 @@ When role-based authorization is enabled, TiDB GraphQL maps claims from the JWT 
 
 Schema introspection is handled separately. When role-based authorization is enabled, the server will assume a dedicated introspection role in order to build the schema. This role must be configured explicitly and should have read access to the schema. This keeps runtime queries constrained to request roles while still allowing the schema to refresh safely.
 
+With role-based auth enabled, the server can also build per-role schema snapshots from discovered
+roles so each role sees only the GraphQL surface it can query. This keeps schema visibility aligned
+with runtime access decisions while preserving database-led authorization.
+
 The practical upside is that access control stays in one place. You can change permissions with SQL, not by editing config or redeploying the API. If a role claim is missing or invalid, the request is rejected. The system fails closed by default.
 
 ---

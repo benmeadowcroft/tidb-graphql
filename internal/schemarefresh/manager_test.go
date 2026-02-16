@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -120,7 +122,12 @@ func TestRefreshOnce_NoChange_BacksOff(t *testing.T) {
 		minInterval:  10 * time.Second,
 		maxInterval:  time.Minute,
 	}
-	manager.active.Store(&Snapshot{Fingerprint: expected})
+	manager.active.Store(&snapshotSet{
+		Default:     &Snapshot{Fingerprint: expected},
+		ByRole:      map[string]*Snapshot{},
+		Fingerprint: expected,
+		BuiltAt:     time.Now(),
+	})
 
 	interval := manager.minInterval
 	manager.refreshOnce(context.Background(), &interval)
@@ -171,7 +178,12 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 		minInterval:  5 * time.Second,
 		maxInterval:  time.Minute,
 	}
-	manager.active.Store(&Snapshot{Fingerprint: "old"})
+	manager.active.Store(&snapshotSet{
+		Default:     &Snapshot{Fingerprint: "old"},
+		ByRole:      map[string]*Snapshot{},
+		Fingerprint: "old",
+		BuiltAt:     time.Now(),
+	})
 
 	interval := manager.minInterval
 	manager.refreshOnce(context.Background(), &interval)
@@ -190,5 +202,86 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestHandlerForContext_RoleAwareSelection(t *testing.T) {
+	manager := &Manager{
+		roleSchemas: []string{"viewer"},
+		roleFromCtx: func(ctx context.Context) (string, bool) {
+			role, ok := ctx.Value("role").(string)
+			return role, ok
+		},
+	}
+
+	defaultHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+	viewerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	manager.active.Store(&snapshotSet{
+		Default: &Snapshot{Handler: defaultHandler},
+		ByRole: map[string]*Snapshot{
+			"viewer": {Handler: viewerHandler},
+		},
+		Fingerprint: "fp",
+		BuiltAt:     time.Now(),
+	})
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		wantStatus int
+	}{
+		{
+			name:       "known role uses role handler",
+			ctx:        context.WithValue(context.Background(), "role", "viewer"),
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "unknown role forbidden",
+			ctx:        context.WithValue(context.Background(), "role", "admin"),
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "missing role forbidden",
+			ctx:        context.Background(),
+			wantStatus: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/graphql", nil).WithContext(tt.ctx)
+			rec := httptest.NewRecorder()
+			manager.HandlerForContext(req.Context()).ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status mismatch: got %d want %d", rec.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestHandlerForContext_DefaultWhenRoleSchemasDisabled(t *testing.T) {
+	manager := &Manager{}
+	manager.active.Store(&snapshotSet{
+		Default: &Snapshot{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusAccepted)
+			}),
+		},
+		ByRole:      map[string]*Snapshot{},
+		Fingerprint: "fp",
+		BuiltAt:     time.Now(),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/graphql", nil)
+	rec := httptest.NewRecorder()
+	manager.HandlerForContext(req.Context()).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status mismatch: got %d want %d", rec.Code, http.StatusAccepted)
 	}
 }

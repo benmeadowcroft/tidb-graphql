@@ -53,11 +53,12 @@ server:
   tls_enabled: true
   tls_cert_mode: selfsigned
 
-  # enable authentication
-  oidc_enabled: true
-  oidc_issuer_url: "https://localhost:9000"
-  oidc_audience: "tidb-graphql"
-  oidc_skip_tls_verify: true
+  auth:
+    # enable authentication
+    oidc_enabled: true
+    oidc_issuer_url: "https://localhost:9000"
+    oidc_audience: "tidb-graphql"
+    oidc_skip_tls_verify: true
 ```
 
 Note: `oidc_skip_tls_verify` is a dev-only escape hatch for the self-signed cert. It logs a warning.
@@ -68,7 +69,7 @@ If you plan to use TiDB's RBAC with TiDB GraphQL then you must configure the dat
 
 After you have created a suitable database user, you should update the `database` settings of the config file to use these credentials.
 
-Within the config file, you will also update the `server.db_role_*` settings to use the newly provisioned role.
+Within the config file, you will also update the `server.auth.db_role_*` settings to use the newly provisioned role.
 
 ```yaml
 database:
@@ -83,17 +84,18 @@ server:
   tls_enabled: true
   tls_cert_mode: selfsigned
 
-  # enable authentication
-  oidc_enabled: true
-  oidc_issuer_url: "https://localhost:9000"
-  oidc_audience: "tidb-graphql"
-  oidc_skip_tls_verify: true
+  auth:
+    # enable authentication
+    oidc_enabled: true
+    oidc_issuer_url: "https://localhost:9000"
+    oidc_audience: "tidb-graphql"
+    oidc_skip_tls_verify: true
 
-  # enable authorization
-  db_role_enabled: true
-  db_role_claim_name: "db_role"  # JWT claim containing the role name
-  db_role_validation: true       # Validate role against discovered roles
-  db_role_introspection_role: "app_introspect" # role to assume for introspection
+    # enable authorization
+    db_role_enabled: true
+    db_role_claim_name: "db_role"  # JWT claim containing the role name
+    db_role_validation_enabled: true  # Validate role against discovered roles
+    db_role_introspection_role: "app_introspect" # role to assume for introspection
 ```
 
 ## 6) Call GraphQL with the token

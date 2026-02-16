@@ -57,6 +57,8 @@ type Config struct {
 	Naming            naming.Config
 	Executor          dbexec.QueryExecutor
 	IntrospectionRole string
+	RoleSchemas       []string
+	RoleFromCtx       func(context.Context) (string, bool)
 }
 
 // Manager maintains and refreshes schema snapshots.
@@ -75,8 +77,17 @@ type Manager struct {
 	namingConfig      naming.Config
 	executor          dbexec.QueryExecutor
 	introspectionRole string
+	roleSchemas       []string
+	roleFromCtx       func(context.Context) (string, bool)
 	active            atomic.Value
 	wg                sync.WaitGroup
+}
+
+type snapshotSet struct {
+	Default     *Snapshot
+	ByRole      map[string]*Snapshot
+	Fingerprint string
+	BuiltAt     time.Time
 }
 
 // NewManager builds the initial schema snapshot and returns a manager.
@@ -116,6 +127,8 @@ func NewManager(cfg Config) (*Manager, error) {
 		namingConfig:      cfg.Naming,
 		executor:          cfg.Executor,
 		introspectionRole: cfg.IntrospectionRole,
+		roleSchemas:       append([]string(nil), cfg.RoleSchemas...),
+		roleFromCtx:       cfg.RoleFromCtx,
 	}
 	if manager.executor == nil {
 		manager.executor = dbexec.NewStandardExecutor(cfg.DB)
@@ -130,12 +143,12 @@ func NewManager(cfg Config) (*Manager, error) {
 		manager.logger.Warn("failed to compute schema fingerprint", slog.String("error", err.Error()))
 	}
 
-	snapshot, err := manager.buildSnapshot(context.Background(), fingerprint)
+	state, err := manager.buildSnapshotSet(context.Background(), fingerprint)
 	manager.recordRefresh(time.Since(start), err == nil, "startup")
 	if err != nil {
 		return nil, err
 	}
-	manager.active.Store(snapshot)
+	manager.active.Store(state)
 
 	return manager, nil
 }
@@ -165,11 +178,59 @@ func (m *Manager) Handler() http.Handler {
 	return snapshot.Handler
 }
 
+// HandlerForContext returns the HTTP handler for the caller's role context.
+// When role-specific snapshots are configured, missing/unknown roles fail closed.
+func (m *Manager) HandlerForContext(ctx context.Context) http.Handler {
+	state := m.currentState()
+	if state == nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "schema not ready", http.StatusServiceUnavailable)
+		})
+	}
+	if len(m.roleSchemas) == 0 {
+		if state.Default != nil && state.Default.Handler != nil {
+			return state.Default.Handler
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "schema not ready", http.StatusServiceUnavailable)
+		})
+	}
+	if m.roleFromCtx == nil {
+		return forbiddenRoleHandler()
+	}
+	role, ok := m.roleFromCtx(ctx)
+	if !ok || role == "" {
+		return forbiddenRoleHandler()
+	}
+	roleSnapshot, exists := state.ByRole[role]
+	if !exists || roleSnapshot == nil || roleSnapshot.Handler == nil {
+		return forbiddenRoleHandler()
+	}
+	return roleSnapshot.Handler
+}
+
 // CurrentSnapshot returns the active schema snapshot.
 func (m *Manager) CurrentSnapshot() *Snapshot {
+	state := m.currentState()
+	if state == nil {
+		return nil
+	}
+	return state.Default
+}
+
+func (m *Manager) currentState() *snapshotSet {
 	if value := m.active.Load(); value != nil {
-		if snapshot, ok := value.(*Snapshot); ok {
-			return snapshot
+		switch v := value.(type) {
+		case *snapshotSet:
+			return v
+		case *Snapshot:
+			// Backward-compatible fallback for tests/older in-memory values.
+			return &snapshotSet{
+				Default:     v,
+				ByRole:      map[string]*Snapshot{},
+				Fingerprint: v.Fingerprint,
+				BuiltAt:     v.BuiltAt,
+			}
 		}
 	}
 	return nil
@@ -189,13 +250,13 @@ func (m *Manager) RefreshNowContext(ctx context.Context) error {
 		return err
 	}
 
-	snapshot, err := m.buildSnapshot(ctx, fingerprint)
+	state, err := m.buildSnapshotSet(ctx, fingerprint)
 	if err != nil {
 		m.recordRefresh(time.Since(start), false, "manual")
 		return err
 	}
 
-	m.active.Store(snapshot)
+	m.active.Store(state)
 	m.recordRefresh(time.Since(start), true, "manual")
 	return nil
 }
@@ -257,6 +318,29 @@ func (m *Manager) introspectionQueryer(ctx context.Context) (introspection.Query
 	return conn, cleanup, nil
 }
 
+func (m *Manager) roleQueryer(ctx context.Context, role string) (introspection.Queryer, func(), error) {
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "SET ROLE NONE"); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("failed to clear roles before setting role %s: %w", role, err)
+	}
+	setRoleSQL := fmt.Sprintf("SET ROLE %s", sqlutil.QuoteIdentifier(role))
+	if _, err := conn.ExecContext(ctx, setRoleSQL); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("failed to set role %s: %w", role, err)
+	}
+
+	cleanup := func() {
+		_, _ = conn.ExecContext(context.Background(), "SET ROLE DEFAULT")
+		_ = conn.Close()
+	}
+
+	return conn, cleanup, nil
+}
+
 func (m *Manager) refreshOnce(ctx context.Context, interval *time.Duration) {
 	start := time.Now()
 	fingerprint, err := m.computeFingerprint(ctx)
@@ -267,7 +351,7 @@ func (m *Manager) refreshOnce(ctx context.Context, interval *time.Duration) {
 		return
 	}
 
-	current := m.CurrentSnapshot()
+	current := m.currentState()
 	if current != nil && fingerprint == current.Fingerprint {
 		m.recordRefresh(time.Since(start), true, "poll_no_change")
 		*interval = nextInterval(*interval, m.minInterval, m.maxInterval)
@@ -275,7 +359,7 @@ func (m *Manager) refreshOnce(ctx context.Context, interval *time.Duration) {
 	}
 
 	m.logger.Info("schema change detected, rebuilding", slog.String("fingerprint", fingerprint))
-	snapshot, err := m.buildSnapshot(ctx, fingerprint)
+	state, err := m.buildSnapshotSet(ctx, fingerprint)
 	if err != nil {
 		m.logger.Error("failed to rebuild schema", slog.String("error", err.Error()))
 		m.recordRefresh(time.Since(start), false, "poll")
@@ -283,24 +367,59 @@ func (m *Manager) refreshOnce(ctx context.Context, interval *time.Duration) {
 		return
 	}
 
-	m.active.Store(snapshot)
+	m.active.Store(state)
 	*interval = m.minInterval
 	m.recordRefresh(time.Since(start), true, "poll")
 	m.logger.Info("schema refresh complete", slog.String("fingerprint", fingerprint))
 }
 
-func (m *Manager) buildSnapshot(ctx context.Context, fingerprint string) (*Snapshot, error) {
-	start := time.Now()
-
-	m.logger.Info("introspecting database schema")
-	queryer, cleanup, err := m.introspectionQueryer(ctx)
+func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint string) (*snapshotSet, error) {
+	defaultQueryer, defaultCleanup, err := m.introspectionQueryer(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize introspection role: %w", err)
 	}
-	if cleanup != nil {
-		defer cleanup()
+	defaultSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint, defaultQueryer)
+	if defaultCleanup != nil {
+		defaultCleanup()
+	}
+	if err != nil {
+		return nil, err
 	}
 
+	state := &snapshotSet{
+		Default:     defaultSnapshot,
+		ByRole:      map[string]*Snapshot{},
+		Fingerprint: defaultSnapshot.Fingerprint,
+		BuiltAt:     defaultSnapshot.BuiltAt,
+	}
+
+	if len(m.roleSchemas) == 0 {
+		return state, nil
+	}
+
+	roleSnapshots := make(map[string]*Snapshot, len(m.roleSchemas))
+	for _, role := range m.roleSchemas {
+		roleQueryer, roleCleanup, err := m.roleQueryer(ctx, role)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize role queryer for %s: %w", role, err)
+		}
+		roleSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint, roleQueryer)
+		if roleCleanup != nil {
+			roleCleanup()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to build role-specific schema for %s: %w", role, err)
+		}
+		roleSnapshots[role] = roleSnapshot
+	}
+	state.ByRole = roleSnapshots
+	return state, nil
+}
+
+func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, fingerprint string, queryer introspection.Queryer) (*Snapshot, error) {
+	start := time.Now()
+
+	m.logger.Info("introspecting database schema")
 	dbSchema, err := introspection.IntrospectDatabaseContext(ctx, queryer, m.databaseName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to introspect database: %w", err)
@@ -437,4 +556,10 @@ func (m *Manager) recordRefresh(duration time.Duration, success bool, trigger st
 		return
 	}
 	m.metrics.RecordRefresh(context.Background(), duration, success, trigger)
+}
+
+func forbiddenRoleHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "role schema not available", http.StatusForbidden)
+	})
 }

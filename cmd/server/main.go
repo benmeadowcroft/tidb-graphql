@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -196,6 +198,19 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("failed to discover database roles: %w", err)
 		}
+		availableRoles, err = resolveRoleSchemaTargets(
+			availableRoles,
+			cfg.Server.Auth.RoleSchemaInclude,
+			cfg.Server.Auth.RoleSchemaExclude,
+			cfg.Server.Auth.RoleSchemaMaxRoles,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to resolve role schema targets: %w", err)
+		}
+		logger.Info("selected role schema targets",
+			slog.Int("count", len(availableRoles)),
+			slog.Any("roles", availableRoles),
+		)
 
 		if err := validateDBRolePrivileges(db, effectiveDatabase, logger); err != nil {
 			return fmt.Errorf("failed to validate database role privileges: %w", err)
@@ -203,7 +218,7 @@ func run() error {
 	}
 
 	queryExecutor := buildQueryExecutor(cfg, db, availableRoles, effectiveDatabase)
-	manager, schemaCancel, err := startSchemaManager(cfg, logger, db, limits, schemaRefreshMetrics, queryExecutor, effectiveDatabase)
+	manager, schemaCancel, err := startSchemaManager(cfg, logger, db, limits, schemaRefreshMetrics, queryExecutor, effectiveDatabase, availableRoles)
 	if err != nil {
 		return fmt.Errorf("failed to initialize schema refresh manager: %w", err)
 	}
@@ -586,6 +601,63 @@ func discoverRoles(db *sql.DB, logger *logging.Logger) ([]string, error) {
 	return availableRoles, nil
 }
 
+func resolveRoleSchemaTargets(discoveredRoles []string, includePatterns []string, excludePatterns []string, maxRoles int) ([]string, error) {
+	if maxRoles <= 0 {
+		return nil, fmt.Errorf("role_schema_max_roles must be greater than 0")
+	}
+	if len(includePatterns) == 0 {
+		includePatterns = []string{"*"}
+	}
+
+	selected := make([]string, 0, len(discoveredRoles))
+	seen := make(map[string]struct{}, len(discoveredRoles))
+	for _, role := range discoveredRoles {
+		roleName := strings.TrimSpace(role)
+		if roleName == "" {
+			continue
+		}
+		if _, exists := seen[roleName]; exists {
+			continue
+		}
+		seen[roleName] = struct{}{}
+		if !matchesAnyRolePattern(roleName, includePatterns) {
+			continue
+		}
+		if matchesAnyRolePattern(roleName, excludePatterns) {
+			continue
+		}
+		selected = append(selected, roleName)
+	}
+	sort.Strings(selected)
+
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no roles selected for schema generation after include/exclude filtering")
+	}
+	if len(selected) > maxRoles {
+		return nil, fmt.Errorf("selected role count %d exceeds role_schema_max_roles %d", len(selected), maxRoles)
+	}
+
+	return selected, nil
+}
+
+func matchesAnyRolePattern(role string, patterns []string) bool {
+	role = strings.ToLower(role)
+	for _, pattern := range patterns {
+		p := strings.TrimSpace(pattern)
+		if p == "" {
+			continue
+		}
+		ok, err := path.Match(strings.ToLower(p), role)
+		if err != nil {
+			continue
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 func validateDBRolePrivileges(db *sql.DB, targetDatabase string, logger *logging.Logger) error {
 	result, err := introspection.ValidateRoleBasedAuthPrivileges(context.Background(), db, targetDatabase)
 	if err != nil {
@@ -623,7 +695,14 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string,
 	return queryExecutor
 }
 
-func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, limits *planner.PlanLimits, metrics *observability.SchemaRefreshMetrics, executor dbexec.QueryExecutor, effectiveDatabase string) (*schemarefresh.Manager, context.CancelFunc, error) {
+func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, limits *planner.PlanLimits, metrics *observability.SchemaRefreshMetrics, executor dbexec.QueryExecutor, effectiveDatabase string, availableRoles []string) (*schemarefresh.Manager, context.CancelFunc, error) {
+	var roleFromCtx func(context.Context) (string, bool)
+	if cfg.Server.Auth.DBRoleEnabled {
+		roleFromCtx = func(ctx context.Context) (string, bool) {
+			role, ok := middleware.DBRoleFromContext(ctx)
+			return role.Role, ok && role.Validated
+		}
+	}
 	manager, err := schemarefresh.NewManager(schemarefresh.Config{
 		DB:                db,
 		DatabaseName:      effectiveDatabase,
@@ -639,6 +718,8 @@ func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, 
 		Naming:            cfg.Naming,
 		Executor:          executor,
 		IntrospectionRole: cfg.Server.Auth.DBRoleIntrospectionRole,
+		RoleSchemas:       availableRoles,
+		RoleFromCtx:       roleFromCtx,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -662,7 +743,7 @@ func oidcAuthConfig(cfg *config.Config) middleware.OIDCAuthConfig {
 
 func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *schemarefresh.Manager, graphqlMetrics *observability.GraphQLMetrics, securityMetrics *observability.SecurityMetrics, executor dbexec.QueryExecutor, availableRoles []string) (http.Handler, error) {
 	graphqlHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		manager.Handler().ServeHTTP(w, r)
+		manager.HandlerForContext(r.Context()).ServeHTTP(w, r)
 	})
 
 	batchingHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

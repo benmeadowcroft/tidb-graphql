@@ -11,8 +11,9 @@ server:
   tls_mode: off
   auth:
     oidc_enabled: true
-    oidc_issuer_url: http://jwks:9000
+    oidc_issuer_url: https://jwks:9000
     oidc_audience: tidb-graphql
+    oidc_skip_tls_verify: true
     db_role_enabled: true
     db_role_claim_name: db_role
     db_role_validation_enabled: true

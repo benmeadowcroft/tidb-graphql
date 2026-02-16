@@ -145,6 +145,9 @@ type AuthConfig struct {
 	DBRoleClaimName         string        `mapstructure:"db_role_claim_name"`
 	DBRoleValidationEnabled bool          `mapstructure:"db_role_validation_enabled"`
 	DBRoleIntrospectionRole string        `mapstructure:"db_role_introspection_role"`
+	RoleSchemaInclude       []string      `mapstructure:"role_schema_include"`
+	RoleSchemaExclude       []string      `mapstructure:"role_schema_exclude"`
+	RoleSchemaMaxRoles      int           `mapstructure:"role_schema_max_roles"`
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -533,6 +536,9 @@ func defineFlags() {
 		pflag.String("server.auth.db_role_claim_name", "", "JWT claim name containing database role (default: db_role)")
 		pflag.Bool("server.auth.db_role_validation_enabled", false, "Validate db_role against discovered database roles")
 		pflag.String("server.auth.db_role_introspection_role", "", "Database role used for schema introspection when role auth is enabled")
+		pflag.StringSlice("server.auth.role_schema_include", nil, "Role glob patterns to include for role-specific schema snapshots (default: [*])")
+		pflag.StringSlice("server.auth.role_schema_exclude", nil, "Role glob patterns to exclude from role-specific schema snapshots")
+		pflag.Int("server.auth.role_schema_max_roles", 0, "Maximum number of role-specific schemas to build when db_role_enabled is true")
 		pflag.Bool("server.rate_limit_enabled", false, "Enable global rate limiting for all HTTP endpoints")
 		pflag.Float64("server.rate_limit_rps", 0, "Global rate limit requests per second")
 		pflag.Int("server.rate_limit_burst", 0, "Global rate limit burst size")
@@ -653,6 +659,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.auth.db_role_claim_name", "db_role")
 	v.SetDefault("server.auth.db_role_validation_enabled", true)
 	v.SetDefault("server.auth.db_role_introspection_role", "")
+	v.SetDefault("server.auth.role_schema_include", []string{"*"})
+	v.SetDefault("server.auth.role_schema_exclude", []string{})
+	v.SetDefault("server.auth.role_schema_max_roles", 64)
 	v.SetDefault("server.rate_limit_enabled", false)
 	v.SetDefault("server.rate_limit_rps", 0.0)
 	v.SetDefault("server.rate_limit_burst", 0)
@@ -1334,6 +1343,16 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 			Hint:    "set server.auth.db_role_introspection_role to a role with necessary schema read access",
 		})
 	}
+	if s.Auth.DBRoleEnabled {
+		if s.Auth.RoleSchemaMaxRoles <= 0 {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "server.auth.role_schema_max_roles",
+				Message: "role_schema_max_roles must be greater than 0",
+			})
+		}
+		validateGlobList(result, "server.auth.role_schema_include", s.Auth.RoleSchemaInclude)
+		validateGlobList(result, "server.auth.role_schema_exclude", s.Auth.RoleSchemaExclude)
+	}
 
 	if s.Auth.OIDCEnabled {
 		if s.Auth.OIDCIssuerURL == "" {
@@ -1371,6 +1390,24 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 			result.Errors = append(result.Errors, ValidationError{
 				Field:   "server.tls_key_file",
 				Message: "TLS key file required when tls_mode is 'file'",
+			})
+		}
+	}
+}
+
+func validateGlobList(result *ValidationResult, field string, patterns []string) {
+	for _, pattern := range patterns {
+		if strings.TrimSpace(pattern) == "" {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   field,
+				Message: "glob pattern cannot be empty",
+			})
+			continue
+		}
+		if _, err := path.Match(strings.ToLower(pattern), "probe"); err != nil {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   field,
+				Message: fmt.Sprintf("invalid glob pattern %q: %v", pattern, err),
 			})
 		}
 	}

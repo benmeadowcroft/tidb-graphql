@@ -4,7 +4,7 @@ TiDB GraphQL resolves nested relationship fields with request-scoped batching to
 
 ## Why batching exists
 
-Generated GraphQL schemas expose many nested relationship paths (lists, connections, aggregates). Without batching, a query that returns `N` parent rows and asks for a nested relationship can trigger `N` extra SQL statements for that nested field.
+Generated GraphQL schemas expose many nested relationship paths (connections and aggregates). Without batching, a query that returns `N` parent rows and asks for a nested relationship can trigger `N` extra SQL statements for that nested field.
 
 Batching keeps API semantics the same, but changes execution from:
 
@@ -44,23 +44,15 @@ flowchart LR
 | Relationship shape | Resolver function | Batch helper | Batched when | Planner SQL strategy | Fallback |
 | --- | --- | --- | --- | --- | --- |
 | Many-to-one (object) | `makeManyToOneResolver` | `tryBatchManyToOne` | Parent rows available in batch state | `PlanManyToOneBatch`: single `IN (...)` lookup on target table with parent alias projection | Per-parent `PlanQuery(...IsManyToOne)` |
-| One-to-many (list) | `makeOneToManyResolver` | `tryBatchOneToMany` | Parent rows available in batch state | `PlanOneToManyBatch`: window function (`ROW_NUMBER() OVER (PARTITION BY fk ...)`) for per-parent paging | Per-parent `PlanQuery(...IsOneToMany)` |
-| Many-to-many (list) | `makeManyToManyResolver` | `tryBatchManyToMany` | Parent rows available in batch state | `PlanManyToManyBatch`: join target + junction + per-parent windowing | Per-parent `PlanManyToMany` |
-| Edge-list (list of junction rows) | `makeEdgeListResolver` | `tryBatchEdgeList` | Parent rows available in batch state | `PlanEdgeListBatch`: batched junction scan + per-parent windowing | Per-parent `PlanEdgeList` |
 | One-to-many (connection) | `makeOneToManyConnectionResolver` | `tryBatchOneToManyConnection` | **First page only** (`after` absent) and parent rows available | `PlanOneToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanOneToManyConnection` (used for cursor pages) |
 | Many-to-many (connection) | `makeManyToManyConnectionResolver` | `tryBatchManyToManyConnection` | **First page only** (`after` absent) and parent rows available | `PlanManyToManyConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanManyToManyConnection` (used for cursor pages) |
 | Edge-list (connection) | `makeEdgeListConnectionResolver` | `tryBatchEdgeListConnection` | **First page only** (`after` absent) and parent rows available | `PlanEdgeListConnectionBatch` fetches `first+1` rows per parent + per-parent count SQL | Per-parent `PlanEdgeListConnection` (used for cursor pages) |
 
 ## Batch strategies by resolver category
 
-### List relationships
-
-- `tryBatchManyToOne` uses a straightforward `IN (...)` plan because each parent expects a single related row.
-- `tryBatchOneToMany`, `tryBatchManyToMany`, and `tryBatchEdgeList` use window functions to preserve per-parent pagination semantics (`limit`/`offset`) while still batching many parents in one statement.
-- Results are grouped by the synthetic alias `__batch_parent_id` and fanned back out per parent.
-
 ### Connection relationships
 
+- `tryBatchManyToOne` uses a straightforward `IN (...)` plan because each parent expects a single related row.
 - First-page/no-cursor requests are batched by `tryBatchOneToManyConnection`, `tryBatchManyToManyConnection`, and `tryBatchEdgeListConnection`.
 - Cursor pages (`after` present) intentionally fall back to per-parent seek queries for correctness and manageable SQL complexity.
 - Batched connection data plans fetch `first + 1` rows per parent to compute `hasNextPage`, then trim to `first`.
@@ -85,7 +77,7 @@ Fallback changes round-trip count, not response correctness.
 - Parent key lists are chunked by `batchMaxInClause` (currently `1000`) to avoid oversized `IN` lists.
 - Batch caches are keyed by relation identity + relevant arguments + selected columns + parent scope, so sibling field resolutions in one request reuse work.
 - Query-count intuition:
-  - without batching: `users` list of 100 rows + nested relationship can trigger ~100 child queries.
+  - without batching: `users(first: 100)` + nested relationship can trigger ~100 child queries.
   - with batching: the same nested field usually triggers one query per chunk (often 1).
   - connection fields may still run additional per-parent count queries if `totalCount` is requested.
 - Batching reduces SQL round trips; it does not reduce returned data volume by itself.

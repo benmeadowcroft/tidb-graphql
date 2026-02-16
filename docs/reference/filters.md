@@ -1,6 +1,6 @@
 # Filter language
 
-Filters are expressed with a `where` input object on list fields and relationship connection fields.
+Filters are expressed with a `where` input object on connection collection fields.
 JSON columns are excluded from `where` inputs.
 If a table has a primary key column named `id`, it is exposed as `databaseId` in filter inputs.
 
@@ -14,8 +14,10 @@ Example:
 ```graphql
 {
   users(where: { AND: [{ status: { eq: "active" } }, { createdAt: { gte: "2024-01-01T00:00:00Z" } }] }) {
-    id
-    email
+    nodes {
+      id
+      email
+    }
   }
 }
 ```
@@ -39,8 +41,10 @@ Example:
 ```graphql
 {
   users(where: { email: { like: "%@example.com" }, status: { ne: INACTIVE } }) {
-    id
-    email
+    nodes {
+      id
+      email
+    }
   }
 }
 ```
@@ -50,8 +54,10 @@ Bytes example:
 ```graphql
 {
   files(where: { payload: { eq: "SGVsbG8=" } }) {
-    id
-    payload
+    nodes {
+      id
+      payload
+    }
   }
 }
 ```
@@ -61,9 +67,11 @@ Set examples:
 ```graphql
 {
   products(where: { tags: { has: FEATURED } }) {
-    id
-    name
-    tags
+    nodes {
+      id
+      name
+      tags
+    }
   }
 }
 ```
@@ -71,9 +79,11 @@ Set examples:
 ```graphql
 {
   products(where: { tags: { hasAnyOf: [FEATURED, SEASONAL] } }) {
-    id
-    name
-    tags
+    nodes {
+      id
+      name
+      tags
+    }
   }
 }
 ```
@@ -81,9 +91,11 @@ Set examples:
 ```graphql
 {
   products(where: { tags: { eq: [FEATURED, NEW] } }) {
-    id
-    name
-    tags
+    nodes {
+      id
+      name
+      tags
+    }
   }
 }
 ```
@@ -108,8 +120,10 @@ Example:
 ```graphql
 {
   users(orderBy: { createdAt: DESC }) {
-    id
-    createdAt
+    nodes {
+      id
+      createdAt
+    }
   }
 }
 ```

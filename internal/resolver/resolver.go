@@ -226,32 +226,6 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 
 	fieldName := introspection.GraphQLQueryName(table)
 
-	// List query
-	fields[fieldName] = &graphql.Field{
-		Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(tableType))),
-		Args: graphql.FieldConfigArgument{
-			"limit": &graphql.ArgumentConfig{
-				Type:         r.nonNegativeIntScalar(),
-				DefaultValue: r.defaultLimit,
-			},
-			"offset": &graphql.ArgumentConfig{
-				Type:         r.nonNegativeIntScalar(),
-				DefaultValue: 0,
-			},
-		},
-		Resolve: r.makeListResolver(table),
-	}
-	if orderByInput := r.orderByInput(table); orderByInput != nil {
-		fields[fieldName].Args["orderBy"] = &graphql.ArgumentConfig{
-			Type: orderByInput,
-		}
-	}
-	if whereInput := r.whereInput(table); whereInput != nil {
-		fields[fieldName].Args["where"] = &graphql.ArgumentConfig{
-			Type: whereInput,
-		}
-	}
-
 	// Primary key query (supports both single and composite primary keys)
 	// Uses singular name (e.g., "user" not "user_by_pk") for cleaner API
 	pkCols := introspection.PrimaryKeyColumns(table)
@@ -264,14 +238,13 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 	// Unique key queries
 	r.addUniqueKeyQueries(fields, table, tableType, r.singularQueryName(table))
 
-	// Connection query (only for tables with primary keys)
+	// Root collection query (connection shape, only for tables with primary keys).
 	if len(pkCols) > 0 {
-		connectionName := fieldName + "Connection"
 		connectionType := r.buildConnectionType(table, tableType)
 		connArgs := graphql.FieldConfigArgument{
 			"first": &graphql.ArgumentConfig{
 				Type:         r.nonNegativeIntScalar(),
-				DefaultValue: planner.DefaultConnectionLimit,
+				DefaultValue: r.defaultLimit,
 			},
 			"after": &graphql.ArgumentConfig{
 				Type: graphql.String,
@@ -287,7 +260,7 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 				Type: whereInput,
 			}
 		}
-		fields[connectionName] = &graphql.Field{
+		fields[fieldName] = &graphql.Field{
 			Type:    graphql.NewNonNull(connectionType),
 			Args:    connArgs,
 			Resolve: r.makeConnectionResolver(table),
@@ -462,7 +435,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				Resolve: r.makeManyToOneResolver(table, rel),
 			}
 		} else if rel.IsOneToMany {
-			// One-to-many: returns list of objects
+			// One-to-many: returns connection (only when related table has PK)
 			relatedTable, err := r.findTable(rel.RemoteTable)
 			if err != nil {
 				// Log error but continue - this shouldn't happen if schema was built correctly
@@ -470,36 +443,13 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 				continue
 			}
 			relatedType := r.buildGraphQLType(relatedTable)
-
-			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(relatedType))),
-				Args: graphql.FieldConfigArgument{
-					"limit": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: r.defaultLimit,
-					},
-					"offset": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: 0,
-					},
-				},
-				Resolve: r.makeOneToManyResolver(table, rel),
-			}
-			if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
-				fields[rel.GraphQLFieldName].Args["orderBy"] = &graphql.ArgumentConfig{
-					Type: orderByInput,
-				}
-			}
-
-				// Add connection field for one-to-many relationships (only if related table has PK)
-				relPKCols := introspection.PrimaryKeyColumns(relatedTable)
-				if len(relPKCols) > 0 {
-				connFieldName := rel.GraphQLFieldName + "Connection"
+			relPKCols := introspection.PrimaryKeyColumns(relatedTable)
+			if len(relPKCols) > 0 {
 				connType := r.buildConnectionType(relatedTable, relatedType)
 				connArgs := graphql.FieldConfigArgument{
 					"first": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: planner.DefaultConnectionLimit,
+						DefaultValue: r.defaultLimit,
 					},
 					"after": &graphql.ArgumentConfig{
 						Type: graphql.String,
@@ -515,45 +465,22 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: whereInput,
 					}
 				}
-				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeOneToManyConnectionResolver(table, rel))
+				addRelConnectionField(fields, rel.GraphQLFieldName, connType, connArgs, r.makeOneToManyConnectionResolver(table, rel))
 			}
 		} else if rel.IsManyToMany {
-			// Many-to-many through pure junction: returns list of related entities
+			// Many-to-many through pure junction: returns connection (only when related table has PK)
 			relatedTable, err := r.findTable(rel.RemoteTable)
 			if err != nil {
 				continue
 			}
 			relatedType := r.buildGraphQLType(relatedTable)
-
-			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(relatedType))),
-				Args: graphql.FieldConfigArgument{
-					"limit": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: r.defaultLimit,
-					},
-					"offset": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: 0,
-					},
-				},
-				Resolve: r.makeManyToManyResolver(table, rel),
-			}
-			if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
-				fields[rel.GraphQLFieldName].Args["orderBy"] = &graphql.ArgumentConfig{
-					Type: orderByInput,
-				}
-			}
-
-			// Add connection field for many-to-many relationships (only if related table has PK)
 			relPKCols := introspection.PrimaryKeyColumns(relatedTable)
 			if len(relPKCols) > 0 {
-				connFieldName := rel.GraphQLFieldName + "Connection"
 				connType := r.buildConnectionType(relatedTable, relatedType)
 				connArgs := graphql.FieldConfigArgument{
 					"first": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: planner.DefaultConnectionLimit,
+						DefaultValue: r.defaultLimit,
 					},
 					"after": &graphql.ArgumentConfig{
 						Type: graphql.String,
@@ -569,45 +496,22 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: whereInput,
 					}
 				}
-				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeManyToManyConnectionResolver(table, rel))
+				addRelConnectionField(fields, rel.GraphQLFieldName, connType, connArgs, r.makeManyToManyConnectionResolver(table, rel))
 			}
 		} else if rel.IsEdgeList {
-			// Edge list through attribute junction: returns list of edge/junction objects
+			// Edge list through attribute junction: returns connection (only when junction table has PK)
 			junctionTable, err := r.findTable(rel.JunctionTable)
 			if err != nil {
 				continue
 			}
 			edgeType := r.buildGraphQLType(junctionTable)
-
-			fields[rel.GraphQLFieldName] = &graphql.Field{
-				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(edgeType))),
-				Args: graphql.FieldConfigArgument{
-					"limit": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: r.defaultLimit,
-					},
-					"offset": &graphql.ArgumentConfig{
-						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: 0,
-					},
-				},
-				Resolve: r.makeEdgeListResolver(table, rel),
-			}
-			if orderByInput := r.orderByInput(junctionTable); orderByInput != nil {
-				fields[rel.GraphQLFieldName].Args["orderBy"] = &graphql.ArgumentConfig{
-					Type: orderByInput,
-				}
-			}
-
-			// Add connection field for edge-list relationships (only if junction table has PK)
 			relPKCols := introspection.PrimaryKeyColumns(junctionTable)
 			if len(relPKCols) > 0 {
-				connFieldName := rel.GraphQLFieldName + "Connection"
 				connType := r.buildConnectionType(junctionTable, edgeType)
 				connArgs := graphql.FieldConfigArgument{
 					"first": &graphql.ArgumentConfig{
 						Type:         r.nonNegativeIntScalar(),
-						DefaultValue: planner.DefaultConnectionLimit,
+						DefaultValue: r.defaultLimit,
 					},
 					"after": &graphql.ArgumentConfig{
 						Type: graphql.String,
@@ -623,7 +527,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: whereInput,
 					}
 				}
-				addRelConnectionField(fields, connFieldName, connType, connArgs, r.makeEdgeListConnectionResolver(table, rel))
+				addRelConnectionField(fields, rel.GraphQLFieldName, connType, connArgs, r.makeEdgeListConnectionResolver(table, rel))
 			}
 		}
 	}
@@ -813,36 +717,6 @@ func (r *Resolver) buildCountDistinctFieldsType(table introspection.Table) *grap
 	r.mu.Unlock()
 
 	return objType
-}
-
-func (r *Resolver) makeListResolver(table introspection.Table) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		planned, err := r.planFromParams(p)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build query: %w", err)
-		}
-
-		if planned.Table.Name != table.Name {
-			return nil, fmt.Errorf("planned table mismatch: expected %s got %s", table.Name, planned.Table.Name)
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.Root.SQL, planned.Root.Args...)
-		if err != nil {
-			return nil, normalizeQueryError(err)
-		}
-		defer func() {
-			_ = rows.Close()
-		}()
-
-		results, err := scanRows(rows, columnsForPlan(planned))
-		if err != nil {
-			return nil, err
-		}
-
-		seedBatchRows(p, results)
-
-		return results, nil
-	}
 }
 
 // makeSingleRowResolver creates a resolver that returns at most one row.
@@ -1128,131 +1002,11 @@ func seedBatchRows(p graphql.ResolveParams, rows []map[string]interface{}) {
 	state.setParentRows(parentKey, rows)
 }
 
-func (r *Resolver) aggregateArgs(table introspection.Table) graphql.FieldConfigArgument {
-	args := graphql.FieldConfigArgument{
-		"limit": &graphql.ArgumentConfig{
-			Type: r.nonNegativeIntScalar(),
-		},
-		"offset": &graphql.ArgumentConfig{
-			Type: r.nonNegativeIntScalar(),
-		},
-		// inheritListDefaults: When true, applies the same default limit/offset as list queries.
-		// Useful for ensuring aggregate queries match their corresponding list queries
-		// (e.g., "show me 50 orders AND their total").
-		"inheritListDefaults": &graphql.ArgumentConfig{
-			Type:         graphql.Boolean,
-			DefaultValue: false,
-		},
-	}
-
-	if orderByInput := r.orderByInput(table); orderByInput != nil {
-		args["orderBy"] = &graphql.ArgumentConfig{
-			Type: orderByInput,
-		}
-	}
-	if whereInput := r.whereInput(table); whereInput != nil {
-		args["where"] = &graphql.ArgumentConfig{
-			Type: whereInput,
-		}
-	}
-
-	return args
-}
-
-// aggregateFiltersFromArgs parses aggregate filter arguments from GraphQL args.
-// extraIndexedColumns are added to index validation (e.g., relationship FK columns
-// which are implicitly indexed but not in the user's WHERE clause).
-func (r *Resolver) aggregateFiltersFromArgs(table introspection.Table, args map[string]interface{}, extraIndexedColumns ...string) (*planner.AggregateFilters, error) {
-	limit, hasLimit := optionalIntArg(args, "limit")
-	offset, hasOffset := optionalIntArg(args, "offset")
-	inheritDefaults := boolArg(args, "inheritListDefaults")
-	if inheritDefaults {
-		if !hasLimit {
-			limit = r.defaultLimit
-			hasLimit = true
-		}
-		if !hasOffset {
-			offset = 0
-			hasOffset = true
-		}
-	}
-
-	orderBy, err := planner.ParseOrderBy(table, args)
-	if err != nil {
-		return nil, err
-	}
-
-	var whereClause *planner.WhereClause
-	if whereArg, ok := args["where"]; ok {
-		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClause(table, whereMap)
-			if err != nil {
-				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
-			}
-			if whereClause != nil {
-				usedColumns := append([]string{}, whereClause.UsedColumns...)
-				if len(extraIndexedColumns) > 0 {
-					usedColumns = append(usedColumns, extraIndexedColumns...)
-				}
-				if err := planner.ValidateIndexedColumns(table, usedColumns); err != nil {
-					return nil, err
-				}
-			}
-		}
-	}
-
-	filters := &planner.AggregateFilters{
-		Where:   whereClause,
-		OrderBy: orderBy,
-	}
-	if hasLimit {
-		filters.Limit = &limit
-	}
-	if hasOffset {
-		filters.Offset = &offset
-	}
-
-	return filters, nil
-}
-
 func firstFieldAST(fields []*ast.Field) *ast.Field {
 	if len(fields) == 0 {
 		return nil
 	}
 	return fields[0]
-}
-
-func optionalIntArg(args map[string]interface{}, key string) (int, bool) {
-	if args == nil {
-		return 0, false
-	}
-	value, ok := args[key]
-	if !ok || value == nil {
-		return 0, false
-	}
-	intValue, ok := value.(int)
-	if !ok {
-		return 0, false
-	}
-	if intValue < 0 {
-		return 0, false
-	}
-	return intValue, true
-}
-
-func boolArg(args map[string]interface{}, key string) bool {
-	if args == nil {
-		return false
-	}
-	value, ok := args[key]
-	if !ok || value == nil {
-		return false
-	}
-	boolValue, ok := value.(bool)
-	if !ok {
-		return false
-	}
-	return boolValue
 }
 
 func (r *Resolver) orderByInput(table introspection.Table) *graphql.InputObject {
@@ -1843,6 +1597,7 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1907,6 +1662,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1971,6 +1727,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -2044,6 +1801,7 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -2094,11 +1852,11 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 	countCtx = context.WithoutCancel(countCtx)
 
 	result := &connectionResult{
-		rows:     rows,
-		plan:     plan,
-		hasNext:  hasNext,
-		executor: r.executor,
-		countCtx: countCtx,
+		rows:          rows,
+		plan:          plan,
+		hasNext:       hasNext,
+		executor:      r.executor,
+		countCtx:      countCtx,
 		aggregateVals: make(map[string]map[string]interface{}),
 	}
 	if plan != nil {
@@ -2591,392 +2349,6 @@ func sortedOrderByFieldNames(options map[string][]string) []string {
 	return names
 }
 
-func (r *Resolver) tryBatchOneToMany(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) ([]map[string]interface{}, bool, error) {
-	metrics := graphQLMetricsFromContext(p.Context)
-
-	state, ok := getBatchState(p.Context)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_batch_state")
-		}
-		return nil, false, nil
-	}
-
-	parentKey, ok := parentKeyFromSource(p.Source)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "missing_parent_key")
-		}
-		return nil, false, nil
-	}
-
-	parentRows := state.getParentRows(parentKey)
-	if len(parentRows) == 0 {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationOneToMany, "missing_parent_rows")
-		}
-		return nil, false, nil
-	}
-
-	limit := planner.GetArgInt(p.Args, "limit", r.defaultLimit)
-	offset := planner.GetArgInt(p.Args, "offset", 0)
-
-	relatedTable, err := r.findTable(rel.RemoteTable)
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
-	}
-
-	orderBy, err := planner.ParseOrderBy(relatedTable, p.Args)
-	if err != nil {
-		return nil, true, err
-	}
-
-	selection := planner.SelectedColumns(relatedTable, firstFieldAST(p.Info.FieldASTs), p.Info.Fragments)
-
-	relKey := fmt.Sprintf(
-		"%s|%s|%s|%d|%d|%s|%s|%s",
-		table.Name,
-		rel.RemoteTable,
-		rel.RemoteColumn,
-		limit,
-		offset,
-		orderByKey(orderBy),
-		columnsKey(selection),
-		parentKey,
-	)
-
-	if cached := state.getChildRows(relKey); cached != nil {
-		state.IncrementCacheHit()
-		if metrics != nil {
-			metrics.RecordBatchCacheHit(p.Context, relationOneToMany)
-		}
-		return cached[fmt.Sprint(pkValue)], true, nil
-	}
-	state.IncrementCacheMiss()
-	if metrics != nil {
-		metrics.RecordBatchCacheMiss(p.Context, relationOneToMany)
-	}
-
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
-	parentValues := uniqueParentValues(parentRows, parentField)
-	if len(parentValues) == 0 {
-		state.setChildRows(relKey, map[string][]map[string]interface{}{})
-		return []map[string]interface{}{}, true, nil
-	}
-
-	chunks := chunkValues(parentValues, batchMaxInClause)
-	if metrics != nil {
-		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationOneToMany)
-	}
-
-	grouped := make(map[string][]map[string]interface{})
-	for _, chunk := range chunks {
-		if metrics != nil {
-			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationOneToMany)
-		}
-		planned, err := planner.PlanOneToManyBatch(relatedTable, selection, rel.RemoteColumn, chunk, limit, offset, orderBy, nil)
-		if err != nil {
-			if errors.Is(err, planner.ErrNoPrimaryKey) {
-				if metrics != nil {
-					metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_primary_key")
-				}
-				return nil, false, nil
-			}
-			return nil, true, err
-		}
-		if planned.SQL == "" {
-			continue
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, true, normalizeQueryError(err)
-		}
-		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
-		rows.Close()
-		if err != nil {
-			return nil, true, err
-		}
-		if metrics != nil {
-			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationOneToMany)
-		}
-
-		mergeGrouped(grouped, groupByAlias(results, planner.BatchParentAlias))
-	}
-	if len(grouped) == 0 {
-		state.setChildRows(relKey, map[string][]map[string]interface{}{})
-		return []map[string]interface{}{}, true, nil
-	}
-	state.setChildRows(relKey, grouped)
-
-	return grouped[fmt.Sprint(pkValue)], true, nil
-}
-
-func (r *Resolver) tryBatchManyToMany(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) ([]map[string]interface{}, bool, error) {
-	metrics := graphQLMetricsFromContext(p.Context)
-
-	state, ok := getBatchState(p.Context)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationManyToMany, "no_batch_state")
-		}
-		return nil, false, nil
-	}
-
-	parentKey, ok := parentKeyFromSource(p.Source)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationManyToMany, "missing_parent_key")
-		}
-		return nil, false, nil
-	}
-
-	parentRows := state.getParentRows(parentKey)
-	if len(parentRows) == 0 {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationManyToMany, "missing_parent_rows")
-		}
-		return nil, false, nil
-	}
-
-	limit := planner.GetArgInt(p.Args, "limit", r.defaultLimit)
-	offset := planner.GetArgInt(p.Args, "offset", 0)
-
-	relatedTable, err := r.findTable(rel.RemoteTable)
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
-	}
-
-	orderBy, err := planner.ParseOrderBy(relatedTable, p.Args)
-	if err != nil {
-		return nil, true, err
-	}
-
-	field := firstFieldAST(p.Info.FieldASTs)
-	if field == nil {
-		return nil, true, fmt.Errorf("missing field AST")
-	}
-	selection := planner.SelectedColumns(relatedTable, field, p.Info.Fragments)
-
-	relKey := fmt.Sprintf(
-		"%s|%s|%s|%s|%d|%d|%s|%s|%s",
-		table.Name,
-		rel.RemoteTable,
-		rel.RemoteColumn,
-		rel.JunctionTable,
-		limit,
-		offset,
-		orderByKey(orderBy),
-		columnsKey(selection),
-		parentKey,
-	)
-
-	if cached := state.getChildRows(relKey); cached != nil {
-		state.IncrementCacheHit()
-		if metrics != nil {
-			metrics.RecordBatchCacheHit(p.Context, relationManyToMany)
-		}
-		return cached[fmt.Sprint(pkValue)], true, nil
-	}
-	state.IncrementCacheMiss()
-	if metrics != nil {
-		metrics.RecordBatchCacheMiss(p.Context, relationManyToMany)
-	}
-
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
-	parentValues := uniqueParentValues(parentRows, parentField)
-	if len(parentValues) == 0 {
-		state.setChildRows(relKey, map[string][]map[string]interface{}{})
-		return []map[string]interface{}{}, true, nil
-	}
-
-	chunks := chunkValues(parentValues, batchMaxInClause)
-	if metrics != nil {
-		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationManyToMany)
-	}
-
-	grouped := make(map[string][]map[string]interface{})
-	for _, chunk := range chunks {
-		if metrics != nil {
-			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationManyToMany)
-		}
-		planned, err := planner.PlanManyToManyBatch(
-			rel.JunctionTable,
-			relatedTable,
-			rel.JunctionLocalFK,
-			rel.JunctionRemoteFK,
-			rel.RemoteColumn,
-			selection,
-			chunk,
-			limit,
-			offset,
-			orderBy,
-			nil,
-		)
-		if err != nil {
-			if errors.Is(err, planner.ErrNoPrimaryKey) {
-				if metrics != nil {
-					metrics.RecordBatchSkipped(p.Context, relationManyToMany, "no_primary_key")
-				}
-				return nil, false, nil
-			}
-			return nil, true, err
-		}
-		if planned.SQL == "" {
-			continue
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, true, normalizeQueryError(err)
-		}
-		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
-		rows.Close()
-		if err != nil {
-			return nil, true, err
-		}
-		if metrics != nil {
-			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationManyToMany)
-		}
-
-		mergeGrouped(grouped, groupByAlias(results, planner.BatchParentAlias))
-	}
-
-	if len(grouped) == 0 {
-		state.setChildRows(relKey, map[string][]map[string]interface{}{})
-		return []map[string]interface{}{}, true, nil
-	}
-	state.setChildRows(relKey, grouped)
-
-	return grouped[fmt.Sprint(pkValue)], true, nil
-}
-
-func (r *Resolver) tryBatchEdgeList(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) ([]map[string]interface{}, bool, error) {
-	metrics := graphQLMetricsFromContext(p.Context)
-
-	state, ok := getBatchState(p.Context)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationEdgeList, "no_batch_state")
-		}
-		return nil, false, nil
-	}
-
-	parentKey, ok := parentKeyFromSource(p.Source)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationEdgeList, "missing_parent_key")
-		}
-		return nil, false, nil
-	}
-
-	parentRows := state.getParentRows(parentKey)
-	if len(parentRows) == 0 {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationEdgeList, "missing_parent_rows")
-		}
-		return nil, false, nil
-	}
-
-	limit := planner.GetArgInt(p.Args, "limit", r.defaultLimit)
-	offset := planner.GetArgInt(p.Args, "offset", 0)
-
-	junctionTable, err := r.findTable(rel.JunctionTable)
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
-	}
-
-	orderBy, err := planner.ParseOrderBy(junctionTable, p.Args)
-	if err != nil {
-		return nil, true, err
-	}
-
-	field := firstFieldAST(p.Info.FieldASTs)
-	if field == nil {
-		return nil, true, fmt.Errorf("missing field AST")
-	}
-	selection := planner.SelectedColumns(junctionTable, field, p.Info.Fragments)
-
-	relKey := fmt.Sprintf(
-		"%s|%s|%s|%d|%d|%s|%s|%s",
-		table.Name,
-		rel.JunctionTable,
-		rel.JunctionLocalFK,
-		limit,
-		offset,
-		orderByKey(orderBy),
-		columnsKey(selection),
-		parentKey,
-	)
-
-	if cached := state.getChildRows(relKey); cached != nil {
-		state.IncrementCacheHit()
-		if metrics != nil {
-			metrics.RecordBatchCacheHit(p.Context, relationEdgeList)
-		}
-		return cached[fmt.Sprint(pkValue)], true, nil
-	}
-	state.IncrementCacheMiss()
-	if metrics != nil {
-		metrics.RecordBatchCacheMiss(p.Context, relationEdgeList)
-	}
-
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
-	parentValues := uniqueParentValues(parentRows, parentField)
-	if len(parentValues) == 0 {
-		state.setChildRows(relKey, map[string][]map[string]interface{}{})
-		return []map[string]interface{}{}, true, nil
-	}
-
-	chunks := chunkValues(parentValues, batchMaxInClause)
-	if metrics != nil {
-		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationEdgeList)
-	}
-
-	grouped := make(map[string][]map[string]interface{})
-	for _, chunk := range chunks {
-		if metrics != nil {
-			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationEdgeList)
-		}
-		planned, err := planner.PlanEdgeListBatch(junctionTable, rel.JunctionLocalFK, selection, chunk, limit, offset, orderBy, nil)
-		if err != nil {
-			if errors.Is(err, planner.ErrNoPrimaryKey) {
-				if metrics != nil {
-					metrics.RecordBatchSkipped(p.Context, relationEdgeList, "no_primary_key")
-				}
-				return nil, false, nil
-			}
-			return nil, true, err
-		}
-		if planned.SQL == "" {
-			continue
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, true, normalizeQueryError(err)
-		}
-		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
-		rows.Close()
-		if err != nil {
-			return nil, true, err
-		}
-		if metrics != nil {
-			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationEdgeList)
-		}
-
-		mergeGrouped(grouped, groupByAlias(results, planner.BatchParentAlias))
-	}
-
-	if len(grouped) == 0 {
-		state.setChildRows(relKey, map[string][]map[string]interface{}{})
-		return []map[string]interface{}{}, true, nil
-	}
-	state.setChildRows(relKey, grouped)
-
-	return grouped[fmt.Sprint(pkValue)], true, nil
-}
-
 func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
 	metrics := graphQLMetricsFromContext(p.Context)
 
@@ -3022,7 +2394,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		return nil, true, fmt.Errorf("missing field AST")
 	}
 
-	first, err := planner.ParseFirst(p.Args)
+	first, err := planner.ParseFirstWithDefault(p.Args, r.defaultLimit)
 	if err != nil {
 		return nil, true, err
 	}
@@ -3155,32 +2527,32 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 				rows = rows[:first]
 			}
 
-				countQuery, err := planner.BuildOneToManyCountSQL(
-					relatedTable,
-					rel.RemoteColumn,
-					parentValue,
-					whereClause,
-				)
-				if err != nil {
-					return nil, true, err
-				}
-				aggregateBase, err := planner.BuildOneToManyAggregateBaseSQL(
-					relatedTable,
-					rel.RemoteColumn,
-					parentValue,
-					whereClause,
-				)
-				if err != nil {
-					return nil, true, err
-				}
+			countQuery, err := planner.BuildOneToManyCountSQL(
+				relatedTable,
+				rel.RemoteColumn,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			aggregateBase, err := planner.BuildOneToManyAggregateBaseSQL(
+				relatedTable,
+				rel.RemoteColumn,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
 
-				plan := &planner.ConnectionPlan{
-					Count:         countQuery,
-					AggregateBase: aggregateBase,
-					Table:         relatedTable,
-					Columns:       selection,
-					OrderBy:       orderBy,
-					OrderByKey:    orderByKey,
+			plan := &planner.ConnectionPlan{
+				Count:         countQuery,
+				AggregateBase: aggregateBase,
+				Table:         relatedTable,
+				Columns:       selection,
+				OrderBy:       orderBy,
+				OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
 				HasCursor:     false,
@@ -3250,7 +2622,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		return nil, true, fmt.Errorf("missing field AST")
 	}
 
-	first, err := planner.ParseFirst(p.Args)
+	first, err := planner.ParseFirstWithDefault(p.Args, r.defaultLimit)
 	if err != nil {
 		return nil, true, err
 	}
@@ -3385,38 +2757,38 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 				rows = rows[:first]
 			}
 
-				countQuery, err := planner.BuildManyToManyCountSQL(
-					relatedTable,
-					rel.JunctionTable,
-					rel.JunctionLocalFK,
+			countQuery, err := planner.BuildManyToManyCountSQL(
+				relatedTable,
+				rel.JunctionTable,
+				rel.JunctionLocalFK,
 				rel.JunctionRemoteFK,
 				rel.RemoteColumn,
 				parentValue,
 				whereClause,
 			)
-				if err != nil {
-					return nil, true, err
-				}
-				aggregateBase, err := planner.BuildManyToManyAggregateBaseSQL(
-					relatedTable,
-					rel.JunctionTable,
-					rel.JunctionLocalFK,
-					rel.JunctionRemoteFK,
-					rel.RemoteColumn,
-					parentValue,
-					whereClause,
-				)
-				if err != nil {
-					return nil, true, err
-				}
+			if err != nil {
+				return nil, true, err
+			}
+			aggregateBase, err := planner.BuildManyToManyAggregateBaseSQL(
+				relatedTable,
+				rel.JunctionTable,
+				rel.JunctionLocalFK,
+				rel.JunctionRemoteFK,
+				rel.RemoteColumn,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
 
-				plan := &planner.ConnectionPlan{
-					Count:         countQuery,
-					AggregateBase: aggregateBase,
-					Table:         relatedTable,
-					Columns:       selection,
-					OrderBy:       orderBy,
-					OrderByKey:    orderByKey,
+			plan := &planner.ConnectionPlan{
+				Count:         countQuery,
+				AggregateBase: aggregateBase,
+				Table:         relatedTable,
+				Columns:       selection,
+				OrderBy:       orderBy,
+				OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
 				HasCursor:     false,
@@ -3486,7 +2858,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		return nil, true, fmt.Errorf("missing field AST")
 	}
 
-	first, err := planner.ParseFirst(p.Args)
+	first, err := planner.ParseFirstWithDefault(p.Args, r.defaultLimit)
 	if err != nil {
 		return nil, true, err
 	}
@@ -3617,32 +2989,32 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 				rows = rows[:first]
 			}
 
-				countQuery, err := planner.BuildEdgeListCountSQL(
-					junctionTable,
-					rel.JunctionLocalFK,
-					parentValue,
-					whereClause,
-				)
-				if err != nil {
-					return nil, true, err
-				}
-				aggregateBase, err := planner.BuildEdgeListAggregateBaseSQL(
-					junctionTable,
-					rel.JunctionLocalFK,
-					parentValue,
-					whereClause,
-				)
-				if err != nil {
-					return nil, true, err
-				}
+			countQuery, err := planner.BuildEdgeListCountSQL(
+				junctionTable,
+				rel.JunctionLocalFK,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
+			aggregateBase, err := planner.BuildEdgeListAggregateBaseSQL(
+				junctionTable,
+				rel.JunctionLocalFK,
+				parentValue,
+				whereClause,
+			)
+			if err != nil {
+				return nil, true, err
+			}
 
-				plan := &planner.ConnectionPlan{
-					Count:         countQuery,
-					AggregateBase: aggregateBase,
-					Table:         junctionTable,
-					Columns:       selection,
-					OrderBy:       orderBy,
-					OrderByKey:    orderByKey,
+			plan := &planner.ConnectionPlan{
+				Count:         countQuery,
+				AggregateBase: aggregateBase,
+				Table:         junctionTable,
+				Columns:       selection,
+				OrderBy:       orderBy,
+				OrderByKey:    orderByKey,
 				CursorColumns: cursorCols,
 				First:         first,
 				HasCursor:     false,
@@ -3665,127 +3037,6 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		return result, true, nil
 	}
 	return r.buildConnectionResult(p.Context, nil, nil, false), true, nil
-}
-
-func (r *Resolver) tryBatchRelationshipAggregate(
-	p graphql.ResolveParams,
-	table introspection.Table,
-	rel introspection.Relationship,
-	pkValue interface{},
-	selection planner.AggregateSelection,
-	filters *planner.AggregateFilters,
-) (map[string]interface{}, bool, error) {
-	metrics := graphQLMetricsFromContext(p.Context)
-
-	state, ok := getBatchState(p.Context)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationAggregate, "no_batch_state")
-		}
-		return nil, false, nil
-	}
-
-	parentKey, ok := parentKeyFromSource(p.Source)
-	if !ok {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationAggregate, "missing_parent_key")
-		}
-		return nil, false, nil
-	}
-
-	parentRows := state.getParentRows(parentKey)
-	if len(parentRows) == 0 {
-		if metrics != nil {
-			metrics.RecordBatchSkipped(p.Context, relationAggregate, "missing_parent_rows")
-		}
-		return nil, false, nil
-	}
-
-	// Skip batching if per-parent limit/offset or orderBy is requested.
-	if filters != nil {
-		if filters.Limit != nil || filters.Offset != nil || filters.OrderBy != nil {
-			if metrics != nil {
-				metrics.RecordBatchSkipped(p.Context, relationAggregate, "aggregate_filters")
-			}
-			return nil, false, nil
-		}
-	}
-
-	relatedTable, err := r.findTable(rel.RemoteTable)
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
-	}
-
-	columns := planner.BuildAggregateColumns(selection)
-	relKey := fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s",
-		table.Name,
-		rel.RemoteTable,
-		rel.RemoteColumn,
-		aggregateColumnsKey(columns),
-		stableArgsKey(p.Args),
-		parentKey,
-	)
-
-	if cached := state.getAggregateRows(relKey); cached != nil {
-		state.IncrementCacheHit()
-		if metrics != nil {
-			metrics.RecordBatchCacheHit(p.Context, relationAggregate)
-		}
-		if result, ok := cached[fmt.Sprint(pkValue)]; ok {
-			return result, true, nil
-		}
-		return map[string]interface{}{"count": int64(0)}, true, nil
-	}
-	state.IncrementCacheMiss()
-	if metrics != nil {
-		metrics.RecordBatchCacheMiss(p.Context, relationAggregate)
-	}
-
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
-	parentValues := uniqueParentValues(parentRows, parentField)
-	if len(parentValues) == 0 {
-		state.setAggregateRows(relKey, map[string]map[string]interface{}{})
-		return map[string]interface{}{"count": int64(0)}, true, nil
-	}
-
-	if metrics != nil {
-		metrics.RecordBatchParentCount(p.Context, int64(len(parentValues)), relationAggregate)
-		metrics.RecordBatchQueriesSaved(p.Context, int64(len(parentValues)-1), relationAggregate)
-	}
-
-	var whereClause *planner.WhereClause
-	if filters != nil {
-		whereClause = filters.Where
-	}
-
-	planned, err := planner.PlanRelationshipAggregateBatch(relatedTable, selection, rel.RemoteColumn, parentValues, whereClause)
-	if err != nil {
-		return nil, true, err
-	}
-	if planned.SQL == "" {
-		state.setAggregateRows(relKey, map[string]map[string]interface{}{})
-		return map[string]interface{}{"count": int64(0)}, true, nil
-	}
-
-	rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-	if err != nil {
-		return nil, true, normalizeQueryError(err)
-	}
-	grouped, err := scanAggregateRows(rows, columns, relatedTable)
-	rows.Close()
-	if err != nil {
-		return nil, true, err
-	}
-	if metrics != nil {
-		metrics.RecordBatchResultRows(p.Context, int64(len(grouped)), relationAggregate)
-	}
-
-	state.setAggregateRows(relKey, grouped)
-	if result, ok := grouped[fmt.Sprint(pkValue)]; ok {
-		return result, true, nil
-	}
-	return map[string]interface{}{"count": int64(0)}, true, nil
 }
 
 func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, fkValue interface{}) (map[string]interface{}, bool, error) {
@@ -4012,7 +3263,6 @@ const (
 	relationManyToOne  = "many_to_one"
 	relationManyToMany = "many_to_many"
 	relationEdgeList   = "edge_list"
-	relationAggregate  = "aggregate"
 )
 
 func parentKeyFromResolve(p graphql.ResolveParams) string {
@@ -4508,347 +3758,6 @@ func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspe
 		}
 
 		return results[0], nil
-	}
-}
-
-// makeOneToManyResolver creates a resolver for one-to-many relationships (e.g., chapter.verses)
-func (r *Resolver) makeOneToManyResolver(table introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		// Get the primary key value from parent object
-		source, ok := p.Source.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid source type")
-		}
-
-		// Get PK value (e.g., id from chapter)
-		pkFieldName := graphQLFieldNameForColumn(table, rel.LocalColumn)
-		pkValue := source[pkFieldName]
-
-		if pkValue == nil {
-			return []map[string]interface{}{}, nil
-		}
-
-		if results, ok, err := r.tryBatchOneToMany(p, table, rel, pkValue); ok || err != nil {
-			if err != nil {
-				return nil, err
-			}
-			results = ensureNonNullRows(results)
-			seedBatchRows(p, results)
-			return results, nil
-		}
-
-		// Query the related table
-		relatedTable, err := r.findTable(rel.RemoteTable)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
-		}
-		field := firstFieldAST(p.Info.FieldASTs)
-		if field == nil {
-			return nil, fmt.Errorf("missing field AST")
-		}
-		planned, err := planner.PlanQuery(r.dbSchema, field, p.Args, planner.WithFragments(p.Info.Fragments), planner.WithDefaultListLimit(r.defaultLimit), planner.WithRelationship(planner.RelationshipContext{
-			RelatedTable: relatedTable,
-			RemoteColumn: rel.RemoteColumn,
-			Value:        pkValue,
-			IsOneToMany:  true,
-		}))
-		if err != nil {
-			return nil, fmt.Errorf("failed to build query: %w", err)
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.Root.SQL, planned.Root.Args...)
-		if err != nil {
-			return nil, normalizeQueryError(err)
-		}
-		defer func() {
-			_ = rows.Close()
-		}()
-
-		results, err := scanRows(rows, columnsForPlan(planned))
-		if err != nil {
-			return nil, err
-		}
-
-		results = ensureNonNullRows(results)
-		seedBatchRows(p, results)
-		return results, nil
-	}
-}
-
-// makeManyToManyResolver creates a resolver for direct M2M relationships through pure junctions.
-// It queries the target table by joining through the junction table.
-func (r *Resolver) makeManyToManyResolver(table introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		source, ok := p.Source.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid source type")
-		}
-
-		// Get PK value from parent
-		pkFieldName := graphQLFieldNameForColumn(table, rel.LocalColumn)
-		pkValue := source[pkFieldName]
-
-		if pkValue == nil {
-			return []map[string]interface{}{}, nil
-		}
-
-		if results, ok, err := r.tryBatchManyToMany(p, table, rel, pkValue); ok || err != nil {
-			if err != nil {
-				return nil, err
-			}
-			results = ensureNonNullRows(results)
-			seedBatchRows(p, results)
-			return results, nil
-		}
-
-		// Find target table
-		targetTable, err := r.findTable(rel.RemoteTable)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find target table %s: %w", rel.RemoteTable, err)
-		}
-
-		field := firstFieldAST(p.Info.FieldASTs)
-		if field == nil {
-			return nil, fmt.Errorf("missing field AST")
-		}
-		selection := planner.SelectedColumns(targetTable, field, p.Info.Fragments)
-
-		orderBy, err := planner.ParseOrderBy(targetTable, p.Args)
-		if err != nil {
-			return nil, err
-		}
-
-		// Get limit/offset from args
-		limit := r.defaultLimit
-		if v, ok := p.Args["limit"].(int); ok {
-			limit = v
-		}
-		offset := 0
-		if v, ok := p.Args["offset"].(int); ok {
-			offset = v
-		}
-
-		// Build M2M query using junction table
-		planned, err := planner.PlanManyToMany(
-			rel.JunctionTable,
-			targetTable,
-			rel.JunctionLocalFK,
-			rel.JunctionRemoteFK,
-			rel.RemoteColumn,
-			selection,
-			pkValue,
-			limit,
-			offset,
-			orderBy,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to plan M2M query: %w", err)
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, normalizeQueryError(err)
-		}
-		defer func() {
-			_ = rows.Close()
-		}()
-
-		results, err := scanRows(rows, selection)
-		if err != nil {
-			return nil, err
-		}
-
-		results = ensureNonNullRows(results)
-		seedBatchRows(p, results)
-		return results, nil
-	}
-}
-
-// makeEdgeListResolver creates a resolver for edge list access through attribute junctions.
-// It returns the junction table rows (edge objects) which include both FK references and attribute columns.
-func (r *Resolver) makeEdgeListResolver(table introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		source, ok := p.Source.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid source type")
-		}
-
-		// Get PK value from parent
-		pkFieldName := graphQLFieldNameForColumn(table, rel.LocalColumn)
-		pkValue := source[pkFieldName]
-
-		if pkValue == nil {
-			return []map[string]interface{}{}, nil
-		}
-
-		if results, ok, err := r.tryBatchEdgeList(p, table, rel, pkValue); ok || err != nil {
-			if err != nil {
-				return nil, err
-			}
-			results = ensureNonNullRows(results)
-			seedBatchRows(p, results)
-			return results, nil
-		}
-
-		// Find junction table
-		junctionTable, err := r.findTable(rel.JunctionTable)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
-		}
-
-		field := firstFieldAST(p.Info.FieldASTs)
-		if field == nil {
-			return nil, fmt.Errorf("missing field AST")
-		}
-		selection := planner.SelectedColumns(junctionTable, field, p.Info.Fragments)
-
-		orderBy, err := planner.ParseOrderBy(junctionTable, p.Args)
-		if err != nil {
-			return nil, err
-		}
-
-		// Get limit/offset from args
-		limit := r.defaultLimit
-		if v, ok := p.Args["limit"].(int); ok {
-			limit = v
-		}
-		offset := 0
-		if v, ok := p.Args["offset"].(int); ok {
-			offset = v
-		}
-
-		// Build edge list query - simple one-to-many through junction FK
-		planned, err := planner.PlanEdgeList(
-			junctionTable,
-			rel.JunctionLocalFK,
-			selection,
-			pkValue,
-			limit,
-			offset,
-			orderBy,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to plan edge list query: %w", err)
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, normalizeQueryError(err)
-		}
-		defer func() {
-			_ = rows.Close()
-		}()
-
-		results, err := scanRows(rows, selection)
-		if err != nil {
-			return nil, err
-		}
-
-		results = ensureNonNullRows(results)
-		seedBatchRows(p, results)
-		return results, nil
-	}
-}
-
-// makeAggregateResolver creates a resolver for root-level aggregate queries.
-func (r *Resolver) makeAggregateResolver(table introspection.Table) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		field := firstFieldAST(p.Info.FieldASTs)
-		if field == nil {
-			return nil, fmt.Errorf("missing field AST")
-		}
-
-		// Parse aggregate selection from GraphQL query
-		selection := planner.ParseAggregateSelection(table, field, p.Info.Fragments)
-		columns := planner.BuildAggregateColumns(selection)
-
-		filters, err := r.aggregateFiltersFromArgs(table, p.Args)
-		if err != nil {
-			return nil, err
-		}
-
-		// Plan and execute aggregate query
-		planned, err := planner.PlanAggregate(table, selection, filters)
-		if err != nil {
-			return nil, fmt.Errorf("failed to plan aggregate: %w", err)
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, normalizeQueryError(err)
-		}
-		defer func() {
-			_ = rows.Close()
-		}()
-
-		// Scan aggregate results using columns list for correct ordering
-		aggregateResult, err := scanAggregateRow(rows, columns, table)
-		if err != nil {
-			return nil, err
-		}
-
-		return aggregateResult, nil
-	}
-}
-
-// makeRelationshipAggregateResolver creates a resolver for aggregate queries on relationships.
-func (r *Resolver) makeRelationshipAggregateResolver(table introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		source, ok := p.Source.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid source type")
-		}
-
-		// Get parent key value
-		pkFieldName := graphQLFieldNameForColumn(table, rel.LocalColumn)
-		pkValue := source[pkFieldName]
-		if pkValue == nil {
-			return map[string]interface{}{"count": int64(0)}, nil
-		}
-
-		relatedTable, err := r.findTable(rel.RemoteTable)
-		if err != nil {
-			return nil, err
-		}
-
-		field := firstFieldAST(p.Info.FieldASTs)
-		if field == nil {
-			return nil, fmt.Errorf("missing field AST")
-		}
-
-		selection := planner.ParseAggregateSelection(relatedTable, field, p.Info.Fragments)
-		columns := planner.BuildAggregateColumns(selection)
-
-		filters, err := r.aggregateFiltersFromArgs(relatedTable, p.Args, rel.RemoteColumn)
-		if err != nil {
-			return nil, err
-		}
-
-		if result, ok, err := r.tryBatchRelationshipAggregate(p, table, rel, pkValue, selection, filters); ok || err != nil {
-			return result, err
-		}
-
-		// Execute single relationship aggregate query
-		planned, err := planner.PlanRelationshipAggregate(relatedTable, selection, rel.RemoteColumn, pkValue, filters)
-		if err != nil {
-			return nil, err
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, normalizeQueryError(err)
-		}
-		defer func() {
-			_ = rows.Close()
-		}()
-
-		// Scan aggregate results using columns list for correct ordering
-		aggregateResult, err := scanAggregateRow(rows, columns, relatedTable)
-		if err != nil {
-			return nil, err
-		}
-
-		return aggregateResult, nil
 	}
 }
 

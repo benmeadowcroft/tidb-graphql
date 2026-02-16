@@ -78,7 +78,7 @@ func parseConnectionArgs(
 		return nil, fmt.Errorf("connections require a primary key on table %s", table.Name)
 	}
 
-	first, err := ParseFirst(args)
+	first, err := ParseFirstWithDefault(args, defaultLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -679,12 +679,21 @@ func PlanEdgeListConnectionBatch(
 
 // ParseFirst extracts the "first" argument for connection queries.
 func ParseFirst(args map[string]interface{}) (int, error) {
+	return ParseFirstWithDefault(args, DefaultConnectionLimit)
+}
+
+// ParseFirstWithDefault extracts the "first" argument for connection queries
+// using the supplied fallback when the argument is omitted.
+func ParseFirstWithDefault(args map[string]interface{}, fallback int) (int, error) {
+	if fallback <= 0 {
+		fallback = DefaultConnectionLimit
+	}
 	if args == nil {
-		return DefaultConnectionLimit, nil
+		return normalizeFirstLimit(fallback), nil
 	}
 	raw, ok := args["first"]
 	if !ok || raw == nil {
-		return DefaultConnectionLimit, nil
+		return normalizeFirstLimit(fallback), nil
 	}
 	switch v := raw.(type) {
 	case int:
@@ -708,6 +717,16 @@ func ParseFirst(args map[string]interface{}) (int, error) {
 	default:
 		return 0, fmt.Errorf("first must be an integer")
 	}
+}
+
+func normalizeFirstLimit(limit int) int {
+	if limit < 0 {
+		return 0
+	}
+	if limit > MaxConnectionLimit {
+		return MaxConnectionLimit
+	}
+	return limit
 }
 
 // parseConnectionOrderBy resolves the orderBy for a connection query.

@@ -12,24 +12,6 @@ import (
 	"tidb-graphql/internal/sqlutil"
 )
 
-func TestPlanTableList(t *testing.T) {
-	table := introspection.Table{
-		Name: "users",
-		Columns: []introspection.Column{
-			{Name: "id"},
-			{Name: "username"},
-		},
-	}
-
-	planned, err := PlanTableList(table, nil, 10, 5, nil, nil)
-	require.NoError(t, err)
-	assertSQLMatches(t, planned.SQL,
-		"SELECT `id`, `username` FROM `users` LIMIT ? OFFSET ?",
-		"SELECT `id`, `username` FROM `users` LIMIT 10 OFFSET 5",
-	)
-	assertLimitOffsetArgs(t, planned.SQL, planned.Args, 10, 5)
-}
-
 func TestPlanTableByPK(t *testing.T) {
 	table := introspection.Table{
 		Name: "users",
@@ -159,25 +141,6 @@ func TestPlanManyToOneBatch(t *testing.T) {
 	assertArgsEqual(t, planned.Args, []interface{}{7, 9})
 }
 
-func TestPlanOneToMany(t *testing.T) {
-	table := introspection.Table{
-		Name: "posts",
-		Columns: []introspection.Column{
-			{Name: "id"},
-			{Name: "user_id"},
-			{Name: "title"},
-		},
-	}
-
-	planned, err := PlanOneToMany(table, nil, "user_id", 3, 25, 10, nil)
-	require.NoError(t, err)
-	assertSQLMatches(t, planned.SQL,
-		"SELECT `id`, `user_id`, `title` FROM `posts` WHERE `user_id` = ? LIMIT ? OFFSET ?",
-		"SELECT `id`, `user_id`, `title` FROM `posts` WHERE `user_id` = ? LIMIT 25 OFFSET 10",
-	)
-	assertWhereLimitOffsetArgs(t, planned.SQL, planned.Args, []interface{}{3}, 25, 10)
-}
-
 func TestPlanOneToManyBatch(t *testing.T) {
 	table := introspection.Table{
 		Name: "posts",
@@ -241,43 +204,6 @@ func TestPlanOneToManyBatch_WithWhere(t *testing.T) {
 	assertArgsEqual(t, planned.Args, []interface{}{1, 2, "first", 0, 5})
 }
 
-func TestPlanManyToMany_OrderBy(t *testing.T) {
-	table := introspection.Table{
-		Name: "tags",
-		Columns: []introspection.Column{
-			{Name: "id"},
-			{Name: "name"},
-		},
-	}
-
-	orderBy := &OrderBy{Columns: []string{"name"}, Direction: "ASC"}
-	planned, err := PlanManyToMany("user_tags", table, "user_id", "tag_id", "id", nil, 42, 5, 0, orderBy)
-	require.NoError(t, err)
-	assertSQLMatches(t, planned.SQL,
-		"SELECT `id`, `name` FROM `tags` INNER JOIN `user_tags` ON `user_tags`.`tag_id` = `tags`.`id` WHERE `user_tags`.`user_id` = ? ORDER BY `name` ASC LIMIT ? OFFSET ?",
-	)
-	assertArgsEqual(t, planned.Args, []interface{}{42, 5, 0})
-}
-
-func TestPlanEdgeList_OrderBy(t *testing.T) {
-	table := introspection.Table{
-		Name: "user_tags",
-		Columns: []introspection.Column{
-			{Name: "user_id"},
-			{Name: "tag_id"},
-		},
-	}
-
-	orderBy := &OrderBy{Columns: []string{"tag_id"}, Direction: "DESC"}
-	planned, err := PlanEdgeList(table, "user_id", nil, 7, 3, 1, orderBy)
-	require.NoError(t, err)
-	assertSQLMatches(t, planned.SQL,
-		"SELECT `user_id`, `tag_id` FROM `user_tags` WHERE `user_id` = ? ORDER BY `tag_id` DESC LIMIT ? OFFSET ?",
-		"SELECT `user_id`, `tag_id` FROM `user_tags` WHERE `user_id` = ? ORDER BY `tag_id` DESC LIMIT 3 OFFSET 1",
-	)
-	assertWhereLimitOffsetArgs(t, planned.SQL, planned.Args, []interface{}{7}, 3, 1)
-}
-
 func TestPlanManyToManyBatch(t *testing.T) {
 	table := introspection.Table{
 		Name: "tags",
@@ -321,24 +247,6 @@ func TestPlanEdgeListBatch_CompositePKOrder(t *testing.T) {
 		"SELECT `user_id`, `tag_id`, __batch_parent_id FROM (SELECT `user_id`, `tag_id`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `user_id`, `tag_id`) AS __rn FROM `user_tags` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",
 	)
 	assertArgsEqual(t, planned.Args, []interface{}{1, 2, 0, 10})
-}
-
-func TestPlanTableList_QuotesIdentifiers(t *testing.T) {
-	table := introspection.Table{
-		Name: "user`data",
-		Columns: []introspection.Column{
-			{Name: "first name"},
-			{Name: "select"},
-		},
-	}
-
-	planned, err := PlanTableList(table, nil, 1, 0, nil, nil)
-	require.NoError(t, err)
-	assertSQLMatches(t, planned.SQL,
-		"SELECT `first name`, `select` FROM `user``data` LIMIT ? OFFSET ?",
-		"SELECT `first name`, `select` FROM `user``data` LIMIT 1 OFFSET 0",
-	)
-	assertLimitOffsetArgs(t, planned.SQL, planned.Args, 1, 0)
 }
 
 func assertSQLMatches(t *testing.T, got string, candidates ...string) {

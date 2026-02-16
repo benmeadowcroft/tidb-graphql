@@ -15,17 +15,15 @@ This section describes how the GraphQL schema is derived from the TiDB schema.
 
 For each table `users`:
 
-- List query: `users(limit, offset, where, orderBy)` returns `[User!]!`.
-- Connection query: `usersConnection(first, after, where, orderBy)` returns `UserConnection`.
+- Collection query: `users(first, after, where, orderBy)` returns `UserConnection`.
 - Primary key lookup: `user(id: ID!)` returns `User` (global Node ID).
 - Primary key raw lookup: `user_by_databaseId(databaseId: BigInt!)` returns `User` (name depends on PK column).
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
 
 Notes:
-- `limit` default is configurable (default `100`, via [`server.graphql_list_limit_default`](./configuration.md#server)).
-- `offset` default is `0`.
 - `orderBy` only accepts indexed fields and will error otherwise (see [Filters](./filters.md)).
-- `first` defaults to `25` and is capped at `100` for connections.
+- `first` default is configurable (default `100`, via [`server.graphql_default_limit`](./configuration.md#server)).
+- `first` is capped at `100`.
 
 ## Root mutation fields
 
@@ -65,10 +63,8 @@ Pluralization uses the [Inflection library](https://github.com/jinzhu/inflection
 
 Many-to-one fields remain nullable even when the FK column is NOT NULL, because role-based access can hide the related row.
 
-One-to-many fields accept the same `limit`, `offset`, and `orderBy` arguments as list queries.
-Relationship connection fields (`<rel>Connection`) are also generated for one-to-many, many-to-many, and edge-list relationships when the related table has a primary key. They accept `first`, `after`, `orderBy`, and `where` (target table for many-to-many, junction table for edge-list).
-List fields never return `null` and never contain `null` items.
-If role-based restrictions hide a nested type, the nested field error can null out the parent list because list items are non-null.
+Relationship fields are generated for one-to-many, many-to-many, and edge-list relationships when the related table has a primary key. They accept `first`, `after`, `orderBy`, and `where` (target table for many-to-many, junction table for edge-list).
+For tables without primary keys, these to-many connection fields are not generated.
 
 ### Connection types
 

@@ -520,7 +520,7 @@ func defineFlags() {
 		pflag.Int("server.graphql_max_depth", 0, "Maximum GraphQL query depth limit")
 		pflag.Int("server.graphql_max_complexity", 0, "Maximum GraphQL query complexity limit")
 		pflag.Int("server.graphql_max_rows", 0, "Maximum estimated GraphQL rows per request")
-		pflag.Int("server.graphql_default_limit", 0, "Default list limit for GraphQL list queries")
+		pflag.Int("server.graphql_default_limit", 0, "Default page size for GraphQL connection collection queries")
 		pflag.Duration("server.schema_refresh_min_interval", 0, "Minimum interval between schema refresh checks")
 		pflag.Duration("server.schema_refresh_max_interval", 0, "Maximum interval between schema refresh checks")
 		pflag.Bool("server.graphiql_enabled", false, "Enable GraphiQL UI for /graphql (dev only)")

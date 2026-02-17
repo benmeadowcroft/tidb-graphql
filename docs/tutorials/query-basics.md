@@ -47,7 +47,7 @@ For example, we can filter the users to those who do not have certain statuses:
 
 ```graphql
 query {
-  users(where: { status: { notIn: ["pending" "inactive"] } }) {
+  users(where: { status: { notIn: ["pending", "inactive"] } }) {
     nodes {
       fullName
       email
@@ -150,10 +150,64 @@ If a table has a unique index, you get a direct lookup field. For example:
 
 ```graphql
 {
-  user_by_email(email: "ben.turner@example.com") {
+  user_by_email(email: "ben.smith@example.com") {
     id
     email
     status
+  }
+}
+```
+
+## 8) Composite primary key lookup (order items)
+
+The tutorial dataset models `order_items` with a composite primary key: `(order_id, product_id)`.
+
+Step A: fetch a few tuples and copy one `orderId` + `productId` pair:
+
+```graphql
+query {
+  orderItems(first: 5, orderBy: { orderId: ASC }) {
+    nodes {
+      id
+      orderId
+      productId
+      quantity
+      unitPrice
+    }
+  }
+}
+```
+
+Step B: use the composite raw lookup field with a tuple from Step A:
+
+```graphql
+query {
+  orderItem_by_orderId_productId(orderId: <orderId>, productId: <productId>) {
+    orderId
+    productId
+    quantity
+    unitPrice
+    order {
+      status
+      total
+    }
+    product {
+      name
+      sku
+    }
+  }
+}
+```
+
+Step C: optionally resolve the same row by global Node ID:
+
+```graphql
+query {
+  orderItem(id: "<id-from-step-a>") {
+    orderId
+    productId
+    quantity
+    unitPrice
   }
 }
 ```

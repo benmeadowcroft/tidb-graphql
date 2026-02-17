@@ -73,16 +73,15 @@ CREATE TABLE orders (
 ) COMMENT='Customer orders placed in the store.';
 
 CREATE TABLE order_items (
-  id BIGINT PRIMARY KEY AUTO_RANDOM COMMENT 'Primary key for order items.',
   order_id BIGINT NOT NULL COMMENT 'Order identifier.',
   product_id BIGINT NOT NULL COMMENT 'Product identifier.',
   quantity INT NOT NULL COMMENT 'Quantity of the product.',
   unit_price DECIMAL(10,2) NOT NULL COMMENT 'Unit price in dollars (two decimal places) at purchase time.',
+  PRIMARY KEY (order_id, product_id),
   CONSTRAINT fk_order_items_order
     FOREIGN KEY (order_id) REFERENCES orders(id),
   CONSTRAINT fk_order_items_product
     FOREIGN KEY (product_id) REFERENCES products(id),
-  KEY idx_items_order_id (order_id),
   KEY idx_items_product_id (product_id)
 ) COMMENT='Line items belonging to orders.';
 
@@ -505,7 +504,8 @@ CREATE TEMPORARY TABLE order_item_seeds (
   order_ref VARCHAR(16) NOT NULL,
   sku VARCHAR(64) NOT NULL,
   quantity INT NOT NULL,
-  unit_price DECIMAL(10,2) NOT NULL
+  unit_price DECIMAL(10,2) NOT NULL,
+  PRIMARY KEY (order_ref, sku)
 );
 
 INSERT INTO order_item_seeds (order_ref, sku, quantity, unit_price) VALUES

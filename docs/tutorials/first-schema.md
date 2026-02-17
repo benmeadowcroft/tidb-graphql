@@ -34,16 +34,27 @@ Paste the following query into GraphiQL. It fetches orders with their line items
 
 ```graphql
 query {
-  orders {
-    id status totalCents
-    orderItems {
-      quantity
-      product { name sku }
+  orders(first: 3) {
+    nodes {
+      id
+      status
+      total
+      orderItems(first: 5) {
+        nodes {
+          orderId
+          productId
+          quantity
+          unitPrice
+          product { name sku }
+        }
+      }
+      user { fullName email }
     }
-    user { fullName email }
   }
 }
 ```
+
+`orderItems` in the tutorial dataset uses a composite key (`orderId`, `productId`), so both fields are exposed in GraphQL.
 
 That's it! You have a working GraphQL API backed by TiDB. No manual schema files, no resolver boilerplate — TiDB GraphQL introspects your database and generates the GraphQL schema automatically.
 

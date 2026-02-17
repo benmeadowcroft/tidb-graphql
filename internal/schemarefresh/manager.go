@@ -16,14 +16,11 @@ import (
 
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
-	"tidb-graphql/internal/junction"
 	"tidb-graphql/internal/logging"
 	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/observability"
 	"tidb-graphql/internal/planner"
-	"tidb-graphql/internal/resolver"
 	"tidb-graphql/internal/schemafilter"
-	"tidb-graphql/internal/schemanaming"
 	"tidb-graphql/internal/sqlutil"
 
 	"github.com/graphql-go/graphql"
@@ -418,23 +415,27 @@ func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint string) (*sn
 
 func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, fingerprint string, queryer introspection.Queryer) (*Snapshot, error) {
 	start := time.Now()
+	executor := m.executor
+	if executor == nil {
+		executor = dbexec.NewStandardExecutor(m.db)
+	}
 
 	m.logger.Info("introspecting database schema")
-	dbSchema, err := introspection.IntrospectDatabaseContext(ctx, queryer, m.databaseName)
+	buildResult, err := BuildSchema(ctx, BuildSchemaConfig{
+		Queryer:      queryer,
+		Executor:     executor,
+		DatabaseName: m.databaseName,
+		Filters:      m.filters,
+		UUIDColumns:  m.uuidColumns,
+		Naming:       m.namingConfig,
+		Limits:       m.limits,
+		DefaultLimit: m.defaultLimit,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to introspect database: %w", err)
+		return nil, err
 	}
-	schemafilter.Apply(dbSchema, m.filters)
-	if err := introspection.ApplyUUIDTypeOverrides(dbSchema, m.uuidColumns); err != nil {
-		return nil, fmt.Errorf("failed to apply UUID type mappings: %w", err)
-	}
-	junctions := junction.ClassifyJunctions(dbSchema)
-	dbSchema.Junctions = junctions.ToIntrospectionMap()
-	namer := naming.New(m.namingConfig, m.logger.Logger)
-	if err := introspection.RebuildRelationshipsWithJunctions(dbSchema, namer, dbSchema.Junctions); err != nil {
-		return nil, fmt.Errorf("failed to rebuild relationships: %w", err)
-	}
-	schemanaming.Apply(dbSchema, namer)
+	dbSchema := buildResult.DBSchema
+	graphqlSchema := buildResult.GraphQLSchema
 
 	m.logger.Info("discovered tables", slog.Int("count", len(dbSchema.Tables)))
 	for _, table := range dbSchema.Tables {
@@ -444,12 +445,6 @@ func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, fingerprint stri
 			slog.Int("foreignKeys", len(table.ForeignKeys)),
 			slog.Int("indexes", len(table.Indexes)),
 		)
-	}
-
-	res := resolver.NewResolver(m.executor, dbSchema, m.limits, m.defaultLimit, m.filters, m.namingConfig)
-	graphqlSchema, err := res.BuildGraphQLSchema()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build GraphQL schema: %w", err)
 	}
 
 	graphqlHandler := handler.New(&handler.Config{

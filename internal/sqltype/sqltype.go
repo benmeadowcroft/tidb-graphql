@@ -36,6 +36,8 @@ const (
 	TypeBytes
 	// TypeUUID represents UUID values mapped explicitly via configuration.
 	TypeUUID
+	// TypeVector represents TiDB vector values.
+	TypeVector
 )
 
 // MapToGraphQL converts a SQL data type string to its corresponding GraphQL type category.
@@ -71,6 +73,8 @@ func MapToGraphQL(sqlType string) GraphQLType {
 		return TypeString
 	case "SET":
 		return TypeSet
+	case "VECTOR":
+		return TypeVector
 	case "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB":
 		return TypeBytes
 	// Date and Time Data Types
@@ -116,6 +120,8 @@ func (t GraphQLType) String() string {
 		return "Bytes"
 	case TypeUUID:
 		return "UUID"
+	case TypeVector:
+		return "Vector"
 	default:
 		return "String"
 	}
@@ -148,6 +154,8 @@ func (t GraphQLType) FilterTypeName() string {
 		return "BytesFilter"
 	case TypeUUID:
 		return "UUIDFilter"
+	case TypeVector:
+		return "StringFilter"
 	default:
 		// JSON and String both use StringFilter (JSON columns are skipped in WHERE)
 		return "StringFilter"
@@ -162,5 +170,5 @@ func (t GraphQLType) IsNumeric() bool {
 // IsComparable returns true if the type can be used with MIN/MAX aggregations.
 // All types except JSON are comparable in SQL.
 func (t GraphQLType) IsComparable() bool {
-	return t != TypeJSON
+	return t != TypeJSON && t != TypeVector
 }

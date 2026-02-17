@@ -19,6 +19,7 @@ For each table `users`:
 - Primary key lookup: `user(id: ID!)` returns `User` (global Node ID).
 - Primary key raw lookup: `user_by_databaseId(databaseId: BigInt!)` returns `User` (name depends on PK column).
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
+- Vector search connections (when enabled and available): `searchUsersByEmbeddingVector(vector, metric, where, first, after)` returns `UserEmbeddingVectorConnection`.
 
 Notes:
 - `orderBy` uses clause-list syntax, for example:
@@ -106,6 +107,7 @@ SQL types are mapped to GraphQL scalars:
 - `time` -> `Time` (HH:MM:SS[.fraction], TiDB range)
 - `year` -> `Year` (YYYY)
 - `blob`, `binary`, `varbinary` -> `Bytes` (RFC4648 base64, padded)
+- `vector`, `vector(D)` -> `Vector` (list of finite floats)
 - `char`, `text` -> `String`
 
 UUID mapping is explicit via config (`type_mappings.uuid_columns`): matched SQL columns are exposed as `UUID` (canonical lowercase hyphenated form). For binary storage, canonical RFC byte order (`UUID_TO_BIN(x,0)`) is assumed.

@@ -8,6 +8,8 @@ server:
   port: 8080
   graphiql_enabled: true
   tls_mode: off
+  search:
+    vector_require_index: false
 
 observability:
   environment: development

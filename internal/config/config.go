@@ -156,6 +156,12 @@ type AuthConfig struct {
 	RoleSchemaMaxRoles      int           `mapstructure:"role_schema_max_roles"`
 }
 
+// SearchConfig holds vector search configuration.
+type SearchConfig struct {
+	VectorRequireIndex bool `mapstructure:"vector_require_index"`
+	VectorMaxTopK      int  `mapstructure:"vector_max_top_k"`
+}
+
 // ServerConfig holds HTTP server parameters.
 type ServerConfig struct {
 	Port                     int           `mapstructure:"port"`
@@ -166,6 +172,7 @@ type ServerConfig struct {
 	SchemaRefreshMinInterval time.Duration `mapstructure:"schema_refresh_min_interval"`
 	SchemaRefreshMaxInterval time.Duration `mapstructure:"schema_refresh_max_interval"`
 	GraphiQLEnabled          bool          `mapstructure:"graphiql_enabled"`
+	Search                   SearchConfig  `mapstructure:"search"`
 	Auth                     AuthConfig    `mapstructure:"auth"`
 	RateLimitEnabled         bool          `mapstructure:"rate_limit_enabled"`
 	RateLimitRPS             float64       `mapstructure:"rate_limit_rps"`
@@ -530,6 +537,8 @@ func defineFlags() {
 		pflag.Int("server.graphql_max_complexity", 0, "Maximum GraphQL query complexity limit")
 		pflag.Int("server.graphql_max_rows", 0, "Maximum estimated GraphQL rows per request")
 		pflag.Int("server.graphql_default_limit", 0, "Default page size for GraphQL connection collection queries")
+		pflag.Bool("server.search.vector_require_index", false, "Require vector-search-capable indexes before exposing vector search fields")
+		pflag.Int("server.search.vector_max_top_k", 0, "Maximum allowed page size (first) for vector search connection fields")
 		pflag.Duration("server.schema_refresh_min_interval", 0, "Minimum interval between schema refresh checks")
 		pflag.Duration("server.schema_refresh_max_interval", 0, "Maximum interval between schema refresh checks")
 		pflag.Bool("server.graphiql_enabled", false, "Enable GraphiQL UI for /graphql (dev only)")
@@ -653,6 +662,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.graphql_max_complexity", 0)
 	v.SetDefault("server.graphql_max_rows", 0)
 	v.SetDefault("server.graphql_default_limit", 100)
+	v.SetDefault("server.search.vector_require_index", true)
+	v.SetDefault("server.search.vector_max_top_k", 100)
 	v.SetDefault("server.schema_refresh_min_interval", 30*time.Second)
 	v.SetDefault("server.schema_refresh_max_interval", 5*time.Minute)
 	v.SetDefault("server.graphiql_enabled", false)
@@ -1273,6 +1284,12 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 		result.Errors = append(result.Errors, ValidationError{
 			Field:   "server.graphql_default_limit",
 			Message: "graphql_default_limit cannot be negative",
+		})
+	}
+	if s.Search.VectorMaxTopK < 0 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "server.search.vector_max_top_k",
+			Message: "vector_max_top_k cannot be negative",
 		})
 	}
 

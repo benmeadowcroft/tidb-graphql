@@ -56,6 +56,8 @@ type Config struct {
 	TinyInt1BooleanColumns map[string][]string
 	TinyInt1IntColumns     map[string][]string
 	Naming                 naming.Config
+	VectorRequireIndex     bool
+	VectorMaxTopK          int
 	Executor               dbexec.QueryExecutor
 	IntrospectionRole      string
 	RoleSchemas            []string
@@ -78,6 +80,8 @@ type Manager struct {
 	tinyInt1BooleanColumns map[string][]string
 	tinyInt1IntColumns     map[string][]string
 	namingConfig           naming.Config
+	vectorRequireIndex     bool
+	vectorMaxTopK          int
 	executor               dbexec.QueryExecutor
 	introspectionRole      string
 	roleSchemas            []string
@@ -149,6 +153,8 @@ func NewManager(cfg Config) (*Manager, error) {
 		tinyInt1BooleanColumns: cfg.TinyInt1BooleanColumns,
 		tinyInt1IntColumns:     cfg.TinyInt1IntColumns,
 		namingConfig:           cfg.Naming,
+		vectorRequireIndex:     cfg.VectorRequireIndex,
+		vectorMaxTopK:          cfg.VectorMaxTopK,
 		executor:               cfg.Executor,
 		introspectionRole:      cfg.IntrospectionRole,
 		roleSchemas:            append([]string(nil), cfg.RoleSchemas...),
@@ -485,6 +491,8 @@ func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, fingerprint stri
 		Naming:                 m.namingConfig,
 		Limits:                 m.limits,
 		DefaultLimit:           m.defaultLimit,
+		VectorRequireIndex:     m.vectorRequireIndex,
+		VectorMaxTopK:          m.vectorMaxTopK,
 	})
 	if err != nil {
 		return nil, err

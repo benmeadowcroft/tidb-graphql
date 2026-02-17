@@ -207,6 +207,17 @@ func TestMapToGraphQL_JSONType(t *testing.T) {
 	}
 }
 
+func TestMapToGraphQL_VectorType(t *testing.T) {
+	vectorTypes := []string{"VECTOR", "vector", "vector(3)"}
+
+	for _, sqlType := range vectorTypes {
+		t.Run(sqlType, func(t *testing.T) {
+			assert.Equal(t, TypeVector, MapToGraphQL(sqlType))
+			assert.Equal(t, "Vector", MapToGraphQL(sqlType).String())
+		})
+	}
+}
+
 func TestGraphQLType_UUID(t *testing.T) {
 	assert.Equal(t, "UUID", TypeUUID.String())
 	assert.Equal(t, "UUIDFilter", TypeUUID.FilterTypeName())
@@ -245,6 +256,7 @@ func TestMapToGraphQL_NoFalsePositives(t *testing.T) {
 		{"MULTIPOINT", TypeString},
 		// "TINYINT" SHOULD match int
 		{"TINYINT", TypeInt},
+		{"VECTORIZE", TypeString},
 	}
 
 	for _, tc := range testCases {

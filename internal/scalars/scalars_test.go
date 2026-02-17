@@ -168,3 +168,29 @@ func TestUUIDScalar(t *testing.T) {
 	assert.Nil(t, scalar.Serialize([]byte{0x01, 0x02}))
 	assert.Nil(t, scalar.ParseLiteral(&ast.IntValue{Value: "42"}))
 }
+
+func TestVectorScalar(t *testing.T) {
+	scalar := Vector()
+
+	parsed := scalar.ParseValue([]interface{}{1.0, 2, "3.5"})
+	require.IsType(t, []float64{}, parsed)
+	assert.Equal(t, []float64{1, 2, 3.5}, parsed)
+
+	serialized := scalar.Serialize("[1,2,3]")
+	require.IsType(t, []float64{}, serialized)
+	assert.Equal(t, []float64{1, 2, 3}, serialized)
+
+	literal := scalar.ParseLiteral(&ast.ListValue{
+		Values: []ast.Value{
+			&ast.IntValue{Value: "1"},
+			&ast.FloatValue{Value: "2.5"},
+		},
+	})
+	require.IsType(t, []float64{}, literal)
+	assert.Equal(t, []float64{1, 2.5}, literal)
+
+	assert.Nil(t, scalar.ParseValue([]interface{}{1, "x"}))
+	assert.Nil(t, scalar.ParseValue([]interface{}{math.Inf(1)}))
+	assert.Nil(t, scalar.ParseValue("not-json"))
+	assert.Nil(t, scalar.ParseLiteral(&ast.StringValue{Value: "nope"}))
+}

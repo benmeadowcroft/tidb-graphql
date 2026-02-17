@@ -496,12 +496,14 @@ func TestConfig_Validate(t *testing.T) {
 		cfg.Server.GraphQLMaxComplexity = -1
 		cfg.Server.GraphQLMaxRows = -1
 		cfg.Server.GraphQLDefaultLimit = -1
+		cfg.Server.Search.VectorMaxTopK = -1
 		result := cfg.Validate()
 		assert.True(t, result.HasErrors())
 		assert.Contains(t, result.Error(), "graphql_max_depth")
 		assert.Contains(t, result.Error(), "graphql_max_complexity")
 		assert.Contains(t, result.Error(), "graphql_max_rows")
 		assert.Contains(t, result.Error(), "graphql_default_limit")
+		assert.Contains(t, result.Error(), "vector_max_top_k")
 	})
 
 	t.Run("multiple errors collected", func(t *testing.T) {

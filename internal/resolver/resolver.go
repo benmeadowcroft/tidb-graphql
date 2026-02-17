@@ -47,6 +47,8 @@ type Resolver struct {
 	enumCache          map[string]*graphql.Enum
 	enumFilterCache    map[string]*graphql.InputObject
 	setFilterCache     map[string]*graphql.InputObject
+	vectorEdgeCache    map[string]*graphql.Object
+	vectorConnCache    map[string]*graphql.Object
 	singularQueryCache map[string]string
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
@@ -61,14 +63,37 @@ type Resolver struct {
 	yearType           *graphql.Scalar
 	bytesType          *graphql.Scalar
 	uuidType           *graphql.Scalar
+	vectorType         *graphql.Scalar
 	nodeInterface      *graphql.Interface
 	pageInfoType       *graphql.Object
+	vectorDistance     *graphql.Enum
 	edgeCache          map[string]*graphql.Object
 	connectionCache    map[string]*graphql.Object
 	limits             *planner.PlanLimits
 	defaultLimit       int
 	filters            schemafilter.Config
+	vectorSearch       VectorSearchConfig
 	mu                 sync.RWMutex
+}
+
+// VectorSearchConfig controls generated vector-search fields.
+type VectorSearchConfig struct {
+	RequireIndex bool
+	MaxTopK      int
+	DefaultFirst int
+}
+
+func normalizeVectorSearchConfig(cfg VectorSearchConfig) VectorSearchConfig {
+	if cfg.MaxTopK <= 0 {
+		cfg.MaxTopK = 100
+	}
+	if cfg.DefaultFirst <= 0 {
+		cfg.DefaultFirst = planner.DefaultVectorFirst
+	}
+	if cfg.DefaultFirst > cfg.MaxTopK {
+		cfg.DefaultFirst = cfg.MaxTopK
+	}
+	return cfg
 }
 
 // NewResolver creates a new resolver with the given executor, schema, and optional limits.
@@ -92,6 +117,8 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		enumCache:          make(map[string]*graphql.Enum),
 		enumFilterCache:    make(map[string]*graphql.InputObject),
 		setFilterCache:     make(map[string]*graphql.InputObject),
+		vectorEdgeCache:    make(map[string]*graphql.Object),
+		vectorConnCache:    make(map[string]*graphql.Object),
 		singularQueryCache: make(map[string]string),
 		singularTypeCache:  make(map[string]string),
 		singularNamer:      naming.New(namingConfig, nil),
@@ -100,7 +127,17 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		limits:             limits,
 		defaultLimit:       defaultLimit,
 		filters:            filters,
+		vectorSearch: normalizeVectorSearchConfig(VectorSearchConfig{
+			RequireIndex: true,
+		}),
 	}
+}
+
+// SetVectorSearchConfig overrides vector-search generation/runtime behavior.
+func (r *Resolver) SetVectorSearchConfig(cfg VectorSearchConfig) {
+	r.mu.Lock()
+	r.vectorSearch = normalizeVectorSearchConfig(cfg)
+	r.mu.Unlock()
 }
 
 // BuildGraphQLSchema constructs an executable GraphQL schema from the database schema.
@@ -276,6 +313,8 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 		}
 	}
 
+	r.addVectorSearchQueries(fields, table, tableType, pkCols)
+
 	return fields
 }
 
@@ -352,6 +391,73 @@ func (r *Resolver) addUniqueKeyQueries(fields graphql.Fields, table introspectio
 
 		if len(cols) > 0 {
 			r.addSingleRowQuery(fields, table, tableType, queryName, cols)
+		}
+	}
+}
+
+func (r *Resolver) addVectorSearchQueries(fields graphql.Fields, table introspection.Table, tableType *graphql.Object, pkCols []introspection.Column) {
+	if len(pkCols) == 0 {
+		return
+	}
+	vectorColumns := introspection.VectorColumns(table)
+	if len(vectorColumns) == 0 {
+		return
+	}
+
+	r.mu.RLock()
+	cfg := r.vectorSearch
+	r.mu.RUnlock()
+
+	for _, vectorCol := range vectorColumns {
+		if cfg.RequireIndex && !introspection.HasVectorIndexForColumn(table, vectorCol.Name) {
+			continue
+		}
+
+		fieldName := uniqueRootFieldName(fields, r.vectorSearchFieldName(table, vectorCol))
+		connType := r.buildVectorConnectionType(table, vectorCol, tableType)
+
+		args := graphql.FieldConfigArgument{
+			"vector": &graphql.ArgumentConfig{
+				Type: graphql.NewNonNull(r.vectorScalar()),
+			},
+			"metric": &graphql.ArgumentConfig{
+				Type: r.vectorDistanceMetricEnum(),
+			},
+			"first": &graphql.ArgumentConfig{
+				Type: r.nonNegativeIntScalar(),
+			},
+			"after": &graphql.ArgumentConfig{
+				Type: graphql.String,
+			},
+		}
+		if whereInput := r.whereInput(table); whereInput != nil {
+			args["where"] = &graphql.ArgumentConfig{
+				Type: whereInput,
+			}
+		}
+
+		fields[fieldName] = &graphql.Field{
+			Type:    graphql.NewNonNull(connType),
+			Args:    args,
+			Resolve: r.makeVectorConnectionResolver(table, vectorCol),
+		}
+	}
+}
+
+func (r *Resolver) vectorSearchFieldName(table introspection.Table, vectorCol introspection.Column) string {
+	tablePart := r.singularNamer.ToGraphQLTypeName(introspection.GraphQLQueryName(table))
+	columnPart := r.singularNamer.ToGraphQLTypeName(introspection.GraphQLFieldName(vectorCol))
+	return "search" + tablePart + "By" + columnPart + "Vector"
+}
+
+func uniqueRootFieldName(fields graphql.Fields, base string) string {
+	if _, exists := fields[base]; !exists {
+		return base
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s%d", base, i)
+		if _, exists := fields[candidate]; !exists {
+			return candidate
 		}
 	}
 }
@@ -1318,6 +1424,52 @@ func (r *Resolver) uuidScalar() *graphql.Scalar {
 	return cached
 }
 
+func (r *Resolver) vectorScalar() *graphql.Scalar {
+	r.mu.RLock()
+	cached := r.vectorType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	scalar := scalars.Vector()
+
+	r.mu.Lock()
+	if r.vectorType == nil {
+		r.vectorType = scalar
+	}
+	cached = r.vectorType
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) vectorDistanceMetricEnum() *graphql.Enum {
+	r.mu.RLock()
+	cached := r.vectorDistance
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	enumValue := graphql.NewEnum(graphql.EnumConfig{
+		Name: "VectorDistanceMetric",
+		Values: graphql.EnumValueConfigMap{
+			string(planner.VectorDistanceMetricCosine): &graphql.EnumValueConfig{Value: string(planner.VectorDistanceMetricCosine)},
+			string(planner.VectorDistanceMetricL2):     &graphql.EnumValueConfig{Value: string(planner.VectorDistanceMetricL2)},
+		},
+	})
+
+	r.mu.Lock()
+	if r.vectorDistance == nil {
+		r.vectorDistance = enumValue
+	}
+	cached = r.vectorDistance
+	r.mu.Unlock()
+
+	return cached
+}
+
 func (r *Resolver) nodeInterfaceType() *graphql.Interface {
 	r.mu.RLock()
 	cached := r.nodeInterface
@@ -1494,6 +1646,88 @@ func (r *Resolver) buildConnectionType(table introspection.Table, tableType *gra
 		return cached
 	}
 	r.connectionCache[typeName] = connType
+	r.mu.Unlock()
+
+	return connType
+}
+
+func (r *Resolver) vectorTypeSuffix(vectorCol introspection.Column) string {
+	return r.singularNamer.ToGraphQLTypeName(introspection.GraphQLFieldName(vectorCol)) + "Vector"
+}
+
+func (r *Resolver) buildVectorEdgeType(table introspection.Table, vectorCol introspection.Column, tableType *graphql.Object) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + r.vectorTypeSuffix(vectorCol) + "Edge"
+
+	r.mu.RLock()
+	if cached, ok := r.vectorEdgeCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	edgeType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			"cursor": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.String),
+			},
+			"node": &graphql.Field{
+				Type: graphql.NewNonNull(tableType),
+			},
+			"distance": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Float),
+			},
+			"rank": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.Int),
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.vectorEdgeCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.vectorEdgeCache[typeName] = edgeType
+	r.mu.Unlock()
+
+	return edgeType
+}
+
+func (r *Resolver) buildVectorConnectionType(table introspection.Table, vectorCol introspection.Column, tableType *graphql.Object) *graphql.Object {
+	typeName := introspection.GraphQLTypeName(table) + r.vectorTypeSuffix(vectorCol) + "Connection"
+
+	r.mu.RLock()
+	if cached, ok := r.vectorConnCache[typeName]; ok {
+		r.mu.RUnlock()
+		return cached
+	}
+	r.mu.RUnlock()
+
+	edgeType := r.buildVectorEdgeType(table, vectorCol, tableType)
+	pageInfo := r.getPageInfoType()
+
+	connType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			"edges": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(edgeType))),
+			},
+			"nodes": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.NewList(graphql.NewNonNull(tableType))),
+			},
+			"pageInfo": &graphql.Field{
+				Type: graphql.NewNonNull(pageInfo),
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.vectorConnCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.vectorConnCache[typeName] = connType
 	r.mu.Unlock()
 
 	return connType
@@ -1743,6 +1977,148 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 
 		seedBatchRows(p, results)
 		return r.buildConnectionResult(p.Context, results, plan, hasNext, hasPrev), nil
+	}
+}
+
+func (r *Resolver) makeVectorConnectionResolver(table introspection.Table, vectorCol introspection.Column) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		field := firstFieldAST(p.Info.FieldASTs)
+		if field == nil {
+			return nil, fmt.Errorf("missing field AST")
+		}
+
+		r.mu.RLock()
+		searchCfg := r.vectorSearch
+		r.mu.RUnlock()
+
+		var opts []planner.PlanOption
+		opts = append(opts, planner.WithFragments(p.Info.Fragments))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
+		if r.limits != nil {
+			opts = append(opts, planner.WithLimits(*r.limits))
+		}
+
+		plan, err := planner.PlanVectorSearchConnection(
+			r.dbSchema,
+			table,
+			vectorCol,
+			field,
+			p.Args,
+			searchCfg.MaxTopK,
+			searchCfg.DefaultFirst,
+			opts...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to plan vector search connection: %w", err)
+		}
+
+		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		if err != nil {
+			return nil, normalizeQueryError(err)
+		}
+		defer func() { _ = rows.Close() }()
+
+		results, err := scanRowsWithExtras(rows, plan.Columns, []string{plan.DistanceAlias})
+		if err != nil {
+			return nil, err
+		}
+
+		hasNext := len(results) > plan.First
+		if hasNext {
+			results = results[:plan.First]
+		}
+
+		edges := make([]map[string]interface{}, len(results))
+		nodes := make([]map[string]interface{}, len(results))
+		for i, row := range results {
+			distance, err := coerceDistanceValue(row[plan.DistanceAlias])
+			if err != nil {
+				return nil, err
+			}
+
+			node := make(map[string]interface{}, len(plan.Columns))
+			for _, col := range plan.Columns {
+				fieldName := introspection.GraphQLFieldName(col)
+				node[fieldName] = row[fieldName]
+			}
+			rank := i + 1
+
+			cursorValues := make([]interface{}, 0, len(plan.PKColumns)+1)
+			cursorValues = append(cursorValues, distance)
+			for _, pk := range plan.PKColumns {
+				pkField := introspection.GraphQLFieldName(pk)
+				cursorValues = append(cursorValues, node[pkField])
+			}
+			encodedCursor := cursor.EncodeCursor(introspection.GraphQLTypeName(plan.Table), plan.OrderByKey, plan.CursorDirections, cursorValues...)
+
+			edges[i] = map[string]interface{}{
+				"cursor":   encodedCursor,
+				"node":     node,
+				"distance": distance,
+				"rank":     rank,
+			}
+			nodes[i] = node
+		}
+
+		var startCursor, endCursor interface{}
+		if len(edges) > 0 {
+			startCursor = edges[0]["cursor"]
+			endCursor = edges[len(edges)-1]["cursor"]
+		}
+
+		return map[string]interface{}{
+			"edges": edges,
+			"nodes": nodes,
+			"pageInfo": map[string]interface{}{
+				"hasNextPage":     hasNext,
+				"hasPreviousPage": plan.HasAfter,
+				"startCursor":     startCursor,
+				"endCursor":       endCursor,
+			},
+		}, nil
+	}
+}
+
+func coerceDistanceValue(value interface{}) (float64, error) {
+	switch v := value.(type) {
+	case float64:
+		return v, nil
+	case float32:
+		return float64(v), nil
+	case int:
+		return float64(v), nil
+	case int8:
+		return float64(v), nil
+	case int16:
+		return float64(v), nil
+	case int32:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	case uint:
+		return float64(v), nil
+	case uint8:
+		return float64(v), nil
+	case uint16:
+		return float64(v), nil
+	case uint32:
+		return float64(v), nil
+	case uint64:
+		return float64(v), nil
+	case []byte:
+		parsed, err := strconv.ParseFloat(string(v), 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid distance value: %w", err)
+		}
+		return parsed, nil
+	case string:
+		parsed, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid distance value: %w", err)
+		}
+		return parsed, nil
+	default:
+		return 0, fmt.Errorf("invalid distance value type %T", value)
 	}
 }
 
@@ -2062,8 +2438,9 @@ func (r *Resolver) whereInputForTable(table introspection.Table, includeRelation
 func (r *Resolver) scalarWhereFields(table introspection.Table) graphql.InputObjectConfigFieldMap {
 	fields := graphql.InputObjectConfigFieldMap{}
 	for _, col := range table.Columns {
-		// Skip JSON columns
-		if introspection.EffectiveGraphQLType(col) == sqltype.TypeJSON {
+		// Skip JSON and VECTOR columns from generic where inputs.
+		effectiveType := introspection.EffectiveGraphQLType(col)
+		if effectiveType == sqltype.TypeJSON || effectiveType == sqltype.TypeVector {
 			continue
 		}
 
@@ -3940,6 +4317,8 @@ func convertColumnValue(col introspection.Column, val interface{}) interface{} {
 		// UUID normalization/validation is enforced by uuidColumnResolver so it can
 		// return field-level GraphQL errors on malformed stored values.
 		return val
+	case sqltype.TypeVector:
+		return val
 	default:
 		return convertValue(val)
 	}
@@ -4044,6 +4423,8 @@ func (r *Resolver) mapColumnTypeToGraphQL(table introspection.Table, col *intros
 	switch effectiveType {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()
+	case sqltype.TypeVector:
+		return r.vectorScalar()
 	case sqltype.TypeInt:
 		return graphql.Int
 	case sqltype.TypeBigInt:
@@ -4088,6 +4469,8 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 	switch effectiveType {
 	case sqltype.TypeJSON:
 		return r.jsonScalar()
+	case sqltype.TypeVector:
+		return r.vectorScalar()
 	case sqltype.TypeInt:
 		return graphql.Int
 	case sqltype.TypeBigInt:

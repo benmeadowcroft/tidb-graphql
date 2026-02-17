@@ -101,6 +101,7 @@ For more advanced setups (building from source, TLS/mTLS, DSN connection strings
 
 ## Next steps
 - [Query basics](query-basics.md)
+- [Vector search](vector-search.md)
 - [Local OIDC](local-oidc.md)
 
 ## Reference

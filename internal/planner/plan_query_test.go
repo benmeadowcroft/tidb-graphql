@@ -463,6 +463,40 @@ func TestSelectedColumnsForConnection_EdgesNodeViaFragment(t *testing.T) {
 	assert.Equal(t, []string{"id", "created_at"}, names)
 }
 
+func TestSelectedColumnsForConnection_NodesNodeNestedSelection(t *testing.T) {
+	table := introspection.Table{
+		Name: "product_reviews",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "review_text"},
+			{Name: "created_at"},
+		},
+	}
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "searchProductReviewsByEmbeddingVector"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{
+						Name: &ast.Name{Value: "node"},
+						SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "reviewText"}},
+						}},
+					},
+				}},
+			},
+		}},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
+	cols := SelectedColumnsForConnection(table, field, nil, orderBy)
+	names := columnNamesOnly(cols)
+
+	assert.Equal(t, []string{"id", "review_text"}, names)
+}
+
 func TestSelectedColumnsForConnection_MetadataOnlyUsesCursorColumns(t *testing.T) {
 	table := introspection.Table{
 		Name: "users",

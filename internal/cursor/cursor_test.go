@@ -179,3 +179,36 @@ func TestCoerceToString(t *testing.T) {
 		}
 	}
 }
+
+func TestParseVectorCursorValues(t *testing.T) {
+	pkCols := []introspection.Column{
+		{Name: "id", DataType: "bigint", IsPrimaryKey: true},
+	}
+
+	distance, pkValues, err := ParseVectorCursorValues([]string{"0.42", "7"}, pkCols)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if distance != 0.42 {
+		t.Fatalf("distance = %v, want 0.42", distance)
+	}
+	if len(pkValues) != 1 || pkValues[0] != int64(7) {
+		t.Fatalf("pkValues = %#v, want [int64(7)]", pkValues)
+	}
+}
+
+func TestParseVectorCursorValues_Errors(t *testing.T) {
+	pkCols := []introspection.Column{
+		{Name: "id", DataType: "bigint", IsPrimaryKey: true},
+	}
+
+	if _, _, err := ParseVectorCursorValues([]string{"0.5"}, pkCols); err == nil {
+		t.Fatal("expected count mismatch error")
+	}
+	if _, _, err := ParseVectorCursorValues([]string{"nan", "1"}, pkCols); err == nil {
+		t.Fatal("expected invalid distance error")
+	}
+	if _, _, err := ParseVectorCursorValues([]string{"0.5", "bad-int"}, pkCols); err == nil {
+		t.Fatal("expected invalid PK error")
+	}
+}

@@ -218,6 +218,7 @@ query {
 # Related Docs
 
 ## Next steps
+- [Vector search](vector-search.md)
 - [Local OIDC](local-oidc.md)
 - [Ops guardrails](ops-guardrails.md)
 

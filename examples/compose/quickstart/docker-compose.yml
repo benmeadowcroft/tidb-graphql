@@ -31,6 +31,7 @@ services:
         condition: service_healthy
     volumes:
       - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
+      - ../../../docs/tutorials/sample-data-vectors.sql:/seed/sample-data-vectors.sql:ro
     entrypoint: /bin/sh
     command:
       - -ec
@@ -39,6 +40,7 @@ services:
           sleep 1
         done
         mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data.sql
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data-vectors.sql
     restart: "no"
 
   tidb-graphql:

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -23,6 +24,7 @@ type Column struct {
 	Name            string
 	DataType        string
 	ColumnType      string
+	VectorDimension int
 	IsNullable      bool
 	IsPrimaryKey    bool
 	IsGenerated     bool
@@ -43,6 +45,7 @@ type Column struct {
 type Index struct {
 	Name    string
 	Unique  bool
+	Type    string
 	Columns []string
 }
 
@@ -361,6 +364,7 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 			return nil, err
 		}
 		col.ColumnType = columnType
+		col.VectorDimension = parseVectorDimension(columnType)
 		if columnComment.Valid {
 			col.Comment = strings.TrimSpace(columnComment.String)
 		}
@@ -577,7 +581,8 @@ func getIndexes(ctx context.Context, db Queryer, databaseName, tableName string)
 			INDEX_NAME,
 			NON_UNIQUE,
 			SEQ_IN_INDEX,
-			COLUMN_NAME
+			COLUMN_NAME,
+			INDEX_TYPE
 		FROM INFORMATION_SCHEMA.STATISTICS
 		WHERE TABLE_SCHEMA = ?
 			AND TABLE_NAME = ?
@@ -599,7 +604,8 @@ func getIndexes(ctx context.Context, db Queryer, databaseName, tableName string)
 		var nonUnique int
 		var seq int
 		var columnName string
-		if err := rows.Scan(&indexName, &nonUnique, &seq, &columnName); err != nil {
+		var indexType string
+		if err := rows.Scan(&indexName, &nonUnique, &seq, &columnName, &indexType); err != nil {
 			recordSpanError(span, err)
 			return nil, err
 		}
@@ -609,6 +615,7 @@ func getIndexes(ctx context.Context, db Queryer, databaseName, tableName string)
 			index = &Index{
 				Name:   indexName,
 				Unique: nonUnique == 0,
+				Type:   strings.ToUpper(strings.TrimSpace(indexType)),
 			}
 			indexByName[indexName] = index
 		}
@@ -880,6 +887,62 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 	}
 
 	return nil
+}
+
+func parseVectorDimension(columnType string) int {
+	normalized := strings.ToLower(strings.TrimSpace(columnType))
+	if normalized == "" || normalized == "vector" {
+		return 0
+	}
+	if !strings.HasPrefix(normalized, "vector(") || !strings.HasSuffix(normalized, ")") {
+		return 0
+	}
+	raw := strings.TrimSpace(normalized[len("vector(") : len(normalized)-1])
+	if raw == "" {
+		return 0
+	}
+	dimension, err := strconv.Atoi(raw)
+	if err != nil || dimension <= 0 {
+		return 0
+	}
+	return dimension
+}
+
+// IsVectorColumn reports whether the column uses TiDB's VECTOR type.
+func IsVectorColumn(col Column) bool {
+	return EffectiveGraphQLType(col) == sqltype.TypeVector
+}
+
+// VectorColumns returns vector-typed columns in table column order.
+func VectorColumns(table Table) []Column {
+	cols := make([]Column, 0)
+	for _, col := range table.Columns {
+		if IsVectorColumn(col) {
+			cols = append(cols, col)
+		}
+	}
+	return cols
+}
+
+// HasVectorIndexForColumn reports whether a vector-search-capable index exists
+// for the given table column.
+func HasVectorIndexForColumn(table Table, columnName string) bool {
+	for _, idx := range table.Indexes {
+		if !isVectorSearchIndex(idx) {
+			continue
+		}
+		for _, idxCol := range idx.Columns {
+			if idxCol == columnName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isVectorSearchIndex(idx Index) bool {
+	indexType := strings.ToUpper(strings.TrimSpace(idx.Type))
+	return strings.Contains(indexType, "HNSW")
 }
 
 // NumericColumns returns columns eligible for AVG/SUM aggregation (Int, Float types).

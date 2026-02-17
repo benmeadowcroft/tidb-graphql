@@ -28,6 +28,8 @@ type BuildSchemaConfig struct {
 	Naming                 naming.Config
 	Limits                 *planner.PlanLimits
 	DefaultLimit           int
+	VectorRequireIndex     bool
+	VectorMaxTopK          int
 }
 
 // BuildSchemaResult contains schema artifacts produced by BuildSchema.
@@ -70,6 +72,12 @@ func BuildSchema(ctx context.Context, cfg BuildSchemaConfig) (*BuildSchemaResult
 	schemanaming.Apply(dbSchema, namer)
 
 	res := resolver.NewResolver(cfg.Executor, dbSchema, cfg.Limits, cfg.DefaultLimit, cfg.Filters, cfg.Naming)
+	if cfg.VectorRequireIndex || cfg.VectorMaxTopK > 0 {
+		res.SetVectorSearchConfig(resolver.VectorSearchConfig{
+			RequireIndex: cfg.VectorRequireIndex,
+			MaxTopK:      cfg.VectorMaxTopK,
+		})
+	}
 	graphqlSchema, err := res.BuildGraphQLSchema()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build GraphQL schema: %w", err)

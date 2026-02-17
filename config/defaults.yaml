@@ -48,6 +48,9 @@ server:
   graphql_max_complexity: 0
   graphql_max_rows: 0
   graphql_default_limit: 100
+  search:
+    vector_require_index: true
+    vector_max_top_k: 100
   schema_refresh_min_interval: 30s
   schema_refresh_max_interval: 5m
   graphiql_enabled: false

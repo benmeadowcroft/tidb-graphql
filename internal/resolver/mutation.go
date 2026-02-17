@@ -2,8 +2,11 @@ package resolver
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
@@ -484,6 +487,8 @@ func normalizeMutationInputValue(col introspection.Column, value interface{}) (i
 		return normalizeSetInputValue(col, value)
 	case sqltype.TypeUUID:
 		return normalizeUUIDInputValue(col, value)
+	case sqltype.TypeVector:
+		return normalizeVectorInputValue(col, value)
 	default:
 		return value, nil
 	}
@@ -519,6 +524,103 @@ func normalizeUUIDInputValue(col introspection.Column, value interface{}) (inter
 		return uuidutil.ToBytes(parsed), nil
 	}
 	return canonical, nil
+}
+
+func normalizeVectorInputValue(col introspection.Column, value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	vector, err := parseMutationVectorValues(value)
+	if err != nil {
+		return nil, newMutationError(err.Error(), "invalid_input", 0)
+	}
+	if col.VectorDimension > 0 && len(vector) != col.VectorDimension {
+		return nil, newMutationError(
+			fmt.Sprintf("vector length %d does not match %s dimension %d", len(vector), introspection.GraphQLFieldName(col), col.VectorDimension),
+			"invalid_input",
+			0,
+		)
+	}
+
+	encoded, err := json.Marshal(vector)
+	if err != nil {
+		return nil, newMutationError("failed to encode vector value", "invalid_input", 0)
+	}
+	return string(encoded), nil
+}
+
+func parseMutationVectorValues(value interface{}) ([]float64, error) {
+	switch v := value.(type) {
+	case []float64:
+		return validateFiniteMutationVector(v)
+	case []float32:
+		out := make([]float64, len(v))
+		for i, n := range v {
+			out[i] = float64(n)
+		}
+		return validateFiniteMutationVector(out)
+	case []interface{}:
+		out := make([]float64, len(v))
+		for i, raw := range v {
+			n, err := parseMutationVectorNumber(raw)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = n
+		}
+		return validateFiniteMutationVector(out)
+	default:
+		return nil, fmt.Errorf("vector must be a list of numbers")
+	}
+}
+
+func validateFiniteMutationVector(values []float64) ([]float64, error) {
+	out := make([]float64, len(values))
+	copy(out, values)
+	for _, n := range out {
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return nil, fmt.Errorf("vector values must be finite numbers")
+		}
+	}
+	return out, nil
+}
+
+func parseMutationVectorNumber(value interface{}) (float64, error) {
+	switch v := value.(type) {
+	case float64:
+		return v, nil
+	case float32:
+		return float64(v), nil
+	case int:
+		return float64(v), nil
+	case int8:
+		return float64(v), nil
+	case int16:
+		return float64(v), nil
+	case int32:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	case uint:
+		return float64(v), nil
+	case uint8:
+		return float64(v), nil
+	case uint16:
+		return float64(v), nil
+	case uint32:
+		return float64(v), nil
+	case uint64:
+		return float64(v), nil
+	case string:
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return 0, fmt.Errorf("vector values must be numeric")
+		}
+		return n, nil
+	default:
+		return 0, fmt.Errorf("vector values must be numeric")
+	}
 }
 
 func pkValuesFromArgs(table introspection.Table, pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {

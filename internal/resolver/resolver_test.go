@@ -842,6 +842,82 @@ func TestSchemaDescriptionsFromComments(t *testing.T) {
 	assert.Equal(t, "User email address.", whereFields["email"].Description())
 }
 
+func TestWhereInputIncludesRelationshipFiltersSingleHop(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "published", DataType: "boolean"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+
+	users.Relationships = []introspection.Relationship{
+		{
+			IsOneToMany:      true,
+			LocalColumns:     []string{"id"},
+			RemoteTable:      "posts",
+			RemoteColumns:    []string{"user_id"},
+			GraphQLFieldName: "posts",
+		},
+	}
+	posts.Relationships = []introspection.Relationship{
+		{
+			IsManyToOne:      true,
+			LocalColumns:     []string{"user_id"},
+			RemoteTable:      "users",
+			RemoteColumns:    []string{"id"},
+			GraphQLFieldName: "user",
+		},
+	}
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	usersWhere := r.whereInput(users)
+	require.NotNil(t, usersWhere)
+	usersWhereFields := usersWhere.Fields()
+	postsField, ok := usersWhereFields["posts"]
+	require.True(t, ok, "expected users.where.posts relationship filter field")
+	postsFilterInput, ok := postsField.Type.(*graphql.InputObject)
+	require.True(t, ok, "expected users.where.posts to be an input object")
+	postsFilterFields := postsFilterInput.Fields()
+	require.Contains(t, postsFilterFields, "some")
+	require.Contains(t, postsFilterFields, "none")
+
+	someType, ok := postsFilterFields["some"].Type.(*graphql.InputObject)
+	require.True(t, ok, "expected posts.some nested where type")
+	someWhereFields := someType.Fields()
+	require.Contains(t, someWhereFields, "published")
+	require.NotContains(t, someWhereFields, "user", "single-hop nested where should be scalar-only")
+
+	postsWhere := r.whereInput(posts)
+	require.NotNil(t, postsWhere)
+	postsWhereFields := postsWhere.Fields()
+	userField, ok := postsWhereFields["user"]
+	require.True(t, ok, "expected posts.where.user relationship filter field")
+	userFilterInput, ok := userField.Type.(*graphql.InputObject)
+	require.True(t, ok, "expected posts.where.user to be an input object")
+	userFilterFields := userFilterInput.Fields()
+	require.Contains(t, userFilterFields, "is")
+	require.Contains(t, userFilterFields, "isNull")
+
+	isType, ok := userFilterFields["is"].Type.(*graphql.InputObject)
+	require.True(t, ok, "expected user.is nested where type")
+	isWhereFields := isType.Fields()
+	require.Contains(t, isWhereFields, "username")
+	require.NotContains(t, isWhereFields, "posts", "single-hop nested where should be scalar-only")
+}
+
 func TestDeletePayloadIncludesID(t *testing.T) {
 	table := introspection.Table{
 		Name: "users",

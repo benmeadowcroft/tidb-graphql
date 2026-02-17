@@ -109,6 +109,54 @@ Empty-list semantics for set operators:
 ## Indexed column requirement
 
 If you use `where`, at least one referenced column must be indexed. This is a guardrail to prevent unbounded scans. The error message lists available indexed columns.
+For relationship-aware filters, this validation is applied per referenced table path.
+
+## Relationship operators
+
+Relationship fields in `where` support single-hop traversal:
+
+- To-many relationships: `some`, `none`
+- To-one relationships: `is`, `isNull`
+
+Examples:
+
+```graphql
+{
+  users(where: { posts: { some: { published: { eq: true } } } }) {
+    nodes {
+      id
+      username
+    }
+  }
+}
+```
+
+```graphql
+{
+  posts(where: { user: { is: { username: { eq: "alice" } } } }) {
+    nodes {
+      id
+      title
+    }
+  }
+}
+```
+
+```graphql
+{
+  posts(where: { user: { isNull: true } }) {
+    nodes {
+      id
+    }
+  }
+}
+```
+
+Notes:
+
+- `isNull: true` compiles to `NOT EXISTS`; `isNull: false` compiles to `EXISTS`.
+- `is` and `isNull` cannot be used together in the same relationship block.
+- Single-hop only in this phase: nested relationship traversal inside relationship filters is not supported.
 
 ## orderBy rules
 

@@ -1718,6 +1718,7 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1779,6 +1780,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1840,6 +1842,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1911,6 +1914,7 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -2003,10 +2007,21 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 }
 
 func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
+	return r.whereInputForTable(table, true)
+}
+
+func (r *Resolver) scalarWhereInput(table introspection.Table) *graphql.InputObject {
+	return r.whereInputForTable(table, false)
+}
+
+func (r *Resolver) whereInputForTable(table introspection.Table, includeRelations bool) *graphql.InputObject {
 	if table.IsView {
 		return nil
 	}
 	typeName := introspection.GraphQLTypeName(table) + "Where"
+	if !includeRelations {
+		typeName = introspection.GraphQLTypeName(table) + "ScalarWhere"
+	}
 	r.mu.RLock()
 	cached, ok := r.whereCache[typeName]
 	r.mu.RUnlock()
@@ -2014,30 +2029,15 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 		return cached
 	}
 
-	// Build field map for WHERE input
-	fields := graphql.InputObjectConfigFieldMap{}
-
-	for _, col := range table.Columns {
-		// Skip JSON columns
-		if introspection.EffectiveGraphQLType(col) == sqltype.TypeJSON {
-			continue
-		}
-
-		fieldName := introspection.GraphQLFieldName(col)
-		filterType := r.getFilterInputType(table, col)
-		if filterType != nil {
-			fields[fieldName] = &graphql.InputObjectFieldConfig{
-				Type:        filterType,
-				Description: col.Comment,
-			}
-		}
-	}
-
 	// Create a lazy-initialized input object to handle recursive reference
 	var inputObj *graphql.InputObject
 	inputObj = graphql.NewInputObject(graphql.InputObjectConfig{
 		Name: typeName,
 		Fields: graphql.InputObjectConfigFieldMapThunk(func() graphql.InputObjectConfigFieldMap {
+			fields := r.scalarWhereFields(table)
+			if includeRelations {
+				r.addRelationshipWhereFields(fields, table)
+			}
 			// Add AND/OR operators that reference this type
 			fields["AND"] = &graphql.InputObjectFieldConfig{
 				Type: graphql.NewList(graphql.NewNonNull(inputObj)),
@@ -2057,6 +2057,128 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 	r.whereCache[typeName] = inputObj
 	r.mu.Unlock()
 	return inputObj
+}
+
+func (r *Resolver) scalarWhereFields(table introspection.Table) graphql.InputObjectConfigFieldMap {
+	fields := graphql.InputObjectConfigFieldMap{}
+	for _, col := range table.Columns {
+		// Skip JSON columns
+		if introspection.EffectiveGraphQLType(col) == sqltype.TypeJSON {
+			continue
+		}
+
+		fieldName := introspection.GraphQLFieldName(col)
+		filterType := r.getFilterInputType(table, col)
+		if filterType != nil {
+			fields[fieldName] = &graphql.InputObjectFieldConfig{
+				Type:        filterType,
+				Description: col.Comment,
+			}
+		}
+	}
+	return fields
+}
+
+func (r *Resolver) addRelationshipWhereFields(fields graphql.InputObjectConfigFieldMap, table introspection.Table) {
+	for _, rel := range table.Relationships {
+		if _, exists := fields[rel.GraphQLFieldName]; exists {
+			continue
+		}
+
+		var relatedTable introspection.Table
+		var err error
+		switch {
+		case rel.IsEdgeList:
+			relatedTable, err = r.findTable(rel.JunctionTable)
+		default:
+			relatedTable, err = r.findTable(rel.RemoteTable)
+		}
+		if err != nil {
+			continue
+		}
+
+		var relationInput *graphql.InputObject
+		switch {
+		case rel.IsManyToOne:
+			relationInput = r.toOneRelationshipWhereInput(relatedTable)
+		case rel.IsOneToMany, rel.IsManyToMany, rel.IsEdgeList:
+			relationInput = r.toManyRelationshipWhereInput(relatedTable)
+		default:
+			continue
+		}
+		if relationInput == nil {
+			continue
+		}
+		fields[rel.GraphQLFieldName] = &graphql.InputObjectFieldConfig{
+			Type: relationInput,
+		}
+	}
+}
+
+func (r *Resolver) toManyRelationshipWhereInput(relatedTable introspection.Table) *graphql.InputObject {
+	nestedWhere := r.scalarWhereInput(relatedTable)
+	if nestedWhere == nil {
+		return nil
+	}
+
+	typeName := introspection.GraphQLTypeName(relatedTable) + "WhereToManyRelationFilter"
+	r.mu.RLock()
+	cached, ok := r.whereCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	input := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: typeName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"some": &graphql.InputObjectFieldConfig{Type: nestedWhere},
+			"none": &graphql.InputObjectFieldConfig{Type: nestedWhere},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.whereCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.whereCache[typeName] = input
+	r.mu.Unlock()
+
+	return input
+}
+
+func (r *Resolver) toOneRelationshipWhereInput(relatedTable introspection.Table) *graphql.InputObject {
+	nestedWhere := r.scalarWhereInput(relatedTable)
+	if nestedWhere == nil {
+		return nil
+	}
+
+	typeName := introspection.GraphQLTypeName(relatedTable) + "WhereToOneRelationFilter"
+	r.mu.RLock()
+	cached, ok := r.whereCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	input := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: typeName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"is":     &graphql.InputObjectFieldConfig{Type: nestedWhere},
+			"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.whereCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.whereCache[typeName] = input
+	r.mu.Unlock()
+
+	return input
 }
 
 func (r *Resolver) enumTypeName(table introspection.Table, col introspection.Column) string {
@@ -2518,12 +2640,12 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	var whereClause *planner.WhereClause
 	if whereArg, ok := p.Args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClause(relatedTable, whereMap)
+			whereClause, err = planner.BuildWhereClauseWithSchema(r.dbSchema, relatedTable, whereMap)
 			if err != nil {
 				return nil, true, err
 			}
 			if whereClause != nil {
-				if err := planner.ValidateIndexedColumns(relatedTable, whereClause.UsedColumns); err != nil {
+				if err := planner.ValidateWhereClauseIndexes(r.dbSchema, relatedTable, whereClause); err != nil {
 					return nil, true, err
 				}
 			}
@@ -2751,12 +2873,12 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	var whereClause *planner.WhereClause
 	if whereArg, ok := p.Args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClauseQualified(relatedTable, relatedTable.Name, whereMap)
+			whereClause, err = planner.BuildWhereClauseQualifiedWithSchema(r.dbSchema, relatedTable, relatedTable.Name, whereMap)
 			if err != nil {
 				return nil, true, err
 			}
 			if whereClause != nil {
-				if err := planner.ValidateIndexedColumns(relatedTable, whereClause.UsedColumns); err != nil {
+				if err := planner.ValidateWhereClauseIndexes(r.dbSchema, relatedTable, whereClause); err != nil {
 					return nil, true, err
 				}
 			}
@@ -3010,12 +3132,12 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	var whereClause *planner.WhereClause
 	if whereArg, ok := p.Args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClause(junctionTable, whereMap)
+			whereClause, err = planner.BuildWhereClauseWithSchema(r.dbSchema, junctionTable, whereMap)
 			if err != nil {
 				return nil, true, err
 			}
 			if whereClause != nil {
-				if err := planner.ValidateIndexedColumns(junctionTable, whereClause.UsedColumns); err != nil {
+				if err := planner.ValidateWhereClauseIndexes(r.dbSchema, junctionTable, whereClause); err != nil {
 					return nil, true, err
 				}
 			}

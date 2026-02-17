@@ -31,6 +31,7 @@ type RelationshipContext struct {
 
 type planOptions struct {
 	relationship *RelationshipContext
+	schema       *introspection.Schema
 	limits       *PlanLimits
 	fragments    map[string]ast.Definition
 	defaultLimit int
@@ -64,6 +65,14 @@ func WithFragments(fragments map[string]ast.Definition) PlanOption {
 func WithDefaultListLimit(limit int) PlanOption {
 	return func(o *planOptions) {
 		o.defaultLimit = limit
+	}
+}
+
+// WithSchema provides schema context for planning features that need table lookups
+// beyond the current table (for example relationship-aware where filters).
+func WithSchema(schema *introspection.Schema) PlanOption {
+	return func(o *planOptions) {
+		o.schema = schema
 	}
 }
 

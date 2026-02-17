@@ -117,3 +117,7 @@ Table and column comments are emitted as GraphQL descriptions on the correspondi
 ## Filter inputs
 
 Each table gets a `TableWhere` input type (see [Filters](./filters.md)). JSON columns are excluded from filter inputs.
+`TableWhere` includes scalar column filters and single-hop relationship filters:
+
+- To-many: `{ some: RelatedScalarWhere, none: RelatedScalarWhere }`
+- To-one: `{ is: RelatedScalarWhere, isNull: Boolean }`

@@ -157,7 +157,7 @@ func parseConnectionArgs(
 				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
 			}
 			if whereClause != nil {
-				if err := ValidateIndexedColumns(table, whereClause.UsedColumns); err != nil {
+				if err := ValidateWhereClauseIndexes(options.schema, table, whereClause); err != nil {
 					return nil, err
 				}
 			}
@@ -195,8 +195,13 @@ func PlanConnection(
 	for _, opt := range opts {
 		opt(options)
 	}
-
-	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, BuildWhereClause, options)
+	if options.schema == nil {
+		options.schema = schema
+	}
+	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
+		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
+	}
+	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, buildWhere, options)
 	if err != nil {
 		return nil, err
 	}
@@ -247,8 +252,10 @@ func PlanOneToManyConnection(
 	for _, opt := range opts {
 		opt(options)
 	}
-
-	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, BuildWhereClause, options)
+	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
+		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
+	}
+	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, buildWhere, options)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +331,7 @@ func PlanManyToManyConnection(
 		return BuildSeekConditionQualified(targetTable.Name, colNames, values, directions)
 	}
 	buildWhere := func(table introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
-		return BuildWhereClauseQualified(table, table.Name, whereMap)
+		return BuildWhereClauseQualifiedWithSchema(options.schema, table, table.Name, whereMap)
 	}
 
 	ca, err := parseConnectionArgs(targetTable, field, args, buildSeek, buildWhere, options)
@@ -417,8 +424,10 @@ func PlanEdgeListConnection(
 	for _, opt := range opts {
 		opt(options)
 	}
-
-	ca, err := parseConnectionArgs(junctionTable, field, args, BuildSeekCondition, BuildWhereClause, options)
+	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
+		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
+	}
+	ca, err := parseConnectionArgs(junctionTable, field, args, BuildSeekCondition, buildWhere, options)
 	if err != nil {
 		return nil, err
 	}

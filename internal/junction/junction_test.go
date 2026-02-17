@@ -75,6 +75,44 @@ func TestClassifyJunctions(t *testing.T) {
 			expectedCounts: map[string]int{"dept_emp": 2}, // from_date, to_date
 		},
 		{
+			name: "composite foreign key constraints still classify as junction",
+			schema: &introspection.Schema{
+				Tables: []introspection.Table{
+					{
+						Name: "users",
+						Columns: []introspection.Column{
+							{Name: "tenant_id", IsPrimaryKey: true},
+							{Name: "id", IsPrimaryKey: true},
+						},
+					},
+					{
+						Name: "groups",
+						Columns: []introspection.Column{
+							{Name: "tenant_id", IsPrimaryKey: true},
+							{Name: "id", IsPrimaryKey: true},
+						},
+					},
+					{
+						Name: "user_groups",
+						Columns: []introspection.Column{
+							{Name: "tenant_id", IsPrimaryKey: true, IsNullable: false},
+							{Name: "user_id", IsPrimaryKey: true, IsNullable: false},
+							{Name: "group_tenant_id", IsPrimaryKey: true, IsNullable: false},
+							{Name: "group_id", IsPrimaryKey: true, IsNullable: false},
+						},
+						ForeignKeys: []introspection.ForeignKey{
+							{ConstraintName: "fk_user", ColumnName: "tenant_id", ReferencedTable: "users", ReferencedColumn: "tenant_id", OrdinalPosition: 1},
+							{ConstraintName: "fk_user", ColumnName: "user_id", ReferencedTable: "users", ReferencedColumn: "id", OrdinalPosition: 2},
+							{ConstraintName: "fk_group", ColumnName: "group_tenant_id", ReferencedTable: "groups", ReferencedColumn: "tenant_id", OrdinalPosition: 1},
+							{ConstraintName: "fk_group", ColumnName: "group_id", ReferencedTable: "groups", ReferencedColumn: "id", OrdinalPosition: 2},
+						},
+					},
+				},
+			},
+			expectedTypes:  map[string]Type{"user_groups": PureJunction},
+			expectedCounts: map[string]int{"user_groups": 0},
+		},
+		{
 			name: "not a junction - single FK",
 			schema: &introspection.Schema{
 				Tables: []introspection.Table{
@@ -319,15 +357,19 @@ func TestClassifyJunctions(t *testing.T) {
 }
 
 func TestOrderFKs(t *testing.T) {
-	fk1 := introspection.ForeignKey{
-		ColumnName:       "emp_no",
-		ReferencedTable:  "employees",
-		ReferencedColumn: "emp_no",
+	fk1 := FKInfo{
+		ColumnNames:       []string{"emp_no"},
+		ReferencedTable:   "employees",
+		ReferencedColumns: []string{"emp_no"},
+		ColumnName:        "emp_no",
+		ReferencedColumn:  "emp_no",
 	}
-	fk2 := introspection.ForeignKey{
-		ColumnName:       "dept_no",
-		ReferencedTable:  "departments",
-		ReferencedColumn: "dept_no",
+	fk2 := FKInfo{
+		ColumnNames:       []string{"dept_no"},
+		ReferencedTable:   "departments",
+		ReferencedColumns: []string{"dept_no"},
+		ColumnName:        "dept_no",
+		ReferencedColumn:  "dept_no",
 	}
 
 	// Test both orderings result in same alphabetical order

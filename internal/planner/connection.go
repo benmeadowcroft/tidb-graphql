@@ -307,10 +307,10 @@ func PlanOneToManyConnection(
 func PlanManyToManyConnection(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
+	fkValues []interface{},
 	field *ast.Field,
 	args map[string]interface{},
 	opts ...PlanOption,
@@ -334,14 +334,33 @@ func PlanManyToManyConnection(
 
 	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
 	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
-	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
-	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return nil, fmt.Errorf("many-to-many local FK mapping width mismatch")
+	}
+	if len(junctionRemoteFKColumns) == 0 || len(junctionRemoteFKColumns) != len(targetPKColumns) {
+		return nil, fmt.Errorf("many-to-many remote FK mapping width mismatch")
+	}
+	joinPredicates := make([]string, len(junctionRemoteFKColumns))
+	for i := range junctionRemoteFKColumns {
+		joinPredicates[i] = fmt.Sprintf(
+			"%s.%s = %s.%s",
+			quotedJunction, sqlutil.QuoteIdentifier(junctionRemoteFKColumns[i]),
+			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
+		)
+	}
+	localFKQuoted := quotedColumns(junctionLocalFKColumns, quotedJunction)
+	localWhereSQL, localWhereArgs, err := buildTupleInCondition(localFKQuoted, []ParentTuple{{Values: fkValues}})
+	if err != nil {
+		return nil, err
+	}
+	if localWhereSQL == "" {
+		return nil, fmt.Errorf("many-to-many local key filter is empty")
+	}
 
 	builder := sq.Select(columnNamesQualified(targetTable.Name, ca.selected)...).
 		From(quotedTarget).
-		Join(fmt.Sprintf("%s ON %s.%s = %s.%s", quotedJunction, quotedJunction, quotedRemoteFK, quotedTarget, quotedTargetPK)).
-		Where(sq.Eq{fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK): fkValue})
+		Join(fmt.Sprintf("%s ON %s", quotedJunction, strings.Join(joinPredicates, " AND "))).
+		Where(sq.Expr(localWhereSQL, localWhereArgs...))
 
 	if ca.whereClause != nil && ca.whereClause.Condition != nil {
 		builder = builder.Where(ca.whereClause.Condition)
@@ -359,11 +378,11 @@ func PlanManyToManyConnection(
 		return nil, err
 	}
 
-	countQuery, err := BuildManyToManyCountSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, ca.whereClause)
+	countQuery, err := BuildManyToManyCountSQL(targetTable, junctionTable, junctionLocalFKColumns, junctionRemoteFKColumns, targetPKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
-	aggregateBase, err := BuildManyToManyAggregateBaseSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, ca.whereClause)
+	aggregateBase, err := BuildManyToManyAggregateBaseSQL(targetTable, junctionTable, junctionLocalFKColumns, junctionRemoteFKColumns, targetPKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -388,8 +407,8 @@ func PlanManyToManyConnection(
 // PlanEdgeListConnection plans a connection for an edge-list relationship.
 func PlanEdgeListConnection(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	fkValues []interface{},
 	field *ast.Field,
 	args map[string]interface{},
 	opts ...PlanOption,
@@ -404,10 +423,19 @@ func PlanEdgeListConnection(
 		return nil, err
 	}
 
-	fkCondition := sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): fkValue}
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return nil, fmt.Errorf("edge-list local FK mapping width mismatch")
+	}
+	whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(junctionLocalFKColumns, ""), []ParentTuple{{Values: fkValues}})
+	if err != nil {
+		return nil, err
+	}
+	if whereSQL == "" {
+		return nil, fmt.Errorf("edge-list local key filter is empty")
+	}
 	builder := sq.Select(columnNames(junctionTable, ca.selected)...).
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
-		Where(fkCondition)
+		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if ca.whereClause != nil && ca.whereClause.Condition != nil {
 		builder = builder.Where(ca.whereClause.Condition)
@@ -425,11 +453,11 @@ func PlanEdgeListConnection(
 		return nil, err
 	}
 
-	countQuery, err := BuildEdgeListCountSQL(junctionTable, junctionLocalFK, fkValue, ca.whereClause)
+	countQuery, err := BuildEdgeListCountSQL(junctionTable, junctionLocalFKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
-	aggregateBase, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, ca.whereClause)
+	aggregateBase, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -469,19 +497,19 @@ func BuildOneToManyCountSQL(
 func BuildManyToManyCountSQL(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
 	base, err := BuildManyToManyAggregateBaseSQL(
 		targetTable,
 		junctionTable,
-		junctionLocalFK,
-		junctionRemoteFK,
-		targetPK,
-		fkValue,
+		junctionLocalFKColumns,
+		junctionRemoteFKColumns,
+		targetPKColumns,
+		fkValues,
 		whereClause,
 	)
 	if err != nil {
@@ -494,22 +522,43 @@ func BuildManyToManyCountSQL(
 func BuildManyToManyAggregateBaseSQL(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
 	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
 	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
-	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
-	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return SQLQuery{}, fmt.Errorf("many-to-many aggregate local key mapping width mismatch")
+	}
+	if len(junctionRemoteFKColumns) == 0 || len(junctionRemoteFKColumns) != len(targetPKColumns) {
+		return SQLQuery{}, fmt.Errorf("many-to-many aggregate remote key mapping width mismatch")
+	}
+	joinPredicates := make([]string, len(junctionRemoteFKColumns))
+	for i := range junctionRemoteFKColumns {
+		joinPredicates[i] = fmt.Sprintf(
+			"%s.%s = %s.%s",
+			quotedJunction, sqlutil.QuoteIdentifier(junctionRemoteFKColumns[i]),
+			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
+		)
+	}
+	whereSQL, whereArgs, err := buildTupleInCondition(
+		quotedColumns(junctionLocalFKColumns, quotedJunction),
+		[]ParentTuple{{Values: fkValues}},
+	)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if whereSQL == "" {
+		return SQLQuery{}, fmt.Errorf("many-to-many aggregate local key filter is empty")
+	}
 
 	builder := sq.Select("*").
 		From(quotedTarget).
-		Join(fmt.Sprintf("%s ON %s.%s = %s.%s", quotedJunction, quotedJunction, quotedRemoteFK, quotedTarget, quotedTargetPK)).
-		Where(sq.Eq{fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK): fkValue})
+		Join(fmt.Sprintf("%s ON %s", quotedJunction, strings.Join(joinPredicates, " AND "))).
+		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if whereClause != nil && whereClause.Condition != nil {
 		builder = builder.Where(whereClause.Condition)
@@ -525,11 +574,11 @@ func BuildManyToManyAggregateBaseSQL(
 // BuildEdgeListCountSQL builds the count query for an edge-list connection.
 func BuildEdgeListCountSQL(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
-	base, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, whereClause)
+	base, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFKColumns, fkValues, whereClause)
 	if err != nil {
 		return SQLQuery{}, err
 	}
@@ -561,13 +610,26 @@ func BuildOneToManyAggregateBaseSQL(
 // BuildEdgeListAggregateBaseSQL builds the base rowset query for edge-list aggregates.
 func BuildEdgeListAggregateBaseSQL(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return SQLQuery{}, fmt.Errorf("edge-list aggregate local key mapping width mismatch")
+	}
+	whereSQL, whereArgs, err := buildTupleInCondition(
+		quotedColumns(junctionLocalFKColumns, ""),
+		[]ParentTuple{{Values: fkValues}},
+	)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if whereSQL == "" {
+		return SQLQuery{}, fmt.Errorf("edge-list aggregate local key filter is empty")
+	}
 	builder := sq.Select("*").
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): fkValue})
+		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if whereClause != nil && whereClause.Condition != nil {
 		builder = builder.Where(whereClause.Condition)
@@ -674,11 +736,11 @@ func PlanOneToManyConnectionBatch(
 func PlanManyToManyConnectionBatch(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
 	columns []introspection.Column,
-	parentValues []interface{},
+	parentValues []ParentTuple,
 	first int,
 	orderBy *OrderBy,
 	whereClause *WhereClause,
@@ -686,9 +748,9 @@ func PlanManyToManyConnectionBatch(
 	return PlanManyToManyBatch(
 		junctionTable,
 		targetTable,
-		junctionLocalFK,
-		junctionRemoteFK,
-		targetPK,
+		junctionLocalFKColumns,
+		junctionRemoteFKColumns,
+		targetPKColumns,
 		columns,
 		parentValues,
 		first+1,
@@ -702,16 +764,16 @@ func PlanManyToManyConnectionBatch(
 // It uses offset=0 and limit=first+1 to allow per-parent hasNextPage detection.
 func PlanEdgeListConnectionBatch(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
+	junctionLocalFKColumns []string,
 	columns []introspection.Column,
-	parentValues []interface{},
+	parentValues []ParentTuple,
 	first int,
 	orderBy *OrderBy,
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
 	return PlanEdgeListBatch(
 		junctionTable,
-		junctionLocalFK,
+		junctionLocalFKColumns,
 		columns,
 		parentValues,
 		first+1,

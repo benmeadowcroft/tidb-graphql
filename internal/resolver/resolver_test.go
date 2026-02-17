@@ -1560,7 +1560,10 @@ func TestManyToOneResolverBatch(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, parentRows, 2)
 
-	batchPlan, err := planner.PlanManyToOneBatch(users, nil, "id", []interface{}{1, 2})
+	batchPlan, err := planner.PlanManyToOneBatch(users, nil, []string{"id"}, []planner.ParentTuple{
+		{Values: []interface{}{1}},
+		{Values: []interface{}{2}},
+	})
 	require.NoError(t, err)
 	userRows := sqlmock.NewRows([]string{"id", "username", "__batch_parent_id"}).
 		AddRow(1, "alice", 1).
@@ -1640,7 +1643,7 @@ func TestTryBatchOneToManyConnection_NoBatchState(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
 		},
-	}, users, rel, 1)
+	}, users, rel, []interface{}{1})
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, result)
@@ -2025,7 +2028,7 @@ func TestTryBatchManyToOne_NoBatchState(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
 		},
-	}, users, rel, 1)
+	}, users, rel, []interface{}{1})
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, result)
@@ -2096,7 +2099,10 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 	require.Len(t, parentRows, 2)
 
 	// Expect the batched many-to-one query to execute once.
-	batchPlan, err := planner.PlanManyToOneBatch(users, nil, "id", []interface{}{1, 2})
+	batchPlan, err := planner.PlanManyToOneBatch(users, nil, []string{"id"}, []planner.ParentTuple{
+		{Values: []interface{}{1}},
+		{Values: []interface{}{2}},
+	})
 	require.NoError(t, err)
 	userRows := sqlmock.NewRows([]string{"id", "username", "__batch_parent_id"}).
 		AddRow(1, "alice", 1).
@@ -2125,7 +2131,7 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{childField},
 		},
-	}, posts, rel, 1)
+	}, posts, rel, []interface{}{1})
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.EqualValues(t, 1, first["databaseId"])
@@ -2137,7 +2143,7 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{childField},
 		},
-	}, posts, rel, 2)
+	}, posts, rel, []interface{}{2})
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.EqualValues(t, 2, second["databaseId"])

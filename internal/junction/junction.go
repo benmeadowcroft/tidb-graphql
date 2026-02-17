@@ -4,6 +4,8 @@
 package junction
 
 import (
+	"strings"
+
 	"tidb-graphql/internal/introspection"
 )
 
@@ -37,9 +39,13 @@ func (t Type) String() string {
 
 // FKInfo contains foreign key details for junction detection.
 type FKInfo struct {
-	ColumnName       string // FK column in junction table (e.g., "emp_no")
-	ReferencedTable  string // Target table (e.g., "employees")
-	ReferencedColumn string // Target column (e.g., "emp_no")
+	ConstraintName    string
+	ColumnNames       []string // FK columns in junction table (ordered)
+	ReferencedTable   string   // Target table (e.g., "employees")
+	ReferencedColumns []string // Target columns (ordered)
+	// Deprecated compatibility fields for single-column paths.
+	ColumnName       string
+	ReferencedColumn string
 }
 
 // Info contains classification metadata for a junction table.
@@ -79,14 +85,20 @@ func (m Map) ToIntrospectionMap() introspection.JunctionMap {
 			Table: info.Table,
 			Type:  jType,
 			LeftFK: introspection.JunctionFKInfo{
-				ColumnName:       info.LeftFK.ColumnName,
-				ReferencedTable:  info.LeftFK.ReferencedTable,
-				ReferencedColumn: info.LeftFK.ReferencedColumn,
+				ConstraintName:    info.LeftFK.ConstraintName,
+				ColumnNames:       append([]string(nil), info.LeftFK.ColumnNames...),
+				ReferencedColumns: append([]string(nil), info.LeftFK.ReferencedColumns...),
+				ColumnName:        info.LeftFK.ColumnName,
+				ReferencedTable:   info.LeftFK.ReferencedTable,
+				ReferencedColumn:  info.LeftFK.ReferencedColumn,
 			},
 			RightFK: introspection.JunctionFKInfo{
-				ColumnName:       info.RightFK.ColumnName,
-				ReferencedTable:  info.RightFK.ReferencedTable,
-				ReferencedColumn: info.RightFK.ReferencedColumn,
+				ConstraintName:    info.RightFK.ConstraintName,
+				ColumnNames:       append([]string(nil), info.RightFK.ColumnNames...),
+				ReferencedColumns: append([]string(nil), info.RightFK.ReferencedColumns...),
+				ColumnName:        info.RightFK.ColumnName,
+				ReferencedTable:   info.RightFK.ReferencedTable,
+				ReferencedColumn:  info.RightFK.ReferencedColumn,
 			},
 		}
 	}
@@ -95,7 +107,7 @@ func (m Map) ToIntrospectionMap() introspection.JunctionMap {
 
 // ClassifyJunctions analyzes schema tables and returns junction classifications.
 // A table is classified as a junction when:
-//   - It has exactly 2 foreign keys to different tables
+//   - It has exactly 2 foreign key constraints to different tables
 //   - All FK columns are NOT NULL
 //   - There is a composite PK or unique index covering all FK columns
 //   - Both referenced tables exist in the schema
@@ -125,13 +137,15 @@ func buildTableIndex(schema *introspection.Schema) map[string]*introspection.Tab
 
 // classifyTable checks if a table qualifies as a junction and returns its classification.
 func classifyTable(table introspection.Table, tables map[string]*introspection.Table) (Info, bool) {
-	// Rule 1: Must have exactly 2 foreign keys
-	if len(table.ForeignKeys) != 2 {
+	constraints := introspection.ForeignKeyConstraints(table)
+
+	// Rule 1: Must have exactly 2 foreign key constraints.
+	if len(constraints) != 2 {
 		return Info{}, false
 	}
 
-	fk1 := table.ForeignKeys[0]
-	fk2 := table.ForeignKeys[1]
+	fk1 := constraints[0]
+	fk2 := constraints[1]
 
 	// Rule 2: FKs must reference different tables (no self-referential)
 	if fk1.ReferencedTable == fk2.ReferencedTable {
@@ -143,10 +157,13 @@ func classifyTable(table introspection.Table, tables map[string]*introspection.T
 		return Info{}, false
 	}
 
-	// Build set of FK column names
-	fkColNames := map[string]bool{
-		fk1.ColumnName: true,
-		fk2.ColumnName: true,
+	// Build set of FK column names across both constraints.
+	fkColNames := map[string]bool{}
+	for _, col := range fk1.ColumnNames {
+		fkColNames[col] = true
+	}
+	for _, col := range fk2.ColumnNames {
+		fkColNames[col] = true
 	}
 
 	// Rule 3: All FK columns must be NOT NULL
@@ -169,7 +186,7 @@ func classifyTable(table introspection.Table, tables map[string]*introspection.T
 	}
 
 	// Order FKs alphabetically by referenced table for consistent naming
-	leftFK, rightFK := orderFKs(fk1, fk2)
+	leftFK, rightFK := orderFKs(toFKInfo(fk1), toFKInfo(fk2))
 
 	return Info{
 		Table:            table.Name,
@@ -230,20 +247,33 @@ func findAttributeColumns(table introspection.Table, fkCols map[string]bool) []s
 	return attrs
 }
 
-// orderFKs returns FKs ordered alphabetically by referenced table name.
-func orderFKs(fk1, fk2 introspection.ForeignKey) (FKInfo, FKInfo) {
-	left := FKInfo{
-		ColumnName:       fk1.ColumnName,
-		ReferencedTable:  fk1.ReferencedTable,
-		ReferencedColumn: fk1.ReferencedColumn,
+func toFKInfo(fk introspection.ForeignKeyConstraint) FKInfo {
+	columnNames := append([]string(nil), fk.ColumnNames...)
+	referencedColumns := append([]string(nil), fk.ReferencedColumns...)
+	return FKInfo{
+		ConstraintName:    fk.ConstraintName,
+		ColumnNames:       columnNames,
+		ReferencedTable:   fk.ReferencedTable,
+		ReferencedColumns: referencedColumns,
+		ColumnName:        first(columnNames),
+		ReferencedColumn:  first(referencedColumns),
 	}
-	right := FKInfo{
-		ColumnName:       fk2.ColumnName,
-		ReferencedTable:  fk2.ReferencedTable,
-		ReferencedColumn: fk2.ReferencedColumn,
-	}
+}
 
-	if left.ReferencedTable > right.ReferencedTable {
+func first(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+// orderFKs returns FKs ordered alphabetically by referenced table name.
+func orderFKs(fk1, fk2 FKInfo) (FKInfo, FKInfo) {
+	left := fk1
+	right := fk2
+
+	if left.ReferencedTable > right.ReferencedTable ||
+		(left.ReferencedTable == right.ReferencedTable && strings.Compare(left.ConstraintName, right.ConstraintName) > 0) {
 		left, right = right, left
 	}
 	return left, right

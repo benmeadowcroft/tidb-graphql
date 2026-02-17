@@ -20,11 +20,13 @@ type Plan struct {
 
 // RelationshipContext provides relationship-specific planning inputs.
 type RelationshipContext struct {
-	RelatedTable introspection.Table
-	RemoteColumn string
-	Value        interface{}
-	IsManyToOne  bool
-	IsOneToMany  bool
+	RelatedTable  introspection.Table
+	RemoteColumn  string
+	RemoteColumns []string
+	Value         interface{}
+	Values        []interface{}
+	IsManyToOne   bool
+	IsOneToMany   bool
 }
 
 type planOptions struct {
@@ -95,14 +97,22 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 
 	if options.relationship != nil {
 		ctx := options.relationship
-		if ctx.RelatedTable.Name == "" || ctx.RemoteColumn == "" {
+		remoteCols := ctx.RemoteColumns
+		if len(remoteCols) == 0 && ctx.RemoteColumn != "" {
+			remoteCols = []string{ctx.RemoteColumn}
+		}
+		if ctx.RelatedTable.Name == "" || len(remoteCols) == 0 {
 			return nil, errors.New("relationship context is incomplete")
 		}
 
 		switch {
 		case ctx.IsManyToOne:
 			selected := SelectedColumns(ctx.RelatedTable, field, options.fragments)
-			planned, err := PlanManyToOne(ctx.RelatedTable, selected, ctx.RemoteColumn, ctx.Value)
+			values := ctx.Values
+			if len(values) == 0 {
+				values = []interface{}{ctx.Value}
+			}
+			planned, err := PlanManyToOne(ctx.RelatedTable, selected, remoteCols, values)
 			if err != nil {
 				return nil, err
 			}
@@ -298,9 +308,9 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 		columnByField[introspection.GraphQLFieldName(col)] = col.Name
 	}
 
-	relationshipByField := make(map[string]string, len(table.Relationships))
+	relationshipByField := make(map[string][]string, len(table.Relationships))
 	for _, rel := range table.Relationships {
-		relationshipByField[rel.GraphQLFieldName] = rel.LocalColumn
+		relationshipByField[rel.GraphQLFieldName] = rel.EffectiveLocalColumns()
 	}
 
 	selected := make(map[string]struct{})
@@ -320,8 +330,10 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 				if colName, ok := columnByField[name]; ok {
 					selected[colName] = struct{}{}
 				}
-				if relCol, ok := relationshipByField[name]; ok {
-					selected[relCol] = struct{}{}
+				if relCols, ok := relationshipByField[name]; ok {
+					for _, relCol := range relCols {
+						selected[relCol] = struct{}{}
+					}
 				}
 			case *ast.InlineFragment:
 				if sel.SelectionSet != nil {

@@ -120,7 +120,7 @@ func TestPlanManyToOne(t *testing.T) {
 		},
 	}
 
-	planned, err := PlanManyToOne(table, nil, "id", 7)
+	planned, err := PlanManyToOne(table, nil, []string{"id"}, []interface{}{7})
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL, "SELECT `id`, `email` FROM `accounts` WHERE `id` = ?")
 	assertArgsEqual(t, planned.Args, []interface{}{7})
@@ -135,10 +135,52 @@ func TestPlanManyToOneBatch(t *testing.T) {
 		},
 	}
 
-	planned, err := PlanManyToOneBatch(table, nil, "id", []interface{}{7, 9})
+	planned, err := PlanManyToOneBatch(table, nil, []string{"id"}, []ParentTuple{
+		{Values: []interface{}{7}},
+		{Values: []interface{}{9}},
+	})
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL, "SELECT `id`, `email`, `id` AS __batch_parent_id FROM `accounts` WHERE `id` IN (?,?)")
 	assertArgsEqual(t, planned.Args, []interface{}{7, 9})
+}
+
+func TestPlanManyToOneComposite(t *testing.T) {
+	table := introspection.Table{
+		Name: "accounts",
+		Columns: []introspection.Column{
+			{Name: "tenant_id"},
+			{Name: "id"},
+			{Name: "email"},
+		},
+	}
+
+	planned, err := PlanManyToOne(table, nil, []string{"tenant_id", "id"}, []interface{}{9, 42})
+	require.NoError(t, err)
+	assert.Contains(t, planned.SQL, "FROM `accounts`")
+	assert.Contains(t, planned.SQL, "`tenant_id` = ?")
+	assert.Contains(t, planned.SQL, "`id` = ?")
+	assert.ElementsMatch(t, []string{"9", "42"}, normalizeArgs(planned.Args))
+}
+
+func TestPlanManyToOneBatchComposite(t *testing.T) {
+	table := introspection.Table{
+		Name: "accounts",
+		Columns: []introspection.Column{
+			{Name: "tenant_id"},
+			{Name: "id"},
+			{Name: "email"},
+		},
+	}
+
+	planned, err := PlanManyToOneBatch(table, nil, []string{"tenant_id", "id"}, []ParentTuple{
+		{Values: []interface{}{1, 10}},
+		{Values: []interface{}{1, 11}},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, planned.SQL, "(`tenant_id`, `id`) IN ((?,?), (?,?))")
+	assert.Contains(t, planned.SQL, "`tenant_id` AS __batch_parent_0")
+	assert.Contains(t, planned.SQL, "`id` AS __batch_parent_1")
+	assertArgsEqual(t, planned.Args, []interface{}{1, 10, 1, 11})
 }
 
 func TestPlanOneToManyBatch(t *testing.T) {
@@ -215,11 +257,14 @@ func TestPlanManyToManyBatch(t *testing.T) {
 	planned, err := PlanManyToManyBatch(
 		"user_tags",
 		table,
-		"user_id",
-		"tag_id",
-		"id",
+		[]string{"user_id"},
+		[]string{"tag_id"},
+		[]string{"id"},
 		[]introspection.Column{{Name: "id"}},
-		[]interface{}{1, 2},
+		[]ParentTuple{
+			{Values: []interface{}{1}},
+			{Values: []interface{}{2}},
+		},
 		10,
 		0,
 		nil,
@@ -241,7 +286,10 @@ func TestPlanEdgeListBatch_CompositePKOrder(t *testing.T) {
 		},
 	}
 
-	planned, err := PlanEdgeListBatch(table, "user_id", nil, []interface{}{1, 2}, 10, 0, nil, nil)
+	planned, err := PlanEdgeListBatch(table, []string{"user_id"}, nil, []ParentTuple{
+		{Values: []interface{}{1}},
+		{Values: []interface{}{2}},
+	}, 10, 0, nil, nil)
 	require.NoError(t, err)
 	assertSQLMatches(t, planned.SQL,
 		"SELECT `user_id`, `tag_id`, __batch_parent_id FROM (SELECT `user_id`, `tag_id`, `user_id` AS __batch_parent_id, ROW_NUMBER() OVER (PARTITION BY `user_id` ORDER BY `user_id`, `tag_id`) AS __rn FROM `user_tags` WHERE `user_id` IN (?,?)) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY __batch_parent_id, __rn",

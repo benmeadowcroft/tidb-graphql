@@ -25,6 +25,25 @@ var ErrNoPrimaryKey = errors.New("no primary key")
 // BatchParentAlias is the column alias used to return parent keys in batch queries.
 const BatchParentAlias = "__batch_parent_id"
 
+const batchParentAliasPrefix = "__batch_parent_"
+
+// ParentTuple represents an ordered composite parent key used in batch plans.
+type ParentTuple struct {
+	Values []interface{}
+}
+
+// BatchParentAliases returns the extra scan aliases emitted by batch SQL.
+func BatchParentAliases(columnCount int) []string {
+	if columnCount <= 1 {
+		return []string{BatchParentAlias}
+	}
+	aliases := make([]string, columnCount)
+	for i := 0; i < columnCount; i++ {
+		aliases[i] = batchParentAliasPrefix + fmt.Sprint(i)
+	}
+	return aliases
+}
+
 // SQLQuery represents a planned SQL statement with bound args.
 type SQLQuery struct {
 	SQL  string
@@ -92,36 +111,73 @@ func PlanUniqueKeyLookup(table introspection.Table, columns []introspection.Colu
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
-// PlanManyToOne builds the SQL for a many-to-one lookup (FK -> parent table).
-func PlanManyToOne(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, fkValue interface{}) (SQLQuery, error) {
-	query, args, err := sq.Select(columnNames(relatedTable, columns)...).
-		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue}).
-		PlaceholderFormat(sq.Question).
-		ToSql()
+// PlanManyToOne builds SQL for a many-to-one lookup (FK -> parent table), including composite mappings.
+func PlanManyToOne(relatedTable introspection.Table, columns []introspection.Column, remoteColumns []string, fkValues []interface{}) (SQLQuery, error) {
+	if len(remoteColumns) == 0 || len(remoteColumns) != len(fkValues) {
+		return SQLQuery{}, fmt.Errorf("many-to-one mapping requires equal remote columns and values")
+	}
+
+	builder := sq.Select(columnNames(relatedTable, columns)...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name))
+	if len(remoteColumns) == 1 {
+		builder = builder.Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumns[0]): fkValues[0]})
+	} else {
+		whereClause := sq.Eq{}
+		for i, col := range remoteColumns {
+			whereClause[sqlutil.QuoteIdentifier(col)] = fkValues[i]
+		}
+		builder = builder.Where(whereClause)
+	}
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return SQLQuery{}, err
 	}
-
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
 // PlanManyToOneBatch builds the SQL for a batched many-to-one lookup (FK -> parent table).
-func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, values []interface{}) (SQLQuery, error) {
+func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumns []string, values []ParentTuple) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
 	}
+	if len(remoteColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("many-to-one batch requires at least one remote column")
+	}
+	aliases := BatchParentAliases(len(remoteColumns))
 
-	query, args, err := sq.Select(columnNames(relatedTable, columns)...).
-		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): values}).
-		Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(remoteColumn), BatchParentAlias)).
-		PlaceholderFormat(sq.Question).
-		ToSql()
+	builder := sq.Select(columnNames(relatedTable, columns)...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name))
+
+	if len(remoteColumns) == 1 {
+		flat := make([]interface{}, 0, len(values))
+		for _, tuple := range values {
+			if len(tuple.Values) != 1 {
+				return SQLQuery{}, fmt.Errorf("many-to-one batch tuple width mismatch")
+			}
+			flat = append(flat, tuple.Values[0])
+		}
+		builder = builder.
+			Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumns[0]): flat}).
+			Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(remoteColumns[0]), aliases[0]))
+	} else {
+		whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(remoteColumns, ""), values)
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		if whereSQL == "" {
+			return SQLQuery{}, nil
+		}
+		builder = builder.Where(sq.Expr(whereSQL, whereArgs...))
+		for i, col := range remoteColumns {
+			builder = builder.Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(col), aliases[i]))
+		}
+	}
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return SQLQuery{}, err
 	}
-
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
@@ -129,11 +185,11 @@ func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspectio
 func PlanManyToManyBatch(
 	junctionTable string,
 	targetTable introspection.Table,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
 	columns []introspection.Column,
-	values []interface{},
+	values []ParentTuple,
 	limit, offset int,
 	orderBy *OrderBy,
 	where *WhereClause,
@@ -152,17 +208,36 @@ func PlanManyToManyBatch(
 
 	cols := columnNames(targetTable, columns)
 	columnList := strings.Join(cols, ", ")
-	placeholders := sq.Placeholders(len(values))
 
 	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
 	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
-	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
-	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
-	partitionColumn := fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK)
+	if len(junctionLocalFKColumns) == 0 || len(junctionRemoteFKColumns) == 0 || len(targetPKColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("many-to-many batch requires key column mappings")
+	}
+	if len(junctionRemoteFKColumns) != len(targetPKColumns) {
+		return SQLQuery{}, fmt.Errorf("many-to-many batch remote key mapping width mismatch")
+	}
 
-	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
-	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, partitionColumn, BatchParentAlias)
+	partitionColumns := quotedColumns(junctionLocalFKColumns, quotedJunction)
+	partitionExpr := strings.Join(partitionColumns, ", ")
+	parentAliases := BatchParentAliases(len(partitionColumns))
+	innerParentCols := make([]string, len(partitionColumns))
+	outerParentCols := make([]string, len(partitionColumns))
+	for i := range partitionColumns {
+		innerParentCols[i] = fmt.Sprintf("%s AS %s", partitionColumns[i], parentAliases[i])
+		outerParentCols[i] = parentAliases[i]
+	}
+	outerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(outerParentCols, ", "))
+	innerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(innerParentCols, ", "))
+
+	joinPredicates := make([]string, len(junctionRemoteFKColumns))
+	for i := range junctionRemoteFKColumns {
+		joinPredicates[i] = fmt.Sprintf(
+			"%s.%s = %s.%s",
+			quotedJunction, sqlutil.QuoteIdentifier(junctionRemoteFKColumns[i]),
+			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
+		)
+	}
 
 	whereSQL := ""
 	var whereArgs []interface{}
@@ -174,24 +249,29 @@ func PlanManyToManyBatch(
 		whereSQL = " AND " + condSQL
 		whereArgs = condArgs
 	}
+	parentWhereSQL, parentWhereArgs, err := buildTupleInCondition(partitionColumns, values)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if parentWhereSQL == "" {
+		return SQLQuery{}, nil
+	}
 
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s WHERE %s%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
-		partitionColumn,
+		partitionExpr,
 		orderClause,
 		quotedTarget,
 		quotedJunction,
-		quotedJunction, quotedRemoteFK,
-		quotedTarget, quotedTargetPK,
-		quotedJunction, quotedLocalFK,
-		placeholders,
+		strings.Join(joinPredicates, " AND "),
+		parentWhereSQL,
 		whereSQL,
-		BatchParentAlias,
+		strings.Join(outerParentCols, ", "),
 	)
 
-	args := append([]interface{}{}, values...)
+	args := append([]interface{}{}, parentWhereArgs...)
 	args = append(args, whereArgs...)
 	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
@@ -200,9 +280,9 @@ func PlanManyToManyBatch(
 // PlanEdgeListBatch builds a batched SQL query for edge list relationships with per-parent limits.
 func PlanEdgeListBatch(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
+	junctionLocalFKColumns []string,
 	columns []introspection.Column,
-	values []interface{},
+	values []ParentTuple,
 	limit, offset int,
 	orderBy *OrderBy,
 	where *WhereClause,
@@ -221,10 +301,20 @@ func PlanEdgeListBatch(
 
 	cols := columnNames(junctionTable, columns)
 	columnList := strings.Join(cols, ", ")
-	placeholders := sq.Placeholders(len(values))
+	if len(junctionLocalFKColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("edge-list batch requires at least one local FK column")
+	}
 
 	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
+	partitionColumns := quotedColumns(junctionLocalFKColumns, "")
+	partitionExpr := strings.Join(partitionColumns, ", ")
+	parentAliases := BatchParentAliases(len(partitionColumns))
+	innerParentCols := make([]string, len(partitionColumns))
+	outerParentCols := make([]string, len(partitionColumns))
+	for i := range partitionColumns {
+		innerParentCols[i] = fmt.Sprintf("%s AS %s", partitionColumns[i], parentAliases[i])
+		outerParentCols[i] = parentAliases[i]
+	}
 
 	whereSQL := ""
 	var whereArgs []interface{}
@@ -236,23 +326,29 @@ func PlanEdgeListBatch(
 		whereSQL = " AND " + condSQL
 		whereArgs = condArgs
 	}
+	parentWhereSQL, parentWhereArgs, err := buildTupleInCondition(partitionColumns, values)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if parentWhereSQL == "" {
+		return SQLQuery{}, nil
+	}
 
-	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
-	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedLocalFK, BatchParentAlias)
+	outerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(outerParentCols, ", "))
+	innerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(innerParentCols, ", "))
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
-		quotedLocalFK,
+		partitionExpr,
 		orderClause,
 		quotedTable,
-		quotedLocalFK,
-		placeholders,
+		parentWhereSQL,
 		whereSQL,
-		BatchParentAlias,
+		strings.Join(outerParentCols, ", "),
 	)
 
-	args := append([]interface{}{}, values...)
+	args := append([]interface{}{}, parentWhereArgs...)
 	args = append(args, whereArgs...)
 	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
@@ -328,6 +424,53 @@ func PlanOneToManyBatch(
 	args = append(args, whereArgs...)
 	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
+}
+
+func quotedColumns(columns []string, tableAlias string) []string {
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		if tableAlias == "" {
+			quoted[i] = sqlutil.QuoteIdentifier(col)
+			continue
+		}
+		quoted[i] = fmt.Sprintf("%s.%s", tableAlias, sqlutil.QuoteIdentifier(col))
+	}
+	return quoted
+}
+
+func buildTupleInCondition(quotedColumns []string, tuples []ParentTuple) (string, []interface{}, error) {
+	if len(tuples) == 0 {
+		return "", nil, nil
+	}
+	width := len(quotedColumns)
+	if width == 0 {
+		return "", nil, fmt.Errorf("tuple IN requires at least one column")
+	}
+
+	if width == 1 {
+		placeholders := sq.Placeholders(len(tuples))
+		args := make([]interface{}, 0, len(tuples))
+		for _, tuple := range tuples {
+			if len(tuple.Values) != 1 {
+				return "", nil, fmt.Errorf("tuple width mismatch: expected 1 value")
+			}
+			args = append(args, tuple.Values[0])
+		}
+		return fmt.Sprintf("%s IN (%s)", quotedColumns[0], placeholders), args, nil
+	}
+
+	args := make([]interface{}, 0, len(tuples)*width)
+	rowPlaceholders := make([]string, 0, len(tuples))
+	valuePlaceholders := "(" + strings.TrimSuffix(strings.Repeat("?,", width), ",") + ")"
+	for _, tuple := range tuples {
+		if len(tuple.Values) != width {
+			return "", nil, fmt.Errorf("tuple width mismatch: expected %d values", width)
+		}
+		rowPlaceholders = append(rowPlaceholders, valuePlaceholders)
+		args = append(args, tuple.Values...)
+	}
+
+	return fmt.Sprintf("(%s) IN (%s)", strings.Join(quotedColumns, ", "), strings.Join(rowPlaceholders, ", ")), args, nil
 }
 
 func columnNames(table introspection.Table, columns []introspection.Column) []string {

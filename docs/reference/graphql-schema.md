@@ -66,6 +66,11 @@ Many-to-one fields remain nullable even when the FK column is NOT NULL, because 
 Relationship fields are generated for one-to-many, many-to-many, and edge-list relationships when the related table has a primary key. They accept `first`, `after`, `last`, `before`, `orderBy`, and `where` (target table for many-to-many, junction table for edge-list).
 For tables without primary keys, these to-many connection fields are not generated.
 
+Composite-key behavior:
+- Many-to-many and edge-list relationship planning supports composite PK/FK mappings (multi-column joins and filters).
+- Composite one-to-many reverse relationship generation is currently skipped.
+- Skipped unsupported composite mappings emit a warning log during schema build/refresh with table, constraint, and column details.
+
 ### Connection types
 
 Each connection provides:

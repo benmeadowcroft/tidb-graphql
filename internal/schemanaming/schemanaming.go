@@ -63,7 +63,9 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 			if baseName == "" {
 				baseName = namer.ToGraphQLFieldName(rel.RemoteTable)
 			}
-			source := fmt.Sprintf("%s:%s:%s", rel.RemoteTable, rel.LocalColumn, rel.RemoteColumn)
+			localCols := rel.EffectiveLocalColumns()
+			remoteCols := rel.EffectiveRemoteColumns()
+			source := fmt.Sprintf("%s:%s:%s", rel.RemoteTable, strings.Join(localCols, ","), strings.Join(remoteCols, ","))
 			// For collision suffix: ManyToOne uses "Ref", all others (OneToMany, ManyToMany, EdgeList) use "Rel"
 			useRefSuffix := rel.IsManyToOne
 			rel.GraphQLFieldName = namer.RegisterRelationshipField(typeName, baseName, source, useRefSuffix)

@@ -10,6 +10,8 @@ import (
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/graphql-go/graphql/language/ast"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testTable() introspection.Table {
@@ -406,7 +408,16 @@ func TestPlanManyToManyConnection_Basic(t *testing.T) {
 		},
 	}
 	args := map[string]interface{}{"first": 2}
-	plan, err := PlanManyToManyConnection(table, "user_tags", "user_id", "tag_id", "id", 7, field, args)
+	plan, err := PlanManyToManyConnection(
+		table,
+		"user_tags",
+		[]string{"user_id"},
+		[]string{"tag_id"},
+		[]string{"id"},
+		[]interface{}{7},
+		field,
+		args,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -465,7 +476,7 @@ func TestPlanEdgeListConnection_Basic(t *testing.T) {
 		},
 	}
 	args := map[string]interface{}{"first": 2}
-	plan, err := PlanEdgeListConnection(junction, "user_id", 7, field, args)
+	plan, err := PlanEdgeListConnection(junction, []string{"user_id"}, []interface{}{7}, field, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -494,6 +505,90 @@ func TestPlanEdgeListConnection_Basic(t *testing.T) {
 	if !strings.Contains(plan.AggregateBase.SQL, "FROM `user_tags`") {
 		t.Errorf("expected aggregate base SQL to reference junction table, got: %s", plan.AggregateBase.SQL)
 	}
+}
+
+func TestPlanManyToManyConnection_CompositeKeys(t *testing.T) {
+	table := introspection.Table{
+		Name: "groups",
+		Columns: []introspection.Column{
+			{Name: "tenant_id", IsPrimaryKey: true, GraphQLFieldName: "tenantId"},
+			{Name: "id", IsPrimaryKey: true, GraphQLFieldName: "databaseId"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"tenant_id", "id"}},
+		},
+		GraphQLTypeName: "Group",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "groupsConnection"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	plan, err := PlanManyToManyConnection(
+		table,
+		"user_groups",
+		[]string{"tenant_id", "user_id"},
+		[]string{"group_tenant_id", "group_id"},
+		[]string{"tenant_id", "id"},
+		[]interface{}{7, 100},
+		field,
+		map[string]interface{}{"first": 1},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, plan.Root.SQL, "`user_groups`.`group_tenant_id` = `groups`.`tenant_id`")
+	assert.Contains(t, plan.Root.SQL, "`user_groups`.`group_id` = `groups`.`id`")
+	assert.Contains(t, plan.Root.SQL, "(`user_groups`.`tenant_id`, `user_groups`.`user_id`) IN ((?,?))")
+	assert.Equal(t, []interface{}{7, 100}, plan.Root.Args)
+}
+
+func TestPlanEdgeListConnection_CompositeKeys(t *testing.T) {
+	junction := introspection.Table{
+		Name: "user_groups",
+		Columns: []introspection.Column{
+			{Name: "tenant_id", IsPrimaryKey: true, GraphQLFieldName: "tenantId"},
+			{Name: "user_id", IsPrimaryKey: true, GraphQLFieldName: "userId"},
+			{Name: "group_id", IsPrimaryKey: true, GraphQLFieldName: "groupId"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"tenant_id", "user_id", "group_id"}},
+		},
+		GraphQLTypeName: "UserGroup",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "userGroupsConnection"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "groupId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	plan, err := PlanEdgeListConnection(
+		junction,
+		[]string{"tenant_id", "user_id"},
+		[]interface{}{7, 100},
+		field,
+		map[string]interface{}{"first": 1},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, plan.Root.SQL, "(`tenant_id`, `user_id`) IN ((?,?))")
+	assert.Equal(t, []interface{}{7, 100}, plan.Root.Args)
 }
 
 func TestBuildOneToManyCountSQL_WithWhere(t *testing.T) {

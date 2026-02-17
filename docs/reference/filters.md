@@ -49,6 +49,10 @@ Example:
 }
 ```
 
+Boolean migration note:
+- `tinyint(1)` columns are exposed as GraphQL `Boolean`.
+- Use boolean literals in filters (`eq: true` / `eq: false`), not numeric values (`1` / `0`).
+
 Bytes example:
 
 ```graphql

@@ -164,10 +164,49 @@ func ParsePKValue(col introspection.Column, raw interface{}) (interface{}, error
 			return fmt.Sprintf("%v", v), nil
 		}
 	case sqltype.TypeBoolean:
+		parseNumeric := func(v float64) (bool, error) {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return false, fmt.Errorf("invalid boolean value for %s", col.Name)
+			}
+			return v != 0, nil
+		}
 		switch v := raw.(type) {
 		case bool:
 			return v, nil
+		case json.Number:
+			f, err := strconv.ParseFloat(v.String(), 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid boolean value for %s", col.Name)
+			}
+			return parseNumeric(f)
+		case int:
+			return v != 0, nil
+		case int8:
+			return v != 0, nil
+		case int16:
+			return v != 0, nil
+		case int32:
+			return v != 0, nil
+		case int64:
+			return v != 0, nil
+		case uint:
+			return v != 0, nil
+		case uint8:
+			return v != 0, nil
+		case uint16:
+			return v != 0, nil
+		case uint32:
+			return v != 0, nil
+		case uint64:
+			return v != 0, nil
+		case float32:
+			return parseNumeric(float64(v))
+		case float64:
+			return parseNumeric(v)
 		case string:
+			if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+				return parsed != 0, nil
+			}
 			parsed, err := strconv.ParseBool(v)
 			if err != nil {
 				return nil, fmt.Errorf("invalid boolean value for %s", col.Name)

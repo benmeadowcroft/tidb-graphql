@@ -201,6 +201,38 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Contains(t, result.Error(), "type_mappings.uuid_columns")
 	})
 
+	t.Run("valid tinyint1 mapping patterns", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.TypeMappings.TinyInt1BooleanColumns = map[string][]string{
+			"*": {"is_*"},
+		}
+		cfg.TypeMappings.TinyInt1IntColumns = map[string][]string{
+			"events": {"is_deleted"},
+		}
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+	})
+
+	t.Run("invalid tinyint1 boolean table glob pattern", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.TypeMappings.TinyInt1BooleanColumns = map[string][]string{
+			"[bad": {"is_*"},
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "type_mappings.tinyint1_boolean_columns")
+	})
+
+	t.Run("invalid tinyint1 int column glob pattern", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.TypeMappings.TinyInt1IntColumns = map[string][]string{
+			"events": {"[bad"},
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "type_mappings.tinyint1_int_columns")
+	})
+
 	t.Run("valid TLS modes", func(t *testing.T) {
 		for _, mode := range []string{"", "off", "skip-verify", "verify-ca", "verify-full"} {
 			cfg := validConfig()

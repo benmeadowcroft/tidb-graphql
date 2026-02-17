@@ -18,14 +18,16 @@ import (
 
 // BuildSchemaConfig defines inputs for shared schema assembly.
 type BuildSchemaConfig struct {
-	Queryer      introspection.Queryer
-	Executor     dbexec.QueryExecutor
-	DatabaseName string
-	Filters      schemafilter.Config
-	UUIDColumns  map[string][]string
-	Naming       naming.Config
-	Limits       *planner.PlanLimits
-	DefaultLimit int
+	Queryer                introspection.Queryer
+	Executor               dbexec.QueryExecutor
+	DatabaseName           string
+	Filters                schemafilter.Config
+	UUIDColumns            map[string][]string
+	TinyInt1BooleanColumns map[string][]string
+	TinyInt1IntColumns     map[string][]string
+	Naming                 naming.Config
+	Limits                 *planner.PlanLimits
+	DefaultLimit           int
 }
 
 // BuildSchemaResult contains schema artifacts produced by BuildSchema.
@@ -49,6 +51,10 @@ func BuildSchema(ctx context.Context, cfg BuildSchemaConfig) (*BuildSchemaResult
 	}
 
 	schemafilter.Apply(dbSchema, cfg.Filters)
+
+	if err := introspection.ApplyTinyInt1TypeOverrides(dbSchema, cfg.TinyInt1BooleanColumns, cfg.TinyInt1IntColumns); err != nil {
+		return nil, fmt.Errorf("failed to apply tinyint(1) type mappings: %w", err)
+	}
 
 	if err := introspection.ApplyUUIDTypeOverrides(dbSchema, cfg.UUIDColumns); err != nil {
 		return nil, fmt.Errorf("failed to apply UUID type mappings: %w", err)

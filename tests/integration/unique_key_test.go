@@ -307,8 +307,40 @@ func TestUniqueKeyLookup_CategorySlug(t *testing.T) {
 	assert.EqualValues(t, 1, category["databaseId"])
 	assert.Equal(t, "electronics", category["slug"])
 	assert.Equal(t, "Electronics", category["name"])
-	// TiDB returns TINYINT(1) as int, not bool
-	assert.EqualValues(t, 1, category["isVisible"])
+	assert.Equal(t, true, category["isVisible"])
+}
+
+func TestUniqueKeyLookup_CategorySlug_TinyIntNonOneCoercesToBoolean(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/filtering_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/filtering_seed.sql")
+
+	_, err := testDB.DB.Exec("UPDATE categories SET is_visible = 2 WHERE slug = 'electronics'")
+	require.NoError(t, err)
+
+	schema := buildGraphQLSchema(t, testDB)
+
+	query := `
+		{
+			category_by_slug(slug: "electronics") {
+				isVisible
+			}
+		}
+	`
+	result := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: query,
+		Context:       context.Background(),
+	})
+	require.Empty(t, result.Errors, "Query should not return errors")
+
+	data := result.Data.(map[string]interface{})
+	category := data["category_by_slug"].(map[string]interface{})
+	assert.Equal(t, true, category["isVisible"])
 }
 
 func TestUniqueKey_Introspection(t *testing.T) {

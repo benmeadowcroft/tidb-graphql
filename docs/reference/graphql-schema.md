@@ -97,7 +97,7 @@ SQL types are mapped to GraphQL scalars:
 - `bigint` -> `BigInt` (custom scalar, serialized as a string)
 - `float`, `double` -> `Float`
 - `decimal`, `numeric` -> `Decimal` (custom scalar, serialized as a string)
-- `bool` -> `Boolean`
+- `bool`, `tinyint(1)` -> `Boolean`
 - `json` -> `JSON` (custom scalar)
 - `enum` -> GraphQL enum named `<SingularTable><Column>` (e.g., `users.status` -> `UserStatus`)
 - `set` -> `[<SingularTable><Column>!]` (list of enum values)
@@ -109,6 +109,12 @@ SQL types are mapped to GraphQL scalars:
 - `char`, `text` -> `String`
 
 UUID mapping is explicit via config (`type_mappings.uuid_columns`): matched SQL columns are exposed as `UUID` (canonical lowercase hyphenated form). For binary storage, canonical RFC byte order (`UUID_TO_BIN(x,0)`) is assumed.
+
+Tinyint mapping is configurable via `type_mappings.tinyint1_boolean_columns` and `type_mappings.tinyint1_int_columns`.
+When both patterns match the same column, `tinyint1_int_columns` takes precedence.
+
+Breaking change note:
+- Legacy filters using numeric booleans like `eq: 1` / `eq: 0` on `tinyint(1)` columns must be updated to `eq: true` / `eq: false`.
 
 ## Descriptions
 

@@ -173,6 +173,15 @@ schema_filters:
   deny_mutation_columns:
     "*": ["*_readonly"]     # Glob patterns of columns to exclude from mutation inputs
 
+# Explicit SQL-to-GraphQL type mappings (optional)
+type_mappings:
+  uuid_columns:
+    "*": ["*_uuid"]         # Expose matching supported columns as GraphQL UUID
+  tinyint1_boolean_columns:
+    "*": ["is_*", "has_*"]  # Treat matching tinyint(1) columns as GraphQL Boolean
+  tinyint1_int_columns:
+    "event_flags": ["is_deleted"] # Escape hatch: keep selected tinyint(1) columns as Int
+
 # Naming configuration (optional overrides for pluralization/singularization)
 naming:
   plural_overrides:

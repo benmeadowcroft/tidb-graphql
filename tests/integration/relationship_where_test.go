@@ -28,7 +28,7 @@ func TestRelationshipWhere_OneToManySomeAndNone(t *testing.T) {
 	someQuery := `
 		{
 			users(
-				where: { posts: { some: { published: { eq: 1 } } } }
+				where: { posts: { some: { published: { eq: true } } } }
 				orderBy: [{ databaseId: ASC }]
 			) {
 				nodes {
@@ -52,7 +52,7 @@ func TestRelationshipWhere_OneToManySomeAndNone(t *testing.T) {
 	noneQuery := `
 		{
 			users(
-				where: { posts: { none: { published: { eq: 0 } } } }
+				where: { posts: { none: { published: { eq: false } } } }
 				orderBy: [{ databaseId: ASC }]
 			) {
 				nodes {

@@ -290,6 +290,8 @@ See `docs/reference/schema-filters.md` for behavior details.
 ## type_mappings
 
 - `type_mappings.uuid_columns` (map of table => list of column glob patterns, default: empty)
+- `type_mappings.tinyint1_boolean_columns` (map of table => list of column glob patterns, default: empty)
+- `type_mappings.tinyint1_int_columns` (map of table => list of column glob patterns, default: empty)
 
 `uuid_columns` uses case-insensitive SQL-name pattern matching (table + column), with wildcard merge semantics:
 - patterns from `"*"` apply to all tables
@@ -302,12 +304,20 @@ type_mappings:
   uuid_columns:
     "*": ["*_uuid"]
     "orders": ["id", "customer_uuid"]
+  tinyint1_boolean_columns:
+    "*": ["is_*", "has_*"]
+  tinyint1_int_columns:
+    "event_flags": ["is_deleted"] # explicit escape hatch when tinyint(1) is not semantic boolean
 ```
 
 Mapped columns are exposed as `UUID` in GraphQL (for supported SQL storage types) and use canonical lowercase hyphenated output.
 Supported mapped SQL storage types are:
 - `BINARY(16)` / `VARBINARY(16)` (canonical RFC byte order, equivalent to `UUID_TO_BIN(x,0)`)
 - `CHAR(36)` / `VARCHAR(36)` (canonical text UUID)
+
+`tinyint1_*_columns` is also case-insensitive SQL-name pattern matching (table + column), with wildcard merge semantics. Precedence rules:
+- `tinyint1_int_columns` wins over `tinyint1_boolean_columns` when both match.
+- both mappings only apply to SQL `TINYINT(1)` columns; other targets are rejected during schema build.
 
 ## naming
 

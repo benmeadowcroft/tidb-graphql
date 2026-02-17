@@ -42,44 +42,48 @@ type Snapshot struct {
 
 // Config controls schema refresh behavior.
 type Config struct {
-	DB                *sql.DB
-	DatabaseName      string
-	Limits            *planner.PlanLimits
-	DefaultLimit      int
-	Logger            *logging.Logger
-	Metrics           *observability.SchemaRefreshMetrics
-	MinInterval       time.Duration
-	MaxInterval       time.Duration
-	GraphiQL          bool
-	Filters           schemafilter.Config
-	UUIDColumns       map[string][]string
-	Naming            naming.Config
-	Executor          dbexec.QueryExecutor
-	IntrospectionRole string
-	RoleSchemas       []string
-	RoleFromCtx       func(context.Context) (string, bool)
+	DB                     *sql.DB
+	DatabaseName           string
+	Limits                 *planner.PlanLimits
+	DefaultLimit           int
+	Logger                 *logging.Logger
+	Metrics                *observability.SchemaRefreshMetrics
+	MinInterval            time.Duration
+	MaxInterval            time.Duration
+	GraphiQL               bool
+	Filters                schemafilter.Config
+	UUIDColumns            map[string][]string
+	TinyInt1BooleanColumns map[string][]string
+	TinyInt1IntColumns     map[string][]string
+	Naming                 naming.Config
+	Executor               dbexec.QueryExecutor
+	IntrospectionRole      string
+	RoleSchemas            []string
+	RoleFromCtx            func(context.Context) (string, bool)
 }
 
 // Manager maintains and refreshes schema snapshots.
 type Manager struct {
-	db                *sql.DB
-	databaseName      string
-	limits            *planner.PlanLimits
-	defaultLimit      int
-	logger            *logging.Logger
-	metrics           *observability.SchemaRefreshMetrics
-	minInterval       time.Duration
-	maxInterval       time.Duration
-	graphiQL          bool
-	filters           schemafilter.Config
-	uuidColumns       map[string][]string
-	namingConfig      naming.Config
-	executor          dbexec.QueryExecutor
-	introspectionRole string
-	roleSchemas       []string
-	roleFromCtx       func(context.Context) (string, bool)
-	active            atomic.Value
-	wg                sync.WaitGroup
+	db                     *sql.DB
+	databaseName           string
+	limits                 *planner.PlanLimits
+	defaultLimit           int
+	logger                 *logging.Logger
+	metrics                *observability.SchemaRefreshMetrics
+	minInterval            time.Duration
+	maxInterval            time.Duration
+	graphiQL               bool
+	filters                schemafilter.Config
+	uuidColumns            map[string][]string
+	tinyInt1BooleanColumns map[string][]string
+	tinyInt1IntColumns     map[string][]string
+	namingConfig           naming.Config
+	executor               dbexec.QueryExecutor
+	introspectionRole      string
+	roleSchemas            []string
+	roleFromCtx            func(context.Context) (string, bool)
+	active                 atomic.Value
+	wg                     sync.WaitGroup
 }
 
 type snapshotSet struct {
@@ -131,22 +135,24 @@ func NewManager(cfg Config) (*Manager, error) {
 
 	componentLogger := cfg.Logger.WithFields(slog.String("component", "schema_refresh"))
 	manager := &Manager{
-		db:                cfg.DB,
-		databaseName:      cfg.DatabaseName,
-		limits:            cfg.Limits,
-		defaultLimit:      cfg.DefaultLimit,
-		logger:            componentLogger,
-		metrics:           cfg.Metrics,
-		minInterval:       minInterval,
-		maxInterval:       maxInterval,
-		graphiQL:          cfg.GraphiQL,
-		filters:           cfg.Filters,
-		uuidColumns:       cfg.UUIDColumns,
-		namingConfig:      cfg.Naming,
-		executor:          cfg.Executor,
-		introspectionRole: cfg.IntrospectionRole,
-		roleSchemas:       append([]string(nil), cfg.RoleSchemas...),
-		roleFromCtx:       cfg.RoleFromCtx,
+		db:                     cfg.DB,
+		databaseName:           cfg.DatabaseName,
+		limits:                 cfg.Limits,
+		defaultLimit:           cfg.DefaultLimit,
+		logger:                 componentLogger,
+		metrics:                cfg.Metrics,
+		minInterval:            minInterval,
+		maxInterval:            maxInterval,
+		graphiQL:               cfg.GraphiQL,
+		filters:                cfg.Filters,
+		uuidColumns:            cfg.UUIDColumns,
+		tinyInt1BooleanColumns: cfg.TinyInt1BooleanColumns,
+		tinyInt1IntColumns:     cfg.TinyInt1IntColumns,
+		namingConfig:           cfg.Naming,
+		executor:               cfg.Executor,
+		introspectionRole:      cfg.IntrospectionRole,
+		roleSchemas:            append([]string(nil), cfg.RoleSchemas...),
+		roleFromCtx:            cfg.RoleFromCtx,
 	}
 	if manager.executor == nil {
 		manager.executor = dbexec.NewStandardExecutor(cfg.DB)
@@ -469,14 +475,16 @@ func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, fingerprint stri
 
 	m.logger.Info("introspecting database schema")
 	buildResult, err := BuildSchema(ctx, BuildSchemaConfig{
-		Queryer:      queryer,
-		Executor:     executor,
-		DatabaseName: m.databaseName,
-		Filters:      m.filters,
-		UUIDColumns:  m.uuidColumns,
-		Naming:       m.namingConfig,
-		Limits:       m.limits,
-		DefaultLimit: m.defaultLimit,
+		Queryer:                queryer,
+		Executor:               executor,
+		DatabaseName:           m.databaseName,
+		Filters:                m.filters,
+		UUIDColumns:            m.uuidColumns,
+		TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
+		TinyInt1IntColumns:     m.tinyInt1IntColumns,
+		Naming:                 m.namingConfig,
+		Limits:                 m.limits,
+		DefaultLimit:           m.defaultLimit,
 	})
 	if err != nil {
 		return nil, err

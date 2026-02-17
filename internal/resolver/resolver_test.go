@@ -1372,6 +1372,16 @@ func TestConvertColumnValue_BytesPreserved(t *testing.T) {
 	assert.Equal(t, raw, converted)
 }
 
+func TestConvertColumnValue_BooleanCoercion(t *testing.T) {
+	col := introspection.Column{Name: "is_active", DataType: "tinyint", ColumnType: "tinyint(1)"}
+
+	assert.Equal(t, false, convertColumnValue(col, int64(0)))
+	assert.Equal(t, true, convertColumnValue(col, int64(1)))
+	assert.Equal(t, true, convertColumnValue(col, int64(2)))
+	assert.Equal(t, true, convertColumnValue(col, []byte("2")))
+	assert.Equal(t, false, convertColumnValue(col, "0"))
+}
+
 func TestUUIDColumnResolver_NormalizesBinaryValue(t *testing.T) {
 	col := introspection.Column{
 		Name:             "id",

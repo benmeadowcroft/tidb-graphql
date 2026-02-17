@@ -138,12 +138,14 @@ func buildSchemaWithConfig(t *testing.T, testDB *tidbcloud.TestDB, uuidColumns m
 
 	executor := dbexec.NewStandardExecutor(testDB.DB)
 	result, err := schemarefresh.BuildSchema(context.Background(), schemarefresh.BuildSchemaConfig{
-		Queryer:      testDB.DB,
-		Executor:     executor,
-		DatabaseName: testDB.DatabaseName,
-		Filters:      schemafilter.Config{},
-		UUIDColumns:  uuidColumns,
-		Naming:       naming.DefaultConfig(),
+		Queryer:                testDB.DB,
+		Executor:               executor,
+		DatabaseName:           testDB.DatabaseName,
+		Filters:                schemafilter.Config{},
+		UUIDColumns:            uuidColumns,
+		TinyInt1BooleanColumns: nil,
+		TinyInt1IntColumns:     nil,
+		Naming:                 naming.DefaultConfig(),
 	})
 	require.NoError(t, err)
 

@@ -414,7 +414,7 @@ func TestSelectedColumnsForConnection_RootFragmentSpread(t *testing.T) {
 		},
 	}
 
-	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Direction: "ASC"}
+	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Directions: []string{"ASC", "ASC"}}
 	cols := SelectedColumnsForConnection(table, field, fragments, orderBy)
 	names := columnNamesOnly(cols)
 
@@ -456,7 +456,7 @@ func TestSelectedColumnsForConnection_EdgesNodeViaFragment(t *testing.T) {
 		},
 	}
 
-	orderBy := &OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	orderBy := &OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	cols := SelectedColumnsForConnection(table, field, fragments, orderBy)
 	names := columnNamesOnly(cols)
 
@@ -486,7 +486,7 @@ func TestSelectedColumnsForConnection_MetadataOnlyUsesCursorColumns(t *testing.T
 		}},
 	}
 
-	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Direction: "ASC"}
+	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Directions: []string{"ASC", "ASC"}}
 	cols := SelectedColumnsForConnection(table, field, nil, orderBy)
 	names := columnNamesOnly(cols)
 

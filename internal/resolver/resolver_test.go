@@ -50,6 +50,15 @@ func hasArg(field *graphql.FieldDefinition, name string) bool {
 	return false
 }
 
+func getArg(field *graphql.FieldDefinition, name string) *graphql.Argument {
+	for _, arg := range field.Args {
+		if arg != nil && arg.Name() == name {
+			return arg
+		}
+	}
+	return nil
+}
+
 func unwrapObjectType(t *testing.T, typ graphql.Type) *graphql.Object {
 	t.Helper()
 	if nonNull, ok := typ.(*graphql.NonNull); ok {
@@ -263,7 +272,7 @@ func TestConnectionResolver_BackwardBeforeSetsHasNextLightweight(t *testing.T) {
 			},
 		}},
 	}
-	before := cursor.EncodeCursor("Users", "databaseId", "ASC", 4)
+	before := cursor.EncodeCursor("Users", "databaseId", []string{"ASC"}, 4)
 	args := map[string]interface{}{
 		"last":   1,
 		"before": before,
@@ -604,6 +613,79 @@ func TestConnectionAggregateSchemaWiring(t *testing.T) {
 	postsConnObj := unwrapObjectType(t, postsField.Type)
 	_, hasRelationshipConnectionAggregate := postsConnObj.Fields()["aggregate"]
 	assert.True(t, hasRelationshipConnectionAggregate, "expected aggregate field on relationship connection type")
+}
+
+func TestConnectionOrderByPolicyArgWiring(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "email"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "idx_users_email", Columns: []string{"email"}},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsOneToMany:      true,
+				LocalColumn:      "id",
+				RemoteTable:      "posts",
+				RemoteColumn:     "user_id",
+				GraphQLFieldName: "posts",
+			},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "created_at"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "idx_posts_user_created", Columns: []string{"user_id", "created_at"}},
+		},
+	}
+
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	schema, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	rootCollectionField := schema.QueryType().Fields()["users"]
+	require.NotNil(t, rootCollectionField)
+	require.True(t, hasArg(rootCollectionField, "orderBy"), "expected users orderBy arg")
+	require.True(t, hasArg(rootCollectionField, "orderByPolicy"), "expected users orderByPolicy arg")
+
+	orderByPolicyArg := getArg(rootCollectionField, "orderByPolicy")
+	require.NotNil(t, orderByPolicyArg)
+	policyEnum, ok := orderByPolicyArg.Type.(*graphql.Enum)
+	require.True(t, ok, "expected orderByPolicy enum type, got %T", orderByPolicyArg.Type)
+	var hasIndexPrefixOnly bool
+	var hasAllowNonPrefix bool
+	for _, value := range policyEnum.Values() {
+		if value.Name == "INDEX_PREFIX_ONLY" {
+			hasIndexPrefixOnly = true
+		}
+		if value.Name == "ALLOW_NON_PREFIX" {
+			hasAllowNonPrefix = true
+		}
+	}
+	require.True(t, hasIndexPrefixOnly, "expected INDEX_PREFIX_ONLY enum value")
+	require.True(t, hasAllowNonPrefix, "expected ALLOW_NON_PREFIX enum value")
+
+	userType := r.buildGraphQLType(users)
+	fields := userType.Fields()
+	postsField := fields["posts"]
+	require.NotNil(t, postsField)
+	require.True(t, hasArg(postsField, "orderBy"), "expected posts relationship orderBy arg")
+	require.True(t, hasArg(postsField, "orderByPolicy"), "expected posts relationship orderByPolicy arg")
 }
 
 func TestRootCollectionFieldNotGeneratedWithoutPrimaryKey(t *testing.T) {
@@ -1708,7 +1790,7 @@ func TestTryBatchOneToManyConnection_CachesResults(t *testing.T) {
 		}},
 	}
 
-	orderBy := &planner.OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	orderBy := &planner.OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	selection := planner.SelectedColumnsForConnection(posts, field, nil, orderBy)
 	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumn, selection, []interface{}{1, 2}, 1, orderBy, nil)
 	require.NoError(t, err)
@@ -1812,7 +1894,7 @@ func TestTryBatchOneToManyConnection_FirstZero(t *testing.T) {
 		}},
 	}
 
-	orderBy := &planner.OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	orderBy := &planner.OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	selection := planner.SelectedColumnsForConnection(posts, field, nil, orderBy)
 	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumn, selection, []interface{}{1, 2}, 0, orderBy, nil)
 	require.NoError(t, err)
@@ -1900,7 +1982,7 @@ func TestOneToManyConnectionResolver_WithAfterSkipsBatching(t *testing.T) {
 		}},
 	}
 
-	after := cursor.EncodeCursor("Posts", "databaseId", "ASC", 100)
+	after := cursor.EncodeCursor("Posts", "databaseId", []string{"ASC"}, 100)
 	args := map[string]interface{}{
 		"first": 1,
 		"after": after,

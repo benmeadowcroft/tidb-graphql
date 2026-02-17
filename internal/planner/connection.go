@@ -68,8 +68,8 @@ type connectionWindow struct {
 	before    string
 }
 
-// seekBuilder builds a cursor seek condition from column names, values, and direction.
-type seekBuilder func(colNames []string, values []interface{}, direction string) sq.Sqlizer
+// seekBuilder builds a cursor seek condition from column names, values, and per-column directions.
+type seekBuilder func(colNames []string, values []interface{}, directions []string) sq.Sqlizer
 
 // whereBuilder builds a WHERE clause for a table from a filter input map.
 type whereBuilder func(table introspection.Table, whereMap map[string]interface{}) (*WhereClause, error)
@@ -123,18 +123,18 @@ func parseConnectionArgs(
 	if window.hasAfter || window.hasBefore {
 		cursorArgName := "after"
 		rawCursor := window.after
-		seekDirection := orderBy.Direction
+		seekDirections := append([]string{}, orderBy.Directions...)
 		if window.hasBefore {
 			cursorArgName = "before"
 			rawCursor = window.before
-			seekDirection = reverseDirection(orderBy.Direction)
+			seekDirections = reverseDirections(orderBy.Directions)
 		}
 
-		cType, cKey, cDir, cVals, err := cursor.DecodeCursor(rawCursor)
+		cType, cKey, cDirs, cVals, err := cursor.DecodeCursor(rawCursor)
 		if err != nil {
 			return nil, fmt.Errorf("invalid %s cursor: %w", cursorArgName, err)
 		}
-		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Direction, cType, cKey, cDir); err != nil {
+		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Directions, cType, cKey, cDirs); err != nil {
 			return nil, fmt.Errorf("invalid %s cursor: %w", cursorArgName, err)
 		}
 		parsedValues, err := cursor.ParseCursorValues(cVals, cursorCols)
@@ -145,7 +145,7 @@ func parseConnectionArgs(
 		for i, c := range cursorCols {
 			colNames[i] = c.Name
 		}
-		seekCondition = buildSeek(colNames, parsedValues, seekDirection)
+		seekCondition = buildSeek(colNames, parsedValues, seekDirections)
 	}
 
 	// Parse WHERE clause
@@ -320,8 +320,8 @@ func PlanManyToManyConnection(
 		opt(options)
 	}
 
-	buildSeek := func(colNames []string, values []interface{}, direction string) sq.Sqlizer {
-		return BuildSeekConditionQualified(targetTable.Name, colNames, values, direction)
+	buildSeek := func(colNames []string, values []interface{}, directions []string) sq.Sqlizer {
+		return BuildSeekConditionQualified(targetTable.Name, colNames, values, directions)
 	}
 	buildWhere := func(table introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
 		return BuildWhereClauseQualified(table, table.Name, whereMap)
@@ -642,51 +642,50 @@ func BuildEdgeListAggregateBaseSQL(
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
-// BuildSeekCondition creates a SQL row comparison for cursor-based seek.
-// For ASC: (col1, col2) > (?, ?)
-// For DESC: (col1, col2) < (?, ?)
-func BuildSeekCondition(columns []string, values []interface{}, direction string) sq.Sqlizer {
-	quoted := make([]string, len(columns))
-	for i, col := range columns {
-		quoted[i] = sqlutil.QuoteIdentifier(col)
+// BuildSeekCondition creates a cursor seek predicate supporting mixed directions.
+// It expands lexicographic seek into disjunction form:
+// (c1 op v1) OR (c1 = v1 AND c2 op v2) OR ...
+func BuildSeekCondition(columns []string, values []interface{}, directions []string) sq.Sqlizer {
+	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
+		return sq.Expr("1 = 0")
 	}
 
-	lhs := "(" + strings.Join(quoted, ", ") + ")"
-	placeholders := make([]string, len(values))
-	for i := range values {
-		placeholders[i] = "?"
+	terms := make([]string, 0, len(columns))
+	args := make([]interface{}, 0, len(columns)*2)
+	for i := range columns {
+		var predicates []string
+		for j := 0; j < i; j++ {
+			predicates = append(predicates, fmt.Sprintf("%s = ?", sqlutil.QuoteIdentifier(columns[j])))
+			args = append(args, values[j])
+		}
+		op := directionOp(directions[i])
+		predicates = append(predicates, fmt.Sprintf("%s %s ?", sqlutil.QuoteIdentifier(columns[i]), op))
+		args = append(args, values[i])
+		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
 	}
-	rhs := "(" + strings.Join(placeholders, ", ") + ")"
-
-	op := ">"
-	if strings.ToUpper(direction) == "DESC" {
-		op = "<"
-	}
-
-	return sq.Expr(lhs+" "+op+" "+rhs, values...)
+	return sq.Expr("("+strings.Join(terms, " OR ")+")", args...)
 }
 
-// BuildSeekConditionQualified creates a SQL row comparison for cursor-based seek
-// using qualified column names (tableAlias.column).
-func BuildSeekConditionQualified(tableAlias string, columns []string, values []interface{}, direction string) sq.Sqlizer {
-	qualified := make([]string, len(columns))
-	for i, col := range columns {
-		qualified[i] = fmt.Sprintf("%s.%s", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(col))
+// BuildSeekConditionQualified creates a cursor seek predicate with qualified columns.
+func BuildSeekConditionQualified(tableAlias string, columns []string, values []interface{}, directions []string) sq.Sqlizer {
+	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
+		return sq.Expr("1 = 0")
 	}
 
-	lhs := "(" + strings.Join(qualified, ", ") + ")"
-	placeholders := make([]string, len(values))
-	for i := range values {
-		placeholders[i] = "?"
+	terms := make([]string, 0, len(columns))
+	args := make([]interface{}, 0, len(columns)*2)
+	for i := range columns {
+		var predicates []string
+		for j := 0; j < i; j++ {
+			predicates = append(predicates, fmt.Sprintf("%s.%s = ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[j])))
+			args = append(args, values[j])
+		}
+		op := directionOp(directions[i])
+		predicates = append(predicates, fmt.Sprintf("%s.%s %s ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[i]), op))
+		args = append(args, values[i])
+		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
 	}
-	rhs := "(" + strings.Join(placeholders, ", ") + ")"
-
-	op := ">"
-	if strings.ToUpper(direction) == "DESC" {
-		op = "<"
-	}
-
-	return sq.Expr(lhs+" "+op+" "+rhs, values...)
+	return sq.Expr("("+strings.Join(terms, " OR ")+")", args...)
 }
 
 func columnNamesQualified(tableName string, columns []introspection.Column) []string {
@@ -703,7 +702,11 @@ func orderByClausesQualified(tableName string, orderBy *OrderBy) []string {
 	}
 	clauses := make([]string, len(orderBy.Columns))
 	for i, col := range orderBy.Columns {
-		clauses[i] = fmt.Sprintf("%s.%s %s", sqlutil.QuoteIdentifier(tableName), sqlutil.QuoteIdentifier(col), orderBy.Direction)
+		direction := "ASC"
+		if i < len(orderBy.Directions) && strings.EqualFold(orderBy.Directions[i], "DESC") {
+			direction = "DESC"
+		}
+		clauses[i] = fmt.Sprintf("%s.%s %s", sqlutil.QuoteIdentifier(tableName), sqlutil.QuoteIdentifier(col), direction)
 	}
 	return clauses
 }
@@ -934,15 +937,34 @@ func reverseDirection(direction string) string {
 	return "DESC"
 }
 
+func reverseDirections(directions []string) []string {
+	if len(directions) == 0 {
+		return nil
+	}
+	reversed := make([]string, len(directions))
+	for i, direction := range directions {
+		reversed[i] = reverseDirection(direction)
+	}
+	return reversed
+}
+
+func directionOp(direction string) string {
+	if strings.EqualFold(direction, "DESC") {
+		return "<"
+	}
+	return ">"
+}
+
 func reverseOrderBy(orderBy *OrderBy) *OrderBy {
 	if orderBy == nil {
 		return nil
 	}
 	columns := make([]string, len(orderBy.Columns))
 	copy(columns, orderBy.Columns)
+	directions := reverseDirections(orderBy.Directions)
 	return &OrderBy{
-		Columns:   columns,
-		Direction: reverseDirection(orderBy.Direction),
+		Columns:    columns,
+		Directions: directions,
 	}
 }
 
@@ -960,12 +982,14 @@ func parseConnectionOrderBy(table introspection.Table, args map[string]interface
 
 	// Default to PK ASC (exempt from index validation since PKs are always indexed)
 	pkColNames := make([]string, len(pkCols))
+	pkDirections := make([]string, len(pkCols))
 	for i, col := range pkCols {
 		pkColNames[i] = col.Name
+		pkDirections[i] = "ASC"
 	}
 	return &OrderBy{
-		Columns:   pkColNames,
-		Direction: "ASC",
+		Columns:    pkColNames,
+		Directions: pkDirections,
 	}, nil
 }
 

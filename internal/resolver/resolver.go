@@ -37,7 +37,7 @@ type Resolver struct {
 	executor           dbexec.QueryExecutor
 	dbSchema           *introspection.Schema
 	typeCache          map[string]*graphql.Object
-	orderByCache       map[string]*graphql.InputObject
+	orderByClauseCache map[string]*graphql.InputObject
 	whereCache         map[string]*graphql.InputObject
 	filterCache        map[string]*graphql.InputObject
 	aggregateCache     map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
@@ -51,6 +51,7 @@ type Resolver struct {
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
 	orderDirection     *graphql.Enum
+	orderByPolicy      *graphql.Enum
 	nonNegativeInt     *graphql.Scalar
 	bigIntType         *graphql.Scalar
 	decimalType        *graphql.Scalar
@@ -81,7 +82,7 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		executor:           executor,
 		dbSchema:           dbSchema,
 		typeCache:          make(map[string]*graphql.Object),
-		orderByCache:       make(map[string]*graphql.InputObject),
+		orderByClauseCache: make(map[string]*graphql.InputObject),
 		whereCache:         make(map[string]*graphql.InputObject),
 		filterCache:        make(map[string]*graphql.InputObject),
 		aggregateCache:     make(map[string]*graphql.Object),
@@ -255,9 +256,12 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 				Type: graphql.String,
 			},
 		}
-		if orderByInput := r.orderByInput(table); orderByInput != nil {
+		if orderByArgType := r.orderByArgType(table); orderByArgType != nil {
 			connArgs["orderBy"] = &graphql.ArgumentConfig{
-				Type: orderByInput,
+				Type: orderByArgType,
+			}
+			connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+				Type: r.orderByPolicyEnum(),
 			}
 		}
 		if whereInput := r.whereInput(table); whereInput != nil {
@@ -465,9 +469,12 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: graphql.String,
 					},
 				}
-				if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
+				if orderByArgType := r.orderByArgType(relatedTable); orderByArgType != nil {
 					connArgs["orderBy"] = &graphql.ArgumentConfig{
-						Type: orderByInput,
+						Type: orderByArgType,
+					}
+					connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+						Type: r.orderByPolicyEnum(),
 					}
 				}
 				if whereInput := r.whereInput(relatedTable); whereInput != nil {
@@ -501,9 +508,12 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: graphql.String,
 					},
 				}
-				if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
+				if orderByArgType := r.orderByArgType(relatedTable); orderByArgType != nil {
 					connArgs["orderBy"] = &graphql.ArgumentConfig{
-						Type: orderByInput,
+						Type: orderByArgType,
+					}
+					connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+						Type: r.orderByPolicyEnum(),
 					}
 				}
 				if whereInput := r.whereInput(relatedTable); whereInput != nil {
@@ -537,9 +547,12 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: graphql.String,
 					},
 				}
-				if orderByInput := r.orderByInput(junctionTable); orderByInput != nil {
+				if orderByArgType := r.orderByArgType(junctionTable); orderByArgType != nil {
 					connArgs["orderBy"] = &graphql.ArgumentConfig{
-						Type: orderByInput,
+						Type: orderByArgType,
+					}
+					connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+						Type: r.orderByPolicyEnum(),
 					}
 				}
 				if whereInput := r.whereInput(junctionTable); whereInput != nil {
@@ -1029,37 +1042,45 @@ func firstFieldAST(fields []*ast.Field) *ast.Field {
 	return fields[0]
 }
 
-func (r *Resolver) orderByInput(table introspection.Table) *graphql.InputObject {
-	options := planner.OrderByOptions(table)
-	if len(options) == 0 {
+func (r *Resolver) orderByArgType(table introspection.Table) graphql.Input {
+	clauseInput := r.orderByClauseInput(table)
+	if clauseInput == nil {
 		return nil
 	}
+	return graphql.NewList(graphql.NewNonNull(clauseInput))
+}
 
-	typeName := introspection.GraphQLTypeName(table) + "OrderBy"
+func (r *Resolver) orderByClauseInput(table introspection.Table) *graphql.InputObject {
+	fields := planner.OrderByIndexedFields(table)
+	if len(fields) == 0 {
+		return nil
+	}
+	typeName := introspection.GraphQLTypeName(table) + "OrderByClauseInput"
 	r.mu.RLock()
-	cached, ok := r.orderByCache[typeName]
+	cached, ok := r.orderByClauseCache[typeName]
 	r.mu.RUnlock()
 	if ok {
 		return cached
 	}
 
-	fields := graphql.InputObjectConfigFieldMap{}
-	for _, name := range sortedOrderByFieldNames(options) {
-		fields[name] = &graphql.InputObjectFieldConfig{
-			Type: r.orderDirectionEnum(),
+	orderDirection := r.orderDirectionEnum()
+	clauseFields := graphql.InputObjectConfigFieldMap{}
+	for _, name := range sortedOrderByFieldNames(fields) {
+		clauseFields[name] = &graphql.InputObjectFieldConfig{
+			Type: orderDirection,
 		}
 	}
 
 	input := graphql.NewInputObject(graphql.InputObjectConfig{
 		Name:   typeName,
-		Fields: fields,
+		Fields: clauseFields,
 	})
 	r.mu.Lock()
-	if cached, ok := r.orderByCache[typeName]; ok {
+	if cached, ok := r.orderByClauseCache[typeName]; ok {
 		r.mu.Unlock()
 		return cached
 	}
-	r.orderByCache[typeName] = input
+	r.orderByClauseCache[typeName] = input
 	r.mu.Unlock()
 
 	return input
@@ -1086,6 +1107,32 @@ func (r *Resolver) orderDirectionEnum() *graphql.Enum {
 		r.orderDirection = enumValue
 	}
 	cached = r.orderDirection
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) orderByPolicyEnum() *graphql.Enum {
+	r.mu.RLock()
+	cached := r.orderByPolicy
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	enumValue := graphql.NewEnum(graphql.EnumConfig{
+		Name: "OrderByPolicy",
+		Values: graphql.EnumValueConfigMap{
+			string(planner.OrderByPolicyIndexPrefixOnly): &graphql.EnumValueConfig{Value: string(planner.OrderByPolicyIndexPrefixOnly)},
+			string(planner.OrderByPolicyAllowNonPrefix):  &graphql.EnumValueConfig{Value: string(planner.OrderByPolicyAllowNonPrefix)},
+		},
+	})
+
+	r.mu.Lock()
+	if r.orderByPolicy == nil {
+		r.orderByPolicy = enumValue
+	}
+	cached = r.orderByPolicy
 	r.mu.Unlock()
 
 	return cached
@@ -1604,7 +1651,7 @@ func encodeCursorFromRow(row map[string]interface{}, plan *planner.ConnectionPla
 		fieldName := introspection.GraphQLFieldName(col)
 		values[i] = row[fieldName]
 	}
-	return cursor.EncodeCursor(typeName, plan.OrderByKey, plan.OrderBy.Direction, values...)
+	return cursor.EncodeCursor(typeName, plan.OrderByKey, plan.OrderBy.Directions, values...)
 }
 
 func shouldBatchForwardConnection(args map[string]interface{}) bool {
@@ -2392,7 +2439,7 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 	return filterType
 }
 
-func sortedOrderByFieldNames(options map[string][]string) []string {
+func sortedOrderByFieldNames(options map[string]string) []string {
 	names := make([]string, 0, len(options))
 	for name := range options {
 		names = append(names, name)
@@ -2457,12 +2504,14 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	}
 	if orderBy == nil {
 		pkColNames := make([]string, len(pkCols))
+		pkDirections := make([]string, len(pkCols))
 		for i, col := range pkCols {
 			pkColNames[i] = col.Name
+			pkDirections[i] = "ASC"
 		}
 		orderBy = &planner.OrderBy{
-			Columns:   pkColNames,
-			Direction: "ASC",
+			Columns:    pkColNames,
+			Directions: pkDirections,
 		}
 	}
 
@@ -2688,12 +2737,14 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	}
 	if orderBy == nil {
 		pkColNames := make([]string, len(pkCols))
+		pkDirections := make([]string, len(pkCols))
 		for i, col := range pkCols {
 			pkColNames[i] = col.Name
+			pkDirections[i] = "ASC"
 		}
 		orderBy = &planner.OrderBy{
-			Columns:   pkColNames,
-			Direction: "ASC",
+			Columns:    pkColNames,
+			Directions: pkDirections,
 		}
 	}
 
@@ -2945,12 +2996,14 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	}
 	if orderBy == nil {
 		pkColNames := make([]string, len(pkCols))
+		pkDirections := make([]string, len(pkCols))
 		for i, col := range pkCols {
 			pkColNames[i] = col.Name
+			pkDirections[i] = "ASC"
 		}
 		orderBy = &planner.OrderBy{
-			Columns:   pkColNames,
-			Direction: "ASC",
+			Columns:    pkColNames,
+			Directions: pkDirections,
 		}
 	}
 
@@ -3392,7 +3445,7 @@ func orderByKey(orderBy *planner.OrderBy) string {
 	if orderBy == nil {
 		return ""
 	}
-	return strings.Join(orderBy.Columns, ",") + ":" + orderBy.Direction
+	return strings.Join(orderBy.Columns, ",") + ":" + strings.Join(orderBy.Directions, ",")
 }
 
 func aggregateColumnsKey(columns []planner.AggregateColumn) string {

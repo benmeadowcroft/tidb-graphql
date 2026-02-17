@@ -34,7 +34,7 @@ func testTable() introspection.Table {
 }
 
 func TestBuildSeekCondition_ASC(t *testing.T) {
-	cond := BuildSeekCondition([]string{"id"}, []interface{}{42}, "ASC")
+	cond := BuildSeekCondition([]string{"id"}, []interface{}{42}, []string{"ASC"})
 	sql, args, err := cond.ToSql()
 	if err != nil {
 		t.Fatalf("ToSql error: %v", err)
@@ -48,7 +48,7 @@ func TestBuildSeekCondition_ASC(t *testing.T) {
 }
 
 func TestBuildSeekCondition_DESC(t *testing.T) {
-	cond := BuildSeekCondition([]string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, "DESC")
+	cond := BuildSeekCondition([]string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, []string{"DESC", "DESC"})
 	sql, args, err := cond.ToSql()
 	if err != nil {
 		t.Fatalf("ToSql error: %v", err)
@@ -56,13 +56,13 @@ func TestBuildSeekCondition_DESC(t *testing.T) {
 	if !strings.Contains(sql, "<") {
 		t.Errorf("expected < operator for DESC, got: %s", sql)
 	}
-	if len(args) != 2 {
-		t.Errorf("expected 2 args, got %d", len(args))
+	if len(args) != 3 {
+		t.Errorf("expected 3 args for lexicographic seek, got %d", len(args))
 	}
 }
 
 func TestBuildSeekConditionQualified(t *testing.T) {
-	cond := BuildSeekConditionQualified("users", []string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, "ASC")
+	cond := BuildSeekConditionQualified("users", []string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, []string{"ASC", "ASC"})
 	sql, args, err := cond.ToSql()
 	if err != nil {
 		t.Fatalf("ToSql error: %v", err)
@@ -70,8 +70,8 @@ func TestBuildSeekConditionQualified(t *testing.T) {
 	if !strings.Contains(sql, "`users`.`created_at`") || !strings.Contains(sql, "`users`.`id`") {
 		t.Errorf("expected qualified columns in SQL, got: %s", sql)
 	}
-	if len(args) != 2 {
-		t.Errorf("expected 2 args, got %d", len(args))
+	if len(args) != 3 {
+		t.Errorf("expected 3 args for lexicographic seek, got %d", len(args))
 	}
 }
 
@@ -180,8 +180,8 @@ func TestParseConnectionOrderBy_DefaultPK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if orderBy.Direction != "ASC" {
-		t.Errorf("expected ASC, got %s", orderBy.Direction)
+	if len(orderBy.Directions) != 1 || orderBy.Directions[0] != "ASC" {
+		t.Errorf("expected [ASC], got %v", orderBy.Directions)
 	}
 	if len(orderBy.Columns) != 1 || orderBy.Columns[0] != "id" {
 		t.Errorf("expected [id], got %v", orderBy.Columns)
@@ -193,8 +193,9 @@ func TestParseConnectionOrderBy_ExplicitIndexed(t *testing.T) {
 	pkCols := introspection.PrimaryKeyColumns(table)
 
 	args := map[string]interface{}{
-		"orderBy": map[string]interface{}{
-			"createdAt_databaseId": "DESC",
+		"orderBy": []interface{}{
+			map[string]interface{}{"createdAt": "DESC"},
+			map[string]interface{}{"databaseId": "ASC"},
 		},
 	}
 
@@ -202,8 +203,8 @@ func TestParseConnectionOrderBy_ExplicitIndexed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if orderBy.Direction != "DESC" {
-		t.Errorf("expected DESC, got %s", orderBy.Direction)
+	if len(orderBy.Directions) != 2 || orderBy.Directions[0] != "DESC" || orderBy.Directions[1] != "ASC" {
+		t.Errorf("expected [DESC ASC], got %v", orderBy.Directions)
 	}
 	if len(orderBy.Columns) < 2 {
 		t.Errorf("expected at least 2 columns, got %v", orderBy.Columns)
@@ -213,8 +214,8 @@ func TestParseConnectionOrderBy_ExplicitIndexed(t *testing.T) {
 func TestCursorColumns(t *testing.T) {
 	table := testTable()
 	orderBy := &OrderBy{
-		Columns:   []string{"created_at", "id"},
-		Direction: "ASC",
+		Columns:    []string{"created_at", "id"},
+		Directions: []string{"ASC", "ASC"},
 	}
 	cols := CursorColumns(table, orderBy)
 	if len(cols) != 2 {
@@ -232,8 +233,8 @@ func TestBuildConnectionSQL(t *testing.T) {
 	table := testTable()
 	columns := table.Columns
 	orderBy := &OrderBy{
-		Columns:   []string{"id"},
-		Direction: "ASC",
+		Columns:    []string{"id"},
+		Directions: []string{"ASC"},
 	}
 
 	result, err := buildConnectionSQL(table, columns, nil, nil, orderBy, 26)
@@ -326,8 +327,8 @@ func TestPlanConnection_BackwardLast(t *testing.T) {
 	if plan.First != 2 {
 		t.Fatalf("expected page size 2, got %d", plan.First)
 	}
-	if plan.OrderBy.Direction != "ASC" {
-		t.Fatalf("expected canonical order ASC, got %s", plan.OrderBy.Direction)
+	if len(plan.OrderBy.Directions) != 1 || plan.OrderBy.Directions[0] != "ASC" {
+		t.Fatalf("expected canonical directions [ASC], got %v", plan.OrderBy.Directions)
 	}
 	if !strings.Contains(plan.Root.SQL, "ORDER BY `id` DESC") {
 		t.Fatalf("expected DESC traversal SQL, got: %s", plan.Root.SQL)
@@ -357,7 +358,7 @@ func TestPlanConnection_BeforeCursorBackwardSeek(t *testing.T) {
 			},
 		},
 	}
-	before := cursor.EncodeCursor("User", "databaseId", "ASC", 5)
+	before := cursor.EncodeCursor("User", "databaseId", []string{"ASC"}, 5)
 	plan, err := PlanConnection(schema, table, field, map[string]interface{}{
 		"last":   1,
 		"before": before,

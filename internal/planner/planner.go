@@ -491,7 +491,11 @@ func orderByClauses(orderBy *OrderBy) []string {
 	}
 	clauses := make([]string, len(orderBy.Columns))
 	for i, col := range orderBy.Columns {
-		clauses[i] = fmt.Sprintf("%s %s", sqlutil.QuoteIdentifier(col), orderBy.Direction)
+		direction := "ASC"
+		if i < len(orderBy.Directions) && strings.EqualFold(orderBy.Directions[i], "DESC") {
+			direction = "DESC"
+		}
+		clauses[i] = fmt.Sprintf("%s %s", sqlutil.QuoteIdentifier(col), direction)
 	}
 	return clauses
 }

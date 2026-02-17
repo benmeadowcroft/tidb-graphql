@@ -12,40 +12,40 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 		name       string
 		typeName   string
 		orderByKey string
-		direction  string
+		directions []string
 		values     []interface{}
 	}{
 		{
 			name:       "single int PK",
 			typeName:   "User",
 			orderByKey: "databaseId",
-			direction:  "ASC",
+			directions: []string{"ASC"},
 			values:     []interface{}{int64(42)},
 		},
 		{
 			name:       "multi-column cursor",
 			typeName:   "Post",
 			orderByKey: "createdAt_databaseId",
-			direction:  "DESC",
+			directions: []string{"DESC", "ASC"},
 			values:     []interface{}{"2024-01-15T10:30:00Z", int64(7)},
 		},
 		{
 			name:       "string value",
 			typeName:   "User",
 			orderByKey: "name",
-			direction:  "ASC",
+			directions: []string{"ASC"},
 			values:     []interface{}{"Alice"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			encoded := EncodeCursor(tt.typeName, tt.orderByKey, tt.direction, tt.values...)
+			encoded := EncodeCursor(tt.typeName, tt.orderByKey, tt.directions, tt.values...)
 			if encoded == "" {
 				t.Fatal("EncodeCursor returned empty string")
 			}
 
-			gotType, gotKey, gotDir, gotValues, err := DecodeCursor(encoded)
+			gotType, gotKey, gotDirs, gotValues, err := DecodeCursor(encoded)
 			if err != nil {
 				t.Fatalf("DecodeCursor error: %v", err)
 			}
@@ -55,8 +55,13 @@ func TestEncodeDecode_Roundtrip(t *testing.T) {
 			if gotKey != tt.orderByKey {
 				t.Errorf("orderByKey: got %q, want %q", gotKey, tt.orderByKey)
 			}
-			if gotDir != tt.direction {
-				t.Errorf("direction: got %q, want %q", gotDir, tt.direction)
+			if len(gotDirs) != len(tt.directions) {
+				t.Fatalf("directions count: got %d, want %d", len(gotDirs), len(tt.directions))
+			}
+			for i := range tt.directions {
+				if gotDirs[i] != tt.directions[i] {
+					t.Errorf("direction[%d]: got %q, want %q", i, gotDirs[i], tt.directions[i])
+				}
 			}
 			if len(gotValues) != len(tt.values) {
 				t.Fatalf("values count: got %d, want %d", len(gotValues), len(tt.values))
@@ -71,9 +76,8 @@ func TestDecodeCursor_Errors(t *testing.T) {
 		input string
 	}{
 		{"invalid base64", "not-valid-base64!!!"},
-		{"invalid json", "bm90LWpzb24="},                           // "not-json"
-		{"too few elements", "WyJVc2VyIiwiQVNDIl0="},               // ["User","ASC"]
-		{"three elements", "WyJVc2VyIiwiaWQiLCJBU0MiXQ=="},         // ["User","id","ASC"]
+		{"invalid json", "bm90LWpzb24="},                            // "not-json"
+		{"legacy array format", "WyJVc2VyIiwiaWQiLCJBU0MiLCIxIl0="}, // ["User","id","ASC","1"]
 	}
 
 	for _, tt := range tests {
@@ -88,22 +92,22 @@ func TestDecodeCursor_Errors(t *testing.T) {
 
 func TestValidateCursor(t *testing.T) {
 	// matching
-	if err := ValidateCursor("User", "databaseId", "ASC", "User", "databaseId", "ASC"); err != nil {
+	if err := ValidateCursor("User", "databaseId", []string{"ASC"}, "User", "databaseId", []string{"ASC"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	// type mismatch
-	if err := ValidateCursor("User", "databaseId", "ASC", "Post", "databaseId", "ASC"); err == nil {
+	if err := ValidateCursor("User", "databaseId", []string{"ASC"}, "Post", "databaseId", []string{"ASC"}); err == nil {
 		t.Fatal("expected type mismatch error")
 	}
 
 	// orderBy mismatch
-	if err := ValidateCursor("User", "databaseId", "ASC", "User", "name", "ASC"); err == nil {
+	if err := ValidateCursor("User", "databaseId", []string{"ASC"}, "User", "name", []string{"ASC"}); err == nil {
 		t.Fatal("expected orderBy mismatch error")
 	}
 
 	// direction mismatch
-	if err := ValidateCursor("User", "databaseId", "ASC", "User", "databaseId", "DESC"); err == nil {
+	if err := ValidateCursor("User", "databaseId", []string{"ASC"}, "User", "databaseId", []string{"DESC"}); err == nil {
 		t.Fatal("expected direction mismatch error")
 	}
 }

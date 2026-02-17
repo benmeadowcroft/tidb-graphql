@@ -112,14 +112,22 @@ If you use `where`, at least one referenced column must be indexed. This is a gu
 
 ## orderBy rules
 
-- `orderBy` is a single-field input object with direction `ASC` or `DESC`.
-- Allowed fields come from indexed column prefixes.
+- `orderBy` is a list of single-field clauses: `[{ createdAt: DESC }, { databaseId: ASC }]`.
+- `orderByPolicy` controls prefix validation for explicit clauses:
+  - `INDEX_PREFIX_ONLY` (default): explicit clauses must match an indexed left-prefix.
+  - `ALLOW_NON_PREFIX`: allows non-prefix ordering for currently exposed indexed fields.
+- Each clause must contain exactly one field.
+- Duplicate fields across clauses are rejected.
+- Missing primary key columns are appended internally as deterministic ASC tie-breakers.
+- Mixed clause directions are supported, but can require additional sorting depending on optimizer/index behavior.
+- Legacy `orderBy: { field: DIR }` syntax is not supported.
+- Cursors created before this format change are not compatible with the v2 cursor format.
 
 Example:
 
 ```graphql
 {
-  users(orderBy: { createdAt: DESC }) {
+  users(orderByPolicy: ALLOW_NON_PREFIX, orderBy: [{ createdAt: DESC }]) {
     nodes {
       id
       createdAt

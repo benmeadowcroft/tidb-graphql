@@ -27,7 +27,7 @@ func TestSetFiltering_Has(t *testing.T) {
 	schema := buildGraphQLSchema(t, testDB)
 	query := `
 		{
-			products(where: { tags: { has: FEATURED } }, orderBy: { databaseId: ASC }) {
+			products(where: { tags: { has: FEATURED } }, orderBy: [{ databaseId: ASC }]) {
 				nodes {
 					name
 					tags
@@ -61,7 +61,7 @@ func TestSetFiltering_HasAnyAllNoneOf(t *testing.T) {
 
 	queryAny := `
 		{
-			products(where: { tags: { hasAnyOf: [FEATURED, LIMITED] } }, orderBy: { databaseId: ASC }) {
+			products(where: { tags: { hasAnyOf: [FEATURED, LIMITED] } }, orderBy: [{ databaseId: ASC }]) {
 				nodes {
 					name
 				}
@@ -90,7 +90,7 @@ func TestSetFiltering_HasAnyAllNoneOf(t *testing.T) {
 
 	queryNone := `
 		{
-			products(where: { tags: { hasNoneOf: [FEATURED, CLEARANCE] } }, orderBy: { databaseId: ASC }) {
+			products(where: { tags: { hasNoneOf: [FEATURED, CLEARANCE] } }, orderBy: [{ databaseId: ASC }]) {
 				nodes {
 					name
 				}
@@ -138,7 +138,7 @@ func TestSetFiltering_ExactEqAndNe(t *testing.T) {
 
 	queryNe := `
 		{
-			products(where: { tags: { ne: [FEATURED, NEW] } }, orderBy: { databaseId: ASC }) {
+			products(where: { tags: { ne: [FEATURED, NEW] } }, orderBy: [{ databaseId: ASC }]) {
 				nodes {
 					name
 				}

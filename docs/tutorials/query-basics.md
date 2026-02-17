@@ -61,11 +61,11 @@ You can combine filters with `and` / `or`, and compare with `lt`, `lte`, `gt`, `
 
 ## 4) Sort results with orderBy
 
-Sorting uses `orderBy` with a list of fields and directions:
+Sorting uses `orderBy` with a list of single-field clauses:
 
 ```graphql
 query {
-  users(orderBy:{createdAt:DESC}) {
+  users(orderBy: [{ createdAt: DESC }]) {
     nodes {
       fullName
       email
@@ -75,6 +75,8 @@ query {
 }
 ```
 
+If needed, you can relax index prefix enforcement for explicit sort clauses with `orderByPolicy: ALLOW_NON_PREFIX`.
+
 ## 5) Cursor pagination of results
 
 TiDB GraphQL uses cursor pagination on collection fields.
@@ -83,7 +85,7 @@ For example, returning the first 2 results:
 
 ```graphql
 query {
-  users(orderBy:{createdAt:DESC}, first:2) {
+  users(orderBy: [{ createdAt: DESC }], first:2) {
     edges {
       cursor
       node {
@@ -104,7 +106,7 @@ Next, returning the next 2 results using the previous `endCursor`:
 
 ```graphql
 query {
-  users(orderBy:{createdAt:DESC}, first:2, after:"<cursor-from-previous-page>") {
+  users(orderBy: [{ createdAt: DESC }], first:2, after:"<cursor-from-previous-page>") {
     edges {
       node {
         fullName
@@ -166,7 +168,7 @@ Step A: fetch a few tuples and copy one `orderId` + `productId` pair:
 
 ```graphql
 query {
-  orderItems(first: 5, orderBy: { orderId: ASC }) {
+  orderItems(first: 5, orderBy: [{ orderId: ASC }]) {
     nodes {
       id
       orderId

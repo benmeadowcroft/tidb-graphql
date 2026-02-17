@@ -36,7 +36,7 @@ func TestOrderByIndexedPrefix(t *testing.T) {
 
 	query := `
 		{
-			posts(orderBy: { userId_createdAt: ASC }, first: 10) {
+			posts(orderBy: [{ userId: ASC }, { createdAt: ASC }], first: 10) {
 				nodes {
 					databaseId
 				}
@@ -73,7 +73,7 @@ func TestOrderByNonLeftmostRejected(t *testing.T) {
 
 	query := `
 		{
-			posts(orderBy: { createdAt: ASC }, first: 10) {
+			posts(orderBy: [{ createdAt: ASC }], first: 10) {
 				nodes {
 					id
 				}
@@ -86,4 +86,78 @@ func TestOrderByNonLeftmostRejected(t *testing.T) {
 		Context:       context.Background(),
 	})
 	require.NotEmpty(t, result.Errors)
+}
+
+func TestOrderByNonLeftmostAllowedWithPolicy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/simple_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/simple_seed.sql")
+
+	schema := buildGraphQLSchema(t, testDB)
+
+	query := `
+		{
+			posts(orderByPolicy: ALLOW_NON_PREFIX, orderBy: [{ createdAt: ASC }], first: 10) {
+				nodes {
+					id
+				}
+			}
+		}
+	`
+	result := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: query,
+		Context:       context.Background(),
+	})
+	require.Empty(t, result.Errors)
+	require.Len(t, requireCollectionNodes(t, result.Data.(map[string]interface{}), "posts"), 4)
+}
+
+func TestOrderByPolicy_TogglesNonPrefixValidation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/simple_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/simple_seed.sql")
+
+	schema := buildGraphQLSchema(t, testDB)
+
+	withoutPolicy := `
+		{
+			posts(orderBy: [{ createdAt: ASC }], first: 10) {
+				nodes {
+					id
+				}
+			}
+		}
+	`
+	withoutPolicyResult := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: withoutPolicy,
+		Context:       context.Background(),
+	})
+	require.NotEmpty(t, withoutPolicyResult.Errors, "non-prefix orderBy should fail without orderByPolicy override")
+
+	withPolicy := `
+		{
+			posts(orderByPolicy: ALLOW_NON_PREFIX, orderBy: [{ createdAt: ASC }], first: 10) {
+				nodes {
+					id
+				}
+			}
+		}
+	`
+	withPolicyResult := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: withPolicy,
+		Context:       context.Background(),
+	})
+	require.Empty(t, withPolicyResult.Errors, "same non-prefix orderBy should succeed with ALLOW_NON_PREFIX")
+	require.Len(t, requireCollectionNodes(t, withPolicyResult.Data.(map[string]interface{}), "posts"), 4)
 }

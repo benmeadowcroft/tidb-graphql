@@ -106,7 +106,7 @@ func TestPlanAggregate(t *testing.T) {
 		limit := 10
 		offset := 5
 		filters := &AggregateFilters{
-			OrderBy: &OrderBy{Columns: []string{"salary"}, Direction: "DESC"},
+			OrderBy: &OrderBy{Columns: []string{"salary"}, Directions: []string{"DESC"}},
 			Limit:   &limit,
 			Offset:  &offset,
 		}

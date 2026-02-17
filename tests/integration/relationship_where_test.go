@@ -214,3 +214,41 @@ func TestRelationshipWhere_SingleHopEnforcedBySchema(t *testing.T) {
 	})
 	require.NotEmpty(t, result.Errors)
 }
+
+func TestRelationshipWhere_ManyToOneConnectionSelectionWithoutFKField(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/simple_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/simple_seed.sql")
+
+	schema := buildGraphQLSchema(t, testDB)
+
+	query := `
+		{
+			posts(first: 4, orderBy: [{ databaseId: ASC }]) {
+				nodes {
+					databaseId
+					user {
+						username
+					}
+				}
+			}
+		}
+	`
+	result := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: query,
+		Context:       context.Background(),
+	})
+	require.Empty(t, result.Errors)
+
+	posts := requireCollectionNodes(t, result.Data.(map[string]interface{}), "posts")
+	require.Len(t, posts, 4)
+	assert.Equal(t, "alice", posts[0].(map[string]interface{})["user"].(map[string]interface{})["username"])
+	assert.Equal(t, "alice", posts[1].(map[string]interface{})["user"].(map[string]interface{})["username"])
+	assert.Equal(t, "bob", posts[2].(map[string]interface{})["user"].(map[string]interface{})["username"])
+	assert.Equal(t, "charlie", posts[3].(map[string]interface{})["user"].(map[string]interface{})["username"])
+}

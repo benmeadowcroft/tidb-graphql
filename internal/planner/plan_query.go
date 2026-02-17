@@ -396,6 +396,8 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 // field's selection set. Connection fields wrap actual columns inside nodes { ... }
 // and/or edges { node { ... } }, so we traverse into those sub-selections.
 // OrderBy and PK columns are always included to ensure cursor generation works.
+// Relationship local key columns are also included so nested relationship resolvers
+// can resolve child objects without requiring clients to explicitly select FK fields.
 func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, fragments map[string]ast.Definition, orderBy *OrderBy) []introspection.Column {
 	if field == nil || field.SelectionSet == nil {
 		return EnsureColumns(table, table.Columns, orderBy.Columns)
@@ -405,6 +407,13 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 	columnByField := make(map[string]string, len(table.Columns))
 	for _, col := range table.Columns {
 		columnByField[introspection.GraphQLFieldName(col)] = col.Name
+	}
+	// Keep relationship local columns available in connection row payloads.
+	// Without this, nested many-to-one fields can appear as null when the FK
+	// column was not explicitly selected by the client.
+	relationshipByField := make(map[string][]string, len(table.Relationships))
+	for _, rel := range table.Relationships {
+		relationshipByField[rel.GraphQLFieldName] = rel.EffectiveLocalColumns()
 	}
 
 	selected := make(map[string]struct{})
@@ -420,7 +429,7 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 				}
 				switch sel.Name.Value {
 				case "nodes", "node":
-					collectColumnFields(sel, columnByField, selected, fragments)
+					collectColumnFields(sel, columnByField, relationshipByField, selected, fragments)
 				case "edges":
 					if sel.SelectionSet != nil {
 						visitConnectionSelections(sel.SelectionSet.Selections)
@@ -489,7 +498,13 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 }
 
 // collectColumnFields extracts column names from a field's selection set.
-func collectColumnFields(field *ast.Field, columnByField map[string]string, selected map[string]struct{}, fragments map[string]ast.Definition) {
+func collectColumnFields(
+	field *ast.Field,
+	columnByField map[string]string,
+	relationshipByField map[string][]string,
+	selected map[string]struct{},
+	fragments map[string]ast.Definition,
+) {
 	if field == nil || field.SelectionSet == nil {
 		return
 	}
@@ -504,6 +519,12 @@ func collectColumnFields(field *ast.Field, columnByField map[string]string, sele
 				}
 				if colName, ok := columnByField[s.Name.Value]; ok {
 					selected[colName] = struct{}{}
+				}
+				// Relationship field selection implies we need local join keys as well.
+				if relCols, ok := relationshipByField[s.Name.Value]; ok {
+					for _, relCol := range relCols {
+						selected[relCol] = struct{}{}
+					}
 				}
 			case *ast.InlineFragment:
 				if s.SelectionSet != nil {

@@ -49,6 +49,10 @@ Example:
 }
 ```
 
+Boolean migration note:
+- `tinyint(1)` columns are exposed as GraphQL `Boolean`.
+- Use boolean literals in filters (`eq: true` / `eq: false`), not numeric values (`1` / `0`).
+
 Bytes example:
 
 ```graphql
@@ -109,17 +113,73 @@ Empty-list semantics for set operators:
 ## Indexed column requirement
 
 If you use `where`, at least one referenced column must be indexed. This is a guardrail to prevent unbounded scans. The error message lists available indexed columns.
+For relationship-aware filters, this validation is applied per referenced table path.
+
+## Relationship operators
+
+Relationship fields in `where` support single-hop traversal:
+
+- To-many relationships: `some`, `none`
+- To-one relationships: `is`, `isNull`
+
+Examples:
+
+```graphql
+{
+  users(where: { posts: { some: { published: { eq: true } } } }) {
+    nodes {
+      id
+      username
+    }
+  }
+}
+```
+
+```graphql
+{
+  posts(where: { user: { is: { username: { eq: "alice" } } } }) {
+    nodes {
+      id
+      title
+    }
+  }
+}
+```
+
+```graphql
+{
+  posts(where: { user: { isNull: true } }) {
+    nodes {
+      id
+    }
+  }
+}
+```
+
+Notes:
+
+- `isNull: true` compiles to `NOT EXISTS`; `isNull: false` compiles to `EXISTS`.
+- `is` and `isNull` cannot be used together in the same relationship block.
+- Single-hop only in this phase: nested relationship traversal inside relationship filters is not supported.
 
 ## orderBy rules
 
-- `orderBy` is a single-field input object with direction `ASC` or `DESC`.
-- Allowed fields come from indexed column prefixes.
+- `orderBy` is a list of single-field clauses: `[{ createdAt: DESC }, { databaseId: ASC }]`.
+- `orderByPolicy` controls prefix validation for explicit clauses:
+  - `INDEX_PREFIX_ONLY` (default): explicit clauses must match an indexed left-prefix.
+  - `ALLOW_NON_PREFIX`: allows non-prefix ordering for currently exposed indexed fields.
+- Each clause must contain exactly one field.
+- Duplicate fields across clauses are rejected.
+- Missing primary key columns are appended internally as deterministic ASC tie-breakers.
+- Mixed clause directions are supported, but can require additional sorting depending on optimizer/index behavior.
+- Legacy `orderBy: { field: DIR }` syntax is not supported.
+- Cursors created before this format change are not compatible with the v2 cursor format.
 
 Example:
 
 ```graphql
 {
-  users(orderBy: { createdAt: DESC }) {
+  users(orderByPolicy: ALLOW_NON_PREFIX, orderBy: [{ createdAt: DESC }]) {
     nodes {
       id
       createdAt

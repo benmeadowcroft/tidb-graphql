@@ -52,20 +52,31 @@ type ForeignKey struct {
 	ReferencedTable  string // e.g., "volumes"
 	ReferencedColumn string // e.g., "id"
 	ConstraintName   string // e.g., "books_ibfk_1"
+	OrdinalPosition  int    // Column position within the FK constraint
 }
 
 // Relationship represents either direction of a FK relationship
 type Relationship struct {
-	IsManyToOne      bool
-	IsOneToMany      bool
-	IsManyToMany     bool   // Direct M2M through pure junction (junction hidden)
-	IsEdgeList       bool   // M2M through attribute junction (edge type visible)
-	LocalColumn      string // For many-to-one: FK column; for one-to-many: PK column; for M2M: PK column
-	RemoteTable      string // The related table name (for M2M: the other entity table, not junction)
-	RemoteColumn     string // For many-to-one: referenced column; for one-to-many: FK column in remote table; for M2M: PK column in remote table
-	JunctionTable    string // For M2M relationships: the intermediate junction table name
-	JunctionLocalFK  string // For M2M: FK column in junction pointing to this table
-	JunctionRemoteFK string // For M2M: FK column in junction pointing to remote table
+	IsManyToOne  bool
+	IsOneToMany  bool
+	IsManyToMany bool // Direct M2M through pure junction (junction hidden)
+	IsEdgeList   bool // M2M through attribute junction (edge type visible)
+	// LocalColumns/RemoteColumns are ordered positional mappings between local and remote keys.
+	// Single-column compatibility fields are retained and populated from index 0.
+	LocalColumns  []string // For many-to-one: FK columns; for one-to-many: referenced key columns on local table
+	RemoteTable   string   // The related table name (for M2M: the other entity table, not junction)
+	RemoteColumns []string // For many-to-one: referenced columns; for one-to-many: FK columns in remote table
+	// Deprecated compatibility fields for single-column code paths.
+	LocalColumn  string
+	RemoteColumn string
+	// Junction key mappings are positional: JunctionLocalFKColumns[i] joins to LocalColumns[i],
+	// JunctionRemoteFKColumns[i] joins to RemoteColumns[i].
+	JunctionTable           string   // For M2M relationships: the intermediate junction table name
+	JunctionLocalFKColumns  []string // For M2M/Edge: FK columns in junction pointing to this table
+	JunctionRemoteFKColumns []string // For M2M/Edge: FK columns in junction pointing to remote table
+	// Deprecated compatibility fields for single-column code paths.
+	JunctionLocalFK  string
+	JunctionRemoteFK string
 	GraphQLFieldName string // e.g., "volume" or "books" or "departmentEmployees"
 }
 
@@ -83,9 +94,13 @@ const (
 
 // JunctionFKInfo contains foreign key details for a junction relationship.
 type JunctionFKInfo struct {
-	ColumnName       string // FK column in junction table
-	ReferencedTable  string // Target table
-	ReferencedColumn string // Target column
+	ConstraintName    string   // FK constraint name
+	ColumnNames       []string // FK columns in junction table (ordered)
+	ReferencedTable   string   // Target table
+	ReferencedColumns []string // Target columns (ordered)
+	// Deprecated compatibility fields for single-column paths.
+	ColumnName       string
+	ReferencedColumn string
 }
 
 // JunctionConfig contains configuration for a single junction table.
@@ -514,12 +529,13 @@ func getForeignKeys(ctx context.Context, db Queryer, databaseName, tableName str
 			COLUMN_NAME,
 			REFERENCED_TABLE_NAME,
 			REFERENCED_COLUMN_NAME,
-			CONSTRAINT_NAME
+			CONSTRAINT_NAME,
+			ORDINAL_POSITION
 		FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
 		WHERE TABLE_SCHEMA = ?
 			AND TABLE_NAME = ?
 			AND REFERENCED_TABLE_NAME IS NOT NULL
-		ORDER BY ORDINAL_POSITION
+		ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
 	`
 
 	rows, err := db.QueryContext(ctx, query, databaseName, tableName)
@@ -535,7 +551,7 @@ func getForeignKeys(ctx context.Context, db Queryer, databaseName, tableName str
 	for rows.Next() {
 		var fk ForeignKey
 		if err := rows.Scan(&fk.ColumnName, &fk.ReferencedTable,
-			&fk.ReferencedColumn, &fk.ConstraintName); err != nil {
+			&fk.ReferencedColumn, &fk.ConstraintName, &fk.OrdinalPosition); err != nil {
 			recordSpanError(span, err)
 			return nil, err
 		}
@@ -627,15 +643,42 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 		junctionTypes[tableName] = jc.Type
 	}
 
+	// Emit each unsupported composite warning once per schema build.
+	warnedComposite := make(map[string]struct{})
+	warnCompositeSkip := func(kind, tableName, constraintName string, localCols []string, remoteTable string, remoteCols []string, reason string) {
+		key := strings.Join([]string{
+			kind,
+			tableName,
+			constraintName,
+			strings.Join(localCols, ","),
+			remoteTable,
+			strings.Join(remoteCols, ","),
+			reason,
+		}, "|")
+		if _, seen := warnedComposite[key]; seen {
+			return
+		}
+		warnedComposite[key] = struct{}{}
+		slog.Default().Warn("skipping unsupported composite relationship mapping",
+			"kind", kind,
+			"table", tableName,
+			"constraint", constraintName,
+			"local_columns", localCols,
+			"remote_table", remoteTable,
+			"remote_columns", remoteCols,
+			"reason", reason,
+		)
+	}
+
 	// Count FKs per (source_table, target_table) pair to determine naming strategy
-	// When multiple FKs from the same table point to the same target, we need
-	// to use FK column names to disambiguate
+	// When multiple FK constraints from the same table point to the same target,
+	// we need to use FK column names to disambiguate.
 	fkCount := make(map[string]map[string]int) // source → target → count
 	for _, table := range schema.Tables {
 		if table.IsView {
 			continue
 		}
-		for _, fk := range table.ForeignKeys {
+		for _, fk := range ForeignKeyConstraints(table) {
 			if fkCount[table.Name] == nil {
 				fkCount[table.Name] = make(map[string]int)
 			}
@@ -659,18 +702,26 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			continue
 		}
 
-		for _, fk := range table.ForeignKeys {
+		for _, fk := range ForeignKeyConstraints(*table) {
+			if len(fk.ColumnNames) == 0 || len(fk.ColumnNames) != len(fk.ReferencedColumns) {
+				warnCompositeSkip("many_to_one", table.Name, fk.ConstraintName, fk.ColumnNames, fk.ReferencedTable, fk.ReferencedColumns, "invalid_foreign_key_mapping")
+				continue
+			}
 			fieldName := ""
 			if jType == JunctionTypeAttribute {
 				fieldName = namer.JunctionEdgeRefFieldName(fk.ReferencedTable)
 			} else {
-				fieldName = namer.ManyToOneFieldName(fk.ColumnName)
+				fieldName = namer.ManyToOneFieldName(fk.ColumnNames[0])
 			}
+			localColumns := append([]string(nil), fk.ColumnNames...)
+			remoteColumns := append([]string(nil), fk.ReferencedColumns...)
 			rel := Relationship{
 				IsManyToOne:      true,
-				LocalColumn:      fk.ColumnName,
+				LocalColumns:     localColumns,
 				RemoteTable:      fk.ReferencedTable,
-				RemoteColumn:     fk.ReferencedColumn,
+				RemoteColumns:    remoteColumns,
+				LocalColumn:      firstColumnOrEmpty(localColumns),
+				RemoteColumn:     firstColumnOrEmpty(remoteColumns),
 				GraphQLFieldName: fieldName,
 			}
 			table.Relationships = append(table.Relationships, rel)
@@ -699,15 +750,21 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				continue
 			}
 
-			for _, fk := range otherTable.ForeignKeys {
+			for _, fk := range ForeignKeyConstraints(*otherTable) {
 				if fk.ReferencedTable == table.Name {
+					if len(fk.ColumnNames) != 1 || len(fk.ReferencedColumns) != 1 {
+						warnCompositeSkip("one_to_many", otherTable.Name, fk.ConstraintName, fk.ColumnNames, table.Name, fk.ReferencedColumns, "composite_one_to_many_not_supported_in_phase")
+						continue
+					}
 					isOnlyFK := fkCount[otherTable.Name][table.Name] == 1
 					rel := Relationship{
 						IsOneToMany:      true,
-						LocalColumn:      fk.ReferencedColumn, // Usually PK
+						LocalColumns:     append([]string(nil), fk.ReferencedColumns...),
 						RemoteTable:      otherTable.Name,
-						RemoteColumn:     fk.ColumnName,
-						GraphQLFieldName: namer.OneToManyFieldName(otherTable.Name, fk.ColumnName, isOnlyFK),
+						RemoteColumns:    append([]string(nil), fk.ColumnNames...),
+						LocalColumn:      fk.ReferencedColumns[0], // compatibility
+						RemoteColumn:     fk.ColumnNames[0],       // compatibility
+						GraphQLFieldName: namer.OneToManyFieldName(otherTable.Name, fk.ColumnNames[0], isOnlyFK),
 					}
 					table.Relationships = append(table.Relationships, rel)
 				}
@@ -728,81 +785,101 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			continue
 		}
 
-		// Get primary key columns for both tables
-		leftPK := getPKColumn(leftTable)
-		rightPK := getPKColumn(rightTable)
-		if leftPK == "" || rightPK == "" {
+		// M2M/Edge mappings require full key-column alignment across endpoints and junction FKs.
+		leftPKCols := PrimaryKeyColumns(*leftTable)
+		rightPKCols := PrimaryKeyColumns(*rightTable)
+		if len(leftPKCols) == 0 || len(rightPKCols) == 0 {
 			continue
 		}
+		leftPKNames := columnNamesFromColumns(leftPKCols)
+		rightPKNames := columnNamesFromColumns(rightPKCols)
+		leftJunctionCols := jc.LeftFK.EffectiveColumnNames()
+		rightJunctionCols := jc.RightFK.EffectiveColumnNames()
 
 		switch jc.Type {
 		case JunctionTypePure:
+			if len(leftPKNames) != len(leftJunctionCols) || len(rightPKNames) != len(rightJunctionCols) {
+				warnCompositeSkip("many_to_many", jc.Table, jc.LeftFK.ConstraintName, leftJunctionCols, jc.LeftFK.ReferencedTable, leftPKNames, "left_mapping_key_count_mismatch")
+				warnCompositeSkip("many_to_many", jc.Table, jc.RightFK.ConstraintName, rightJunctionCols, jc.RightFK.ReferencedTable, rightPKNames, "right_mapping_key_count_mismatch")
+				continue
+			}
 			// Pure junction: create direct M2M fields, hide junction table
 			// Add M2M from left to right
 			leftFieldName := namer.JunctionFieldName(jc.Table, leftTable.Name, rightTable.Name, rightTable.Name, false)
 			rightFieldName := namer.JunctionFieldName(jc.Table, leftTable.Name, rightTable.Name, leftTable.Name, false)
 			leftTable.Relationships = append(leftTable.Relationships, Relationship{
-				IsManyToMany:     true,
-				LocalColumn:      leftPK,
-				RemoteTable:      rightTable.Name,
-				RemoteColumn:     rightPK,
-				JunctionTable:    jc.Table,
-				JunctionLocalFK:  jc.LeftFK.ColumnName,
-				JunctionRemoteFK: jc.RightFK.ColumnName,
-				GraphQLFieldName: leftFieldName,
+				IsManyToMany:            true,
+				LocalColumns:            append([]string(nil), leftPKNames...),
+				RemoteTable:             rightTable.Name,
+				RemoteColumns:           append([]string(nil), rightPKNames...),
+				LocalColumn:             firstColumnOrEmpty(leftPKNames),
+				RemoteColumn:            firstColumnOrEmpty(rightPKNames),
+				JunctionTable:           jc.Table,
+				JunctionLocalFKColumns:  append([]string(nil), leftJunctionCols...),
+				JunctionRemoteFKColumns: append([]string(nil), rightJunctionCols...),
+				JunctionLocalFK:         firstColumnOrEmpty(leftJunctionCols),
+				JunctionRemoteFK:        firstColumnOrEmpty(rightJunctionCols),
+				GraphQLFieldName:        leftFieldName,
 			})
 			// Add M2M from right to left
 			rightTable.Relationships = append(rightTable.Relationships, Relationship{
-				IsManyToMany:     true,
-				LocalColumn:      rightPK,
-				RemoteTable:      leftTable.Name,
-				RemoteColumn:     leftPK,
-				JunctionTable:    jc.Table,
-				JunctionLocalFK:  jc.RightFK.ColumnName,
-				JunctionRemoteFK: jc.LeftFK.ColumnName,
-				GraphQLFieldName: rightFieldName,
+				IsManyToMany:            true,
+				LocalColumns:            append([]string(nil), rightPKNames...),
+				RemoteTable:             leftTable.Name,
+				RemoteColumns:           append([]string(nil), leftPKNames...),
+				LocalColumn:             firstColumnOrEmpty(rightPKNames),
+				RemoteColumn:            firstColumnOrEmpty(leftPKNames),
+				JunctionTable:           jc.Table,
+				JunctionLocalFKColumns:  append([]string(nil), rightJunctionCols...),
+				JunctionRemoteFKColumns: append([]string(nil), leftJunctionCols...),
+				JunctionLocalFK:         firstColumnOrEmpty(rightJunctionCols),
+				JunctionRemoteFK:        firstColumnOrEmpty(leftJunctionCols),
+				GraphQLFieldName:        rightFieldName,
 			})
 
 		case JunctionTypeAttribute:
+			if len(leftPKNames) != len(leftJunctionCols) || len(rightPKNames) != len(rightJunctionCols) {
+				warnCompositeSkip("edge_list", jc.Table, jc.LeftFK.ConstraintName, leftJunctionCols, jc.LeftFK.ReferencedTable, leftPKNames, "left_mapping_key_count_mismatch")
+				warnCompositeSkip("edge_list", jc.Table, jc.RightFK.ConstraintName, rightJunctionCols, jc.RightFK.ReferencedTable, rightPKNames, "right_mapping_key_count_mismatch")
+				continue
+			}
 			// Attribute junction: create edge list fields
 			edgeFieldName := namer.JunctionFieldName(jc.Table, leftTable.Name, rightTable.Name, "", true)
 
 			// Add edge list from left to junction
 			leftTable.Relationships = append(leftTable.Relationships, Relationship{
-				IsEdgeList:       true,
-				LocalColumn:      leftPK,
-				RemoteTable:      jc.Table, // Points to junction table for edge type
-				RemoteColumn:     jc.LeftFK.ColumnName,
-				JunctionTable:    jc.Table,
-				JunctionLocalFK:  jc.LeftFK.ColumnName,
-				JunctionRemoteFK: jc.RightFK.ColumnName,
-				GraphQLFieldName: edgeFieldName,
+				IsEdgeList:              true,
+				LocalColumns:            append([]string(nil), leftPKNames...),
+				RemoteTable:             jc.Table, // Points to junction table for edge type
+				RemoteColumns:           append([]string(nil), leftJunctionCols...),
+				LocalColumn:             firstColumnOrEmpty(leftPKNames),
+				RemoteColumn:            firstColumnOrEmpty(leftJunctionCols),
+				JunctionTable:           jc.Table,
+				JunctionLocalFKColumns:  append([]string(nil), leftJunctionCols...),
+				JunctionRemoteFKColumns: append([]string(nil), rightJunctionCols...),
+				JunctionLocalFK:         firstColumnOrEmpty(leftJunctionCols),
+				JunctionRemoteFK:        firstColumnOrEmpty(rightJunctionCols),
+				GraphQLFieldName:        edgeFieldName,
 			})
 			// Add edge list from right to junction
 			rightTable.Relationships = append(rightTable.Relationships, Relationship{
-				IsEdgeList:       true,
-				LocalColumn:      rightPK,
-				RemoteTable:      jc.Table, // Points to junction table for edge type
-				RemoteColumn:     jc.RightFK.ColumnName,
-				JunctionTable:    jc.Table,
-				JunctionLocalFK:  jc.RightFK.ColumnName,
-				JunctionRemoteFK: jc.LeftFK.ColumnName,
-				GraphQLFieldName: edgeFieldName,
+				IsEdgeList:              true,
+				LocalColumns:            append([]string(nil), rightPKNames...),
+				RemoteTable:             jc.Table, // Points to junction table for edge type
+				RemoteColumns:           append([]string(nil), rightJunctionCols...),
+				LocalColumn:             firstColumnOrEmpty(rightPKNames),
+				RemoteColumn:            firstColumnOrEmpty(rightJunctionCols),
+				JunctionTable:           jc.Table,
+				JunctionLocalFKColumns:  append([]string(nil), rightJunctionCols...),
+				JunctionRemoteFKColumns: append([]string(nil), leftJunctionCols...),
+				JunctionLocalFK:         firstColumnOrEmpty(rightJunctionCols),
+				JunctionRemoteFK:        firstColumnOrEmpty(leftJunctionCols),
+				GraphQLFieldName:        edgeFieldName,
 			})
 		}
 	}
 
 	return nil
-}
-
-// getPKColumn returns the first primary key column name for a table, or empty string if none.
-func getPKColumn(table *Table) string {
-	for _, col := range table.Columns {
-		if col.IsPrimaryKey {
-			return col.Name
-		}
-	}
-	return ""
 }
 
 // NumericColumns returns columns eligible for AVG/SUM aggregation (Int, Float types).

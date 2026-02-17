@@ -20,15 +20,18 @@ type Plan struct {
 
 // RelationshipContext provides relationship-specific planning inputs.
 type RelationshipContext struct {
-	RelatedTable introspection.Table
-	RemoteColumn string
-	Value        interface{}
-	IsManyToOne  bool
-	IsOneToMany  bool
+	RelatedTable  introspection.Table
+	RemoteColumn  string
+	RemoteColumns []string
+	Value         interface{}
+	Values        []interface{}
+	IsManyToOne   bool
+	IsOneToMany   bool
 }
 
 type planOptions struct {
 	relationship *RelationshipContext
+	schema       *introspection.Schema
 	limits       *PlanLimits
 	fragments    map[string]ast.Definition
 	defaultLimit int
@@ -65,6 +68,14 @@ func WithDefaultListLimit(limit int) PlanOption {
 	}
 }
 
+// WithSchema provides schema context for planning features that need table lookups
+// beyond the current table (for example relationship-aware where filters).
+func WithSchema(schema *introspection.Schema) PlanOption {
+	return func(o *planOptions) {
+		o.schema = schema
+	}
+}
+
 // PlanQuery is the primary planning entrypoint (GraphQL AST -> SQL plan).
 // This is a minimal implementation that plans a single root field.
 func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string]interface{}, opts ...PlanOption) (*Plan, error) {
@@ -95,14 +106,22 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 
 	if options.relationship != nil {
 		ctx := options.relationship
-		if ctx.RelatedTable.Name == "" || ctx.RemoteColumn == "" {
+		remoteCols := ctx.RemoteColumns
+		if len(remoteCols) == 0 && ctx.RemoteColumn != "" {
+			remoteCols = []string{ctx.RemoteColumn}
+		}
+		if ctx.RelatedTable.Name == "" || len(remoteCols) == 0 {
 			return nil, errors.New("relationship context is incomplete")
 		}
 
 		switch {
 		case ctx.IsManyToOne:
 			selected := SelectedColumns(ctx.RelatedTable, field, options.fragments)
-			planned, err := PlanManyToOne(ctx.RelatedTable, selected, ctx.RemoteColumn, ctx.Value)
+			values := ctx.Values
+			if len(values) == 0 {
+				values = []interface{}{ctx.Value}
+			}
+			planned, err := PlanManyToOne(ctx.RelatedTable, selected, remoteCols, values)
 			if err != nil {
 				return nil, err
 			}
@@ -298,9 +317,9 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 		columnByField[introspection.GraphQLFieldName(col)] = col.Name
 	}
 
-	relationshipByField := make(map[string]string, len(table.Relationships))
+	relationshipByField := make(map[string][]string, len(table.Relationships))
 	for _, rel := range table.Relationships {
-		relationshipByField[rel.GraphQLFieldName] = rel.LocalColumn
+		relationshipByField[rel.GraphQLFieldName] = rel.EffectiveLocalColumns()
 	}
 
 	selected := make(map[string]struct{})
@@ -320,8 +339,10 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 				if colName, ok := columnByField[name]; ok {
 					selected[colName] = struct{}{}
 				}
-				if relCol, ok := relationshipByField[name]; ok {
-					selected[relCol] = struct{}{}
+				if relCols, ok := relationshipByField[name]; ok {
+					for _, relCol := range relCols {
+						selected[relCol] = struct{}{}
+					}
 				}
 			case *ast.InlineFragment:
 				if sel.SelectionSet != nil {
@@ -375,6 +396,8 @@ func SelectedColumns(table introspection.Table, field *ast.Field, fragments map[
 // field's selection set. Connection fields wrap actual columns inside nodes { ... }
 // and/or edges { node { ... } }, so we traverse into those sub-selections.
 // OrderBy and PK columns are always included to ensure cursor generation works.
+// Relationship local key columns are also included so nested relationship resolvers
+// can resolve child objects without requiring clients to explicitly select FK fields.
 func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, fragments map[string]ast.Definition, orderBy *OrderBy) []introspection.Column {
 	if field == nil || field.SelectionSet == nil {
 		return EnsureColumns(table, table.Columns, orderBy.Columns)
@@ -384,6 +407,13 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 	columnByField := make(map[string]string, len(table.Columns))
 	for _, col := range table.Columns {
 		columnByField[introspection.GraphQLFieldName(col)] = col.Name
+	}
+	// Keep relationship local columns available in connection row payloads.
+	// Without this, nested many-to-one fields can appear as null when the FK
+	// column was not explicitly selected by the client.
+	relationshipByField := make(map[string][]string, len(table.Relationships))
+	for _, rel := range table.Relationships {
+		relationshipByField[rel.GraphQLFieldName] = rel.EffectiveLocalColumns()
 	}
 
 	selected := make(map[string]struct{})
@@ -399,7 +429,7 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 				}
 				switch sel.Name.Value {
 				case "nodes", "node":
-					collectColumnFields(sel, columnByField, selected, fragments)
+					collectColumnFields(sel, columnByField, relationshipByField, selected, fragments)
 				case "edges":
 					if sel.SelectionSet != nil {
 						visitConnectionSelections(sel.SelectionSet.Selections)
@@ -468,7 +498,13 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 }
 
 // collectColumnFields extracts column names from a field's selection set.
-func collectColumnFields(field *ast.Field, columnByField map[string]string, selected map[string]struct{}, fragments map[string]ast.Definition) {
+func collectColumnFields(
+	field *ast.Field,
+	columnByField map[string]string,
+	relationshipByField map[string][]string,
+	selected map[string]struct{},
+	fragments map[string]ast.Definition,
+) {
 	if field == nil || field.SelectionSet == nil {
 		return
 	}
@@ -483,6 +519,12 @@ func collectColumnFields(field *ast.Field, columnByField map[string]string, sele
 				}
 				if colName, ok := columnByField[s.Name.Value]; ok {
 					selected[colName] = struct{}{}
+				}
+				// Relationship field selection implies we need local join keys as well.
+				if relCols, ok := relationshipByField[s.Name.Value]; ok {
+					for _, relCol := range relCols {
+						selected[relCol] = struct{}{}
+					}
 				}
 			case *ast.InlineFragment:
 				if s.SelectionSet != nil {

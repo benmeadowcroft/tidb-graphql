@@ -97,7 +97,7 @@ func TestUUIDMapping_InvalidStoredValueReturnsError(t *testing.T) {
 	schema := buildGraphQLSchemaWithUUIDMappings(t, testDB, uuidMappingPatterns)
 	query := `
 		{
-			uuidRecords(orderBy: { databaseId: ASC }) {
+			uuidRecords(orderBy: [{ databaseId: ASC }]) {
 				nodes {
 					label
 					uuidText

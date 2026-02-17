@@ -78,7 +78,7 @@ func TestTryBatchManyToManyConnection_Chunking(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
 		},
-	}, users, rel, parentCount)
+	}, users, rel, []interface{}{parentCount})
 	require.NoError(t, err)
 	require.True(t, ok)
 	nodes, ok := results["nodes"].([]map[string]interface{})
@@ -155,7 +155,7 @@ func TestTryBatchEdgeListConnection_Chunking(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
 		},
-	}, users, rel, parentCount)
+	}, users, rel, []interface{}{parentCount})
 	require.NoError(t, err)
 	require.True(t, ok)
 	nodes, ok := results["nodes"].([]map[string]interface{})

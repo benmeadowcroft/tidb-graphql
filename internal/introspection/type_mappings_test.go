@@ -148,9 +148,66 @@ func TestEffectiveGraphQLType(t *testing.T) {
 	col := Column{DataType: "varchar"}
 	assert.Equal(t, sqltype.TypeString, EffectiveGraphQLType(col))
 
+	col = Column{DataType: "tinyint", ColumnType: "tinyint(1)"}
+	assert.Equal(t, sqltype.TypeBoolean, EffectiveGraphQLType(col))
+
+	col = Column{DataType: "tinyint", ColumnType: "tinyint(2)"}
+	assert.Equal(t, sqltype.TypeInt, EffectiveGraphQLType(col))
+
 	col.OverrideType = sqltype.TypeUUID
 	col.HasOverrideType = true
 	assert.Equal(t, sqltype.TypeUUID, EffectiveGraphQLType(col))
+}
+
+func TestApplyTinyInt1TypeOverrides(t *testing.T) {
+	schema := &Schema{
+		Tables: []Table{
+			{
+				Name: "users",
+				Columns: []Column{
+					{Name: "is_active", DataType: "tinyint", ColumnType: "tinyint(1)"},
+					{Name: "tiny_flag", DataType: "tinyint", ColumnType: "tinyint(1)"},
+					{Name: "small_flag", DataType: "tinyint", ColumnType: "tinyint(2)"},
+				},
+			},
+		},
+	}
+
+	err := ApplyTinyInt1TypeOverrides(schema,
+		map[string][]string{"*": {"is_*", "tiny_*"}},
+		map[string][]string{"users": {"tiny_*"}},
+	)
+	require.NoError(t, err)
+
+	cols := schema.Tables[0].Columns
+	assert.True(t, cols[0].HasOverrideType)
+	assert.Equal(t, sqltype.TypeBoolean, cols[0].OverrideType)
+
+	// int override wins when both bool and int patterns match.
+	assert.True(t, cols[1].HasOverrideType)
+	assert.Equal(t, sqltype.TypeInt, cols[1].OverrideType)
+
+	assert.False(t, cols[2].HasOverrideType)
+}
+
+func TestApplyTinyInt1TypeOverrides_InvalidTarget(t *testing.T) {
+	schema := &Schema{
+		Tables: []Table{
+			{
+				Name: "users",
+				Columns: []Column{
+					{Name: "status", DataType: "tinyint", ColumnType: "tinyint(2)"},
+				},
+			},
+		},
+	}
+
+	err := ApplyTinyInt1TypeOverrides(schema,
+		map[string][]string{"users": {"status"}},
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expected tinyint(1)")
 }
 
 func TestMergePatterns_DeduplicatesNonAdjacent(t *testing.T) {

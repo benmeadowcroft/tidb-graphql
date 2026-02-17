@@ -15,13 +15,16 @@ This section describes how the GraphQL schema is derived from the TiDB schema.
 
 For each table `users`:
 
-- Collection query: `users(first, after, last, before, where, orderBy)` returns `UserConnection`.
+- Collection query: `users(first, after, last, before, where, orderBy, orderByPolicy)` returns `UserConnection`.
 - Primary key lookup: `user(id: ID!)` returns `User` (global Node ID).
 - Primary key raw lookup: `user_by_databaseId(databaseId: BigInt!)` returns `User` (name depends on PK column).
 - Unique index lookups: `user_by_email(email: String!)` returns `User`. Composite unique keys are `user_by_colA_colB(...)`.
 
 Notes:
-- `orderBy` only accepts indexed fields and will error otherwise (see [Filters](./filters.md)).
+- `orderBy` uses clause-list syntax, for example:
+  - `orderBy: [{ createdAt: DESC }, { databaseId: ASC }]`
+- `orderByPolicy` controls prefix validation (`INDEX_PREFIX_ONLY` default, `ALLOW_NON_PREFIX` to relax prefix checks for exposed indexed fields).
+- Missing PK columns are appended internally as ASC tie-breakers for stable pagination.
 - `first` defaults to [`server.graphql_default_limit`](./configuration.md#server) (default `100`) when omitted.
 - `first` and `last` are capped at `100`.
 
@@ -63,8 +66,13 @@ Pluralization uses the [Inflection library](https://github.com/jinzhu/inflection
 
 Many-to-one fields remain nullable even when the FK column is NOT NULL, because role-based access can hide the related row.
 
-Relationship fields are generated for one-to-many, many-to-many, and edge-list relationships when the related table has a primary key. They accept `first`, `after`, `last`, `before`, `orderBy`, and `where` (target table for many-to-many, junction table for edge-list).
+Relationship fields are generated for one-to-many, many-to-many, and edge-list relationships when the related table has a primary key. They accept `first`, `after`, `last`, `before`, `orderBy`, `orderByPolicy`, and `where` (target table for many-to-many, junction table for edge-list).
 For tables without primary keys, these to-many connection fields are not generated.
+
+Composite-key behavior:
+- Many-to-many and edge-list relationship planning supports composite PK/FK mappings (multi-column joins and filters).
+- Composite one-to-many reverse relationship generation is currently skipped.
+- Skipped unsupported composite mappings emit a warning log during schema build/refresh with table, constraint, and column details.
 
 ### Connection types
 
@@ -79,6 +87,7 @@ Each connection provides:
 Connections support forward (`first`/`after`) and backward (`last`/`before`) pagination and use stable ordering based on indexed columns (default PK ASC).
 `pageInfo` uses lightweight semantics: forward mode sets `hasPreviousPage` when `after` is provided; backward mode sets `hasNextPage` when `before` is provided.
 For relationship connections, only forward first-page requests (no `after`, `before`, or `last`) are batched across parents to avoid N+1 lookups; cursor/backward pages run per-parent seek queries.
+Cursor compatibility note: cursors encode the active `orderBy` columns and per-column directions. Changing `orderBy` invalidates existing cursors.
 
 ## Type mapping
 
@@ -88,7 +97,7 @@ SQL types are mapped to GraphQL scalars:
 - `bigint` -> `BigInt` (custom scalar, serialized as a string)
 - `float`, `double` -> `Float`
 - `decimal`, `numeric` -> `Decimal` (custom scalar, serialized as a string)
-- `bool` -> `Boolean`
+- `bool`, `tinyint(1)` -> `Boolean`
 - `json` -> `JSON` (custom scalar)
 - `enum` -> GraphQL enum named `<SingularTable><Column>` (e.g., `users.status` -> `UserStatus`)
 - `set` -> `[<SingularTable><Column>!]` (list of enum values)
@@ -101,6 +110,12 @@ SQL types are mapped to GraphQL scalars:
 
 UUID mapping is explicit via config (`type_mappings.uuid_columns`): matched SQL columns are exposed as `UUID` (canonical lowercase hyphenated form). For binary storage, canonical RFC byte order (`UUID_TO_BIN(x,0)`) is assumed.
 
+Tinyint mapping is configurable via `type_mappings.tinyint1_boolean_columns` and `type_mappings.tinyint1_int_columns`.
+When both patterns match the same column, `tinyint1_int_columns` takes precedence.
+
+Breaking change note:
+- Legacy filters using numeric booleans like `eq: 1` / `eq: 0` on `tinyint(1)` columns must be updated to `eq: true` / `eq: false`.
+
 ## Descriptions
 
 Table and column comments are emitted as GraphQL descriptions on the corresponding types and fields when present.
@@ -108,3 +123,7 @@ Table and column comments are emitted as GraphQL descriptions on the correspondi
 ## Filter inputs
 
 Each table gets a `TableWhere` input type (see [Filters](./filters.md)). JSON columns are excluded from filter inputs.
+`TableWhere` includes scalar column filters and single-hop relationship filters:
+
+- To-many: `{ some: RelatedScalarWhere, none: RelatedScalarWhere }`
+- To-one: `{ is: RelatedScalarWhere, isNull: Boolean }`

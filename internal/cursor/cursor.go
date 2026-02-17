@@ -7,21 +7,40 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/nodeid"
 )
 
-// EncodeCursor builds an opaque cursor from type name, orderBy key, direction, and column values.
+type payloadV2 struct {
+	Version    int      `json:"v"`
+	TypeName   string   `json:"t"`
+	OrderByKey string   `json:"k"`
+	Directions []string `json:"d"`
+	Values     []string `json:"vals"`
+}
+
+// EncodeCursor builds an opaque cursor from type name, orderBy key, directions, and column values.
 // Values are string-coerced for JSON safety (avoids float64→int64 precision loss).
-func EncodeCursor(typeName, orderByKey, direction string, values ...interface{}) string {
-	parts := make([]string, 0, 3+len(values))
-	parts = append(parts, typeName, orderByKey, direction)
-	for _, v := range values {
-		parts = append(parts, coerceToString(v))
+func EncodeCursor(typeName, orderByKey string, directions []string, values ...interface{}) string {
+	normalizedDirections := make([]string, len(directions))
+	for i, direction := range directions {
+		normalizedDirections[i] = strings.ToUpper(direction)
 	}
-	data, err := json.Marshal(parts)
+	stringValues := make([]string, 0, len(values))
+	for _, v := range values {
+		stringValues = append(stringValues, coerceToString(v))
+	}
+	payload := payloadV2{
+		Version:    2,
+		TypeName:   typeName,
+		OrderByKey: orderByKey,
+		Directions: normalizedDirections,
+		Values:     stringValues,
+	}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return ""
 	}
@@ -29,32 +48,55 @@ func EncodeCursor(typeName, orderByKey, direction string, values ...interface{})
 }
 
 // DecodeCursor parses a base64-encoded JSON cursor into its components.
-// Returns type name, orderBy key, direction, and string-encoded column values.
-func DecodeCursor(raw string) (typeName, orderByKey, direction string, values []string, err error) {
+// Returns type name, orderBy key, directions, and string-encoded column values.
+func DecodeCursor(raw string) (typeName, orderByKey string, directions []string, values []string, err error) {
 	data, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil {
-		return "", "", "", nil, fmt.Errorf("invalid cursor: %w", err)
+		return "", "", nil, nil, fmt.Errorf("invalid cursor: %w", err)
 	}
-	var parts []string
-	if err := json.Unmarshal(data, &parts); err != nil {
-		return "", "", "", nil, fmt.Errorf("invalid cursor: %w", err)
+	var payload payloadV2
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", "", nil, nil, fmt.Errorf("invalid cursor format: expected orderBy v2 cursor")
 	}
-	if len(parts) < 4 {
-		return "", "", "", nil, fmt.Errorf("invalid cursor: expected at least 4 elements, got %d", len(parts))
+	if payload.Version != 2 {
+		return "", "", nil, nil, fmt.Errorf("invalid cursor format: expected orderBy v2 cursor")
 	}
-	return parts[0], parts[1], parts[2], parts[3:], nil
+	if payload.TypeName == "" || payload.OrderByKey == "" {
+		return "", "", nil, nil, fmt.Errorf("invalid cursor: missing type or orderBy key")
+	}
+	if len(payload.Directions) == 0 {
+		return "", "", nil, nil, fmt.Errorf("invalid cursor: missing directions")
+	}
+	for i, direction := range payload.Directions {
+		direction = strings.ToUpper(direction)
+		if direction != "ASC" && direction != "DESC" {
+			return "", "", nil, nil, fmt.Errorf("invalid cursor: direction %d must be ASC or DESC", i)
+		}
+		payload.Directions[i] = direction
+	}
+	if len(payload.Values) != len(payload.Directions) {
+		return "", "", nil, nil, fmt.Errorf("invalid cursor: value count mismatch for orderBy columns")
+	}
+	return payload.TypeName, payload.OrderByKey, payload.Directions, payload.Values, nil
 }
 
 // ValidateCursor confirms the cursor matches the expected query context.
-func ValidateCursor(expectedType, expectedOrderByKey, expectedDirection, actualType, actualOrderByKey, actualDirection string) error {
+func ValidateCursor(expectedType, expectedOrderByKey string, expectedDirections []string, actualType, actualOrderByKey string, actualDirections []string) error {
 	if actualType != expectedType {
 		return fmt.Errorf("cursor type mismatch: expected %s, got %s", expectedType, actualType)
 	}
 	if actualOrderByKey != expectedOrderByKey {
 		return fmt.Errorf("cursor orderBy mismatch: expected %s, got %s", expectedOrderByKey, actualOrderByKey)
 	}
-	if actualDirection != expectedDirection {
-		return fmt.Errorf("cursor direction mismatch: expected %s, got %s", expectedDirection, actualDirection)
+	if len(actualDirections) != len(expectedDirections) {
+		return fmt.Errorf("cursor direction count mismatch: expected %d, got %d", len(expectedDirections), len(actualDirections))
+	}
+	for i := range expectedDirections {
+		expectedDirection := strings.ToUpper(expectedDirections[i])
+		actualDirection := strings.ToUpper(actualDirections[i])
+		if actualDirection != expectedDirection {
+			return fmt.Errorf("cursor direction mismatch at position %d: expected %s, got %s", i, expectedDirection, actualDirection)
+		}
 	}
 	return nil
 }

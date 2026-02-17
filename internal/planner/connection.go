@@ -68,8 +68,8 @@ type connectionWindow struct {
 	before    string
 }
 
-// seekBuilder builds a cursor seek condition from column names, values, and direction.
-type seekBuilder func(colNames []string, values []interface{}, direction string) sq.Sqlizer
+// seekBuilder builds a cursor seek condition from column names, values, and per-column directions.
+type seekBuilder func(colNames []string, values []interface{}, directions []string) sq.Sqlizer
 
 // whereBuilder builds a WHERE clause for a table from a filter input map.
 type whereBuilder func(table introspection.Table, whereMap map[string]interface{}) (*WhereClause, error)
@@ -123,18 +123,18 @@ func parseConnectionArgs(
 	if window.hasAfter || window.hasBefore {
 		cursorArgName := "after"
 		rawCursor := window.after
-		seekDirection := orderBy.Direction
+		seekDirections := append([]string{}, orderBy.Directions...)
 		if window.hasBefore {
 			cursorArgName = "before"
 			rawCursor = window.before
-			seekDirection = reverseDirection(orderBy.Direction)
+			seekDirections = reverseDirections(orderBy.Directions)
 		}
 
-		cType, cKey, cDir, cVals, err := cursor.DecodeCursor(rawCursor)
+		cType, cKey, cDirs, cVals, err := cursor.DecodeCursor(rawCursor)
 		if err != nil {
 			return nil, fmt.Errorf("invalid %s cursor: %w", cursorArgName, err)
 		}
-		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Direction, cType, cKey, cDir); err != nil {
+		if err := cursor.ValidateCursor(typeName, orderByKey, orderBy.Directions, cType, cKey, cDirs); err != nil {
 			return nil, fmt.Errorf("invalid %s cursor: %w", cursorArgName, err)
 		}
 		parsedValues, err := cursor.ParseCursorValues(cVals, cursorCols)
@@ -145,7 +145,7 @@ func parseConnectionArgs(
 		for i, c := range cursorCols {
 			colNames[i] = c.Name
 		}
-		seekCondition = buildSeek(colNames, parsedValues, seekDirection)
+		seekCondition = buildSeek(colNames, parsedValues, seekDirections)
 	}
 
 	// Parse WHERE clause
@@ -157,7 +157,7 @@ func parseConnectionArgs(
 				return nil, fmt.Errorf("invalid WHERE clause: %w", err)
 			}
 			if whereClause != nil {
-				if err := ValidateIndexedColumns(table, whereClause.UsedColumns); err != nil {
+				if err := ValidateWhereClauseIndexes(options.schema, table, whereClause); err != nil {
 					return nil, err
 				}
 			}
@@ -195,8 +195,13 @@ func PlanConnection(
 	for _, opt := range opts {
 		opt(options)
 	}
-
-	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, BuildWhereClause, options)
+	if options.schema == nil {
+		options.schema = schema
+	}
+	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
+		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
+	}
+	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, buildWhere, options)
 	if err != nil {
 		return nil, err
 	}
@@ -247,8 +252,10 @@ func PlanOneToManyConnection(
 	for _, opt := range opts {
 		opt(options)
 	}
-
-	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, BuildWhereClause, options)
+	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
+		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
+	}
+	ca, err := parseConnectionArgs(table, field, args, BuildSeekCondition, buildWhere, options)
 	if err != nil {
 		return nil, err
 	}
@@ -307,10 +314,10 @@ func PlanOneToManyConnection(
 func PlanManyToManyConnection(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
+	fkValues []interface{},
 	field *ast.Field,
 	args map[string]interface{},
 	opts ...PlanOption,
@@ -320,11 +327,11 @@ func PlanManyToManyConnection(
 		opt(options)
 	}
 
-	buildSeek := func(colNames []string, values []interface{}, direction string) sq.Sqlizer {
-		return BuildSeekConditionQualified(targetTable.Name, colNames, values, direction)
+	buildSeek := func(colNames []string, values []interface{}, directions []string) sq.Sqlizer {
+		return BuildSeekConditionQualified(targetTable.Name, colNames, values, directions)
 	}
 	buildWhere := func(table introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
-		return BuildWhereClauseQualified(table, table.Name, whereMap)
+		return BuildWhereClauseQualifiedWithSchema(options.schema, table, table.Name, whereMap)
 	}
 
 	ca, err := parseConnectionArgs(targetTable, field, args, buildSeek, buildWhere, options)
@@ -334,14 +341,33 @@ func PlanManyToManyConnection(
 
 	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
 	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
-	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
-	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return nil, fmt.Errorf("many-to-many local FK mapping width mismatch")
+	}
+	if len(junctionRemoteFKColumns) == 0 || len(junctionRemoteFKColumns) != len(targetPKColumns) {
+		return nil, fmt.Errorf("many-to-many remote FK mapping width mismatch")
+	}
+	joinPredicates := make([]string, len(junctionRemoteFKColumns))
+	for i := range junctionRemoteFKColumns {
+		joinPredicates[i] = fmt.Sprintf(
+			"%s.%s = %s.%s",
+			quotedJunction, sqlutil.QuoteIdentifier(junctionRemoteFKColumns[i]),
+			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
+		)
+	}
+	localFKQuoted := quotedColumns(junctionLocalFKColumns, quotedJunction)
+	localWhereSQL, localWhereArgs, err := buildTupleInCondition(localFKQuoted, []ParentTuple{{Values: fkValues}})
+	if err != nil {
+		return nil, err
+	}
+	if localWhereSQL == "" {
+		return nil, fmt.Errorf("many-to-many local key filter is empty")
+	}
 
 	builder := sq.Select(columnNamesQualified(targetTable.Name, ca.selected)...).
 		From(quotedTarget).
-		Join(fmt.Sprintf("%s ON %s.%s = %s.%s", quotedJunction, quotedJunction, quotedRemoteFK, quotedTarget, quotedTargetPK)).
-		Where(sq.Eq{fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK): fkValue})
+		Join(fmt.Sprintf("%s ON %s", quotedJunction, strings.Join(joinPredicates, " AND "))).
+		Where(sq.Expr(localWhereSQL, localWhereArgs...))
 
 	if ca.whereClause != nil && ca.whereClause.Condition != nil {
 		builder = builder.Where(ca.whereClause.Condition)
@@ -359,11 +385,11 @@ func PlanManyToManyConnection(
 		return nil, err
 	}
 
-	countQuery, err := BuildManyToManyCountSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, ca.whereClause)
+	countQuery, err := BuildManyToManyCountSQL(targetTable, junctionTable, junctionLocalFKColumns, junctionRemoteFKColumns, targetPKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
-	aggregateBase, err := BuildManyToManyAggregateBaseSQL(targetTable, junctionTable, junctionLocalFK, junctionRemoteFK, targetPK, fkValue, ca.whereClause)
+	aggregateBase, err := BuildManyToManyAggregateBaseSQL(targetTable, junctionTable, junctionLocalFKColumns, junctionRemoteFKColumns, targetPKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -388,8 +414,8 @@ func PlanManyToManyConnection(
 // PlanEdgeListConnection plans a connection for an edge-list relationship.
 func PlanEdgeListConnection(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	fkValues []interface{},
 	field *ast.Field,
 	args map[string]interface{},
 	opts ...PlanOption,
@@ -398,16 +424,27 @@ func PlanEdgeListConnection(
 	for _, opt := range opts {
 		opt(options)
 	}
-
-	ca, err := parseConnectionArgs(junctionTable, field, args, BuildSeekCondition, BuildWhereClause, options)
+	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
+		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
+	}
+	ca, err := parseConnectionArgs(junctionTable, field, args, BuildSeekCondition, buildWhere, options)
 	if err != nil {
 		return nil, err
 	}
 
-	fkCondition := sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): fkValue}
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return nil, fmt.Errorf("edge-list local FK mapping width mismatch")
+	}
+	whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(junctionLocalFKColumns, ""), []ParentTuple{{Values: fkValues}})
+	if err != nil {
+		return nil, err
+	}
+	if whereSQL == "" {
+		return nil, fmt.Errorf("edge-list local key filter is empty")
+	}
 	builder := sq.Select(columnNames(junctionTable, ca.selected)...).
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
-		Where(fkCondition)
+		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if ca.whereClause != nil && ca.whereClause.Condition != nil {
 		builder = builder.Where(ca.whereClause.Condition)
@@ -425,11 +462,11 @@ func PlanEdgeListConnection(
 		return nil, err
 	}
 
-	countQuery, err := BuildEdgeListCountSQL(junctionTable, junctionLocalFK, fkValue, ca.whereClause)
+	countQuery, err := BuildEdgeListCountSQL(junctionTable, junctionLocalFKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
-	aggregateBase, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, ca.whereClause)
+	aggregateBase, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFKColumns, fkValues, ca.whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -469,19 +506,19 @@ func BuildOneToManyCountSQL(
 func BuildManyToManyCountSQL(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
 	base, err := BuildManyToManyAggregateBaseSQL(
 		targetTable,
 		junctionTable,
-		junctionLocalFK,
-		junctionRemoteFK,
-		targetPK,
-		fkValue,
+		junctionLocalFKColumns,
+		junctionRemoteFKColumns,
+		targetPKColumns,
+		fkValues,
 		whereClause,
 	)
 	if err != nil {
@@ -494,22 +531,43 @@ func BuildManyToManyCountSQL(
 func BuildManyToManyAggregateBaseSQL(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
 	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
 	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
-	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
-	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return SQLQuery{}, fmt.Errorf("many-to-many aggregate local key mapping width mismatch")
+	}
+	if len(junctionRemoteFKColumns) == 0 || len(junctionRemoteFKColumns) != len(targetPKColumns) {
+		return SQLQuery{}, fmt.Errorf("many-to-many aggregate remote key mapping width mismatch")
+	}
+	joinPredicates := make([]string, len(junctionRemoteFKColumns))
+	for i := range junctionRemoteFKColumns {
+		joinPredicates[i] = fmt.Sprintf(
+			"%s.%s = %s.%s",
+			quotedJunction, sqlutil.QuoteIdentifier(junctionRemoteFKColumns[i]),
+			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
+		)
+	}
+	whereSQL, whereArgs, err := buildTupleInCondition(
+		quotedColumns(junctionLocalFKColumns, quotedJunction),
+		[]ParentTuple{{Values: fkValues}},
+	)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if whereSQL == "" {
+		return SQLQuery{}, fmt.Errorf("many-to-many aggregate local key filter is empty")
+	}
 
 	builder := sq.Select("*").
 		From(quotedTarget).
-		Join(fmt.Sprintf("%s ON %s.%s = %s.%s", quotedJunction, quotedJunction, quotedRemoteFK, quotedTarget, quotedTargetPK)).
-		Where(sq.Eq{fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK): fkValue})
+		Join(fmt.Sprintf("%s ON %s", quotedJunction, strings.Join(joinPredicates, " AND "))).
+		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if whereClause != nil && whereClause.Condition != nil {
 		builder = builder.Where(whereClause.Condition)
@@ -525,11 +583,11 @@ func BuildManyToManyAggregateBaseSQL(
 // BuildEdgeListCountSQL builds the count query for an edge-list connection.
 func BuildEdgeListCountSQL(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
-	base, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFK, fkValue, whereClause)
+	base, err := BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalFKColumns, fkValues, whereClause)
 	if err != nil {
 		return SQLQuery{}, err
 	}
@@ -561,13 +619,26 @@ func BuildOneToManyAggregateBaseSQL(
 // BuildEdgeListAggregateBaseSQL builds the base rowset query for edge-list aggregates.
 func BuildEdgeListAggregateBaseSQL(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
-	fkValue interface{},
+	junctionLocalFKColumns []string,
+	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
+	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
+		return SQLQuery{}, fmt.Errorf("edge-list aggregate local key mapping width mismatch")
+	}
+	whereSQL, whereArgs, err := buildTupleInCondition(
+		quotedColumns(junctionLocalFKColumns, ""),
+		[]ParentTuple{{Values: fkValues}},
+	)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if whereSQL == "" {
+		return SQLQuery{}, fmt.Errorf("edge-list aggregate local key filter is empty")
+	}
 	builder := sq.Select("*").
 		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(junctionLocalFK): fkValue})
+		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if whereClause != nil && whereClause.Condition != nil {
 		builder = builder.Where(whereClause.Condition)
@@ -580,51 +651,50 @@ func BuildEdgeListAggregateBaseSQL(
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
-// BuildSeekCondition creates a SQL row comparison for cursor-based seek.
-// For ASC: (col1, col2) > (?, ?)
-// For DESC: (col1, col2) < (?, ?)
-func BuildSeekCondition(columns []string, values []interface{}, direction string) sq.Sqlizer {
-	quoted := make([]string, len(columns))
-	for i, col := range columns {
-		quoted[i] = sqlutil.QuoteIdentifier(col)
+// BuildSeekCondition creates a cursor seek predicate supporting mixed directions.
+// It expands lexicographic seek into disjunction form:
+// (c1 op v1) OR (c1 = v1 AND c2 op v2) OR ...
+func BuildSeekCondition(columns []string, values []interface{}, directions []string) sq.Sqlizer {
+	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
+		return sq.Expr("1 = 0")
 	}
 
-	lhs := "(" + strings.Join(quoted, ", ") + ")"
-	placeholders := make([]string, len(values))
-	for i := range values {
-		placeholders[i] = "?"
+	terms := make([]string, 0, len(columns))
+	args := make([]interface{}, 0, len(columns)*2)
+	for i := range columns {
+		var predicates []string
+		for j := 0; j < i; j++ {
+			predicates = append(predicates, fmt.Sprintf("%s = ?", sqlutil.QuoteIdentifier(columns[j])))
+			args = append(args, values[j])
+		}
+		op := directionOp(directions[i])
+		predicates = append(predicates, fmt.Sprintf("%s %s ?", sqlutil.QuoteIdentifier(columns[i]), op))
+		args = append(args, values[i])
+		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
 	}
-	rhs := "(" + strings.Join(placeholders, ", ") + ")"
-
-	op := ">"
-	if strings.ToUpper(direction) == "DESC" {
-		op = "<"
-	}
-
-	return sq.Expr(lhs+" "+op+" "+rhs, values...)
+	return sq.Expr("("+strings.Join(terms, " OR ")+")", args...)
 }
 
-// BuildSeekConditionQualified creates a SQL row comparison for cursor-based seek
-// using qualified column names (tableAlias.column).
-func BuildSeekConditionQualified(tableAlias string, columns []string, values []interface{}, direction string) sq.Sqlizer {
-	qualified := make([]string, len(columns))
-	for i, col := range columns {
-		qualified[i] = fmt.Sprintf("%s.%s", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(col))
+// BuildSeekConditionQualified creates a cursor seek predicate with qualified columns.
+func BuildSeekConditionQualified(tableAlias string, columns []string, values []interface{}, directions []string) sq.Sqlizer {
+	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
+		return sq.Expr("1 = 0")
 	}
 
-	lhs := "(" + strings.Join(qualified, ", ") + ")"
-	placeholders := make([]string, len(values))
-	for i := range values {
-		placeholders[i] = "?"
+	terms := make([]string, 0, len(columns))
+	args := make([]interface{}, 0, len(columns)*2)
+	for i := range columns {
+		var predicates []string
+		for j := 0; j < i; j++ {
+			predicates = append(predicates, fmt.Sprintf("%s.%s = ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[j])))
+			args = append(args, values[j])
+		}
+		op := directionOp(directions[i])
+		predicates = append(predicates, fmt.Sprintf("%s.%s %s ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[i]), op))
+		args = append(args, values[i])
+		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
 	}
-	rhs := "(" + strings.Join(placeholders, ", ") + ")"
-
-	op := ">"
-	if strings.ToUpper(direction) == "DESC" {
-		op = "<"
-	}
-
-	return sq.Expr(lhs+" "+op+" "+rhs, values...)
+	return sq.Expr("("+strings.Join(terms, " OR ")+")", args...)
 }
 
 func columnNamesQualified(tableName string, columns []introspection.Column) []string {
@@ -641,7 +711,11 @@ func orderByClausesQualified(tableName string, orderBy *OrderBy) []string {
 	}
 	clauses := make([]string, len(orderBy.Columns))
 	for i, col := range orderBy.Columns {
-		clauses[i] = fmt.Sprintf("%s.%s %s", sqlutil.QuoteIdentifier(tableName), sqlutil.QuoteIdentifier(col), orderBy.Direction)
+		direction := "ASC"
+		if i < len(orderBy.Directions) && strings.EqualFold(orderBy.Directions[i], "DESC") {
+			direction = "DESC"
+		}
+		clauses[i] = fmt.Sprintf("%s.%s %s", sqlutil.QuoteIdentifier(tableName), sqlutil.QuoteIdentifier(col), direction)
 	}
 	return clauses
 }
@@ -674,11 +748,11 @@ func PlanOneToManyConnectionBatch(
 func PlanManyToManyConnectionBatch(
 	targetTable introspection.Table,
 	junctionTable string,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
 	columns []introspection.Column,
-	parentValues []interface{},
+	parentValues []ParentTuple,
 	first int,
 	orderBy *OrderBy,
 	whereClause *WhereClause,
@@ -686,9 +760,9 @@ func PlanManyToManyConnectionBatch(
 	return PlanManyToManyBatch(
 		junctionTable,
 		targetTable,
-		junctionLocalFK,
-		junctionRemoteFK,
-		targetPK,
+		junctionLocalFKColumns,
+		junctionRemoteFKColumns,
+		targetPKColumns,
 		columns,
 		parentValues,
 		first+1,
@@ -702,16 +776,16 @@ func PlanManyToManyConnectionBatch(
 // It uses offset=0 and limit=first+1 to allow per-parent hasNextPage detection.
 func PlanEdgeListConnectionBatch(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
+	junctionLocalFKColumns []string,
 	columns []introspection.Column,
-	parentValues []interface{},
+	parentValues []ParentTuple,
 	first int,
 	orderBy *OrderBy,
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
 	return PlanEdgeListBatch(
 		junctionTable,
-		junctionLocalFK,
+		junctionLocalFKColumns,
 		columns,
 		parentValues,
 		first+1,
@@ -872,15 +946,34 @@ func reverseDirection(direction string) string {
 	return "DESC"
 }
 
+func reverseDirections(directions []string) []string {
+	if len(directions) == 0 {
+		return nil
+	}
+	reversed := make([]string, len(directions))
+	for i, direction := range directions {
+		reversed[i] = reverseDirection(direction)
+	}
+	return reversed
+}
+
+func directionOp(direction string) string {
+	if strings.EqualFold(direction, "DESC") {
+		return "<"
+	}
+	return ">"
+}
+
 func reverseOrderBy(orderBy *OrderBy) *OrderBy {
 	if orderBy == nil {
 		return nil
 	}
 	columns := make([]string, len(orderBy.Columns))
 	copy(columns, orderBy.Columns)
+	directions := reverseDirections(orderBy.Directions)
 	return &OrderBy{
-		Columns:   columns,
-		Direction: reverseDirection(orderBy.Direction),
+		Columns:    columns,
+		Directions: directions,
 	}
 }
 
@@ -898,12 +991,14 @@ func parseConnectionOrderBy(table introspection.Table, args map[string]interface
 
 	// Default to PK ASC (exempt from index validation since PKs are always indexed)
 	pkColNames := make([]string, len(pkCols))
+	pkDirections := make([]string, len(pkCols))
 	for i, col := range pkCols {
 		pkColNames[i] = col.Name
+		pkDirections[i] = "ASC"
 	}
 	return &OrderBy{
-		Columns:   pkColNames,
-		Direction: "ASC",
+		Columns:    pkColNames,
+		Directions: pkDirections,
 	}, nil
 }
 

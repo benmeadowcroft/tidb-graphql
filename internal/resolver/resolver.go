@@ -37,7 +37,7 @@ type Resolver struct {
 	executor           dbexec.QueryExecutor
 	dbSchema           *introspection.Schema
 	typeCache          map[string]*graphql.Object
-	orderByCache       map[string]*graphql.InputObject
+	orderByClauseCache map[string]*graphql.InputObject
 	whereCache         map[string]*graphql.InputObject
 	filterCache        map[string]*graphql.InputObject
 	aggregateCache     map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
@@ -51,6 +51,7 @@ type Resolver struct {
 	singularTypeCache  map[string]string
 	singularNamer      *naming.Namer
 	orderDirection     *graphql.Enum
+	orderByPolicy      *graphql.Enum
 	nonNegativeInt     *graphql.Scalar
 	bigIntType         *graphql.Scalar
 	decimalType        *graphql.Scalar
@@ -81,7 +82,7 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		executor:           executor,
 		dbSchema:           dbSchema,
 		typeCache:          make(map[string]*graphql.Object),
-		orderByCache:       make(map[string]*graphql.InputObject),
+		orderByClauseCache: make(map[string]*graphql.InputObject),
 		whereCache:         make(map[string]*graphql.InputObject),
 		filterCache:        make(map[string]*graphql.InputObject),
 		aggregateCache:     make(map[string]*graphql.Object),
@@ -255,9 +256,12 @@ func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Ta
 				Type: graphql.String,
 			},
 		}
-		if orderByInput := r.orderByInput(table); orderByInput != nil {
+		if orderByArgType := r.orderByArgType(table); orderByArgType != nil {
 			connArgs["orderBy"] = &graphql.ArgumentConfig{
-				Type: orderByInput,
+				Type: orderByArgType,
+			}
+			connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+				Type: r.orderByPolicyEnum(),
 			}
 		}
 		if whereInput := r.whereInput(table); whereInput != nil {
@@ -465,9 +469,12 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: graphql.String,
 					},
 				}
-				if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
+				if orderByArgType := r.orderByArgType(relatedTable); orderByArgType != nil {
 					connArgs["orderBy"] = &graphql.ArgumentConfig{
-						Type: orderByInput,
+						Type: orderByArgType,
+					}
+					connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+						Type: r.orderByPolicyEnum(),
 					}
 				}
 				if whereInput := r.whereInput(relatedTable); whereInput != nil {
@@ -501,9 +508,12 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: graphql.String,
 					},
 				}
-				if orderByInput := r.orderByInput(relatedTable); orderByInput != nil {
+				if orderByArgType := r.orderByArgType(relatedTable); orderByArgType != nil {
 					connArgs["orderBy"] = &graphql.ArgumentConfig{
-						Type: orderByInput,
+						Type: orderByArgType,
+					}
+					connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+						Type: r.orderByPolicyEnum(),
 					}
 				}
 				if whereInput := r.whereInput(relatedTable); whereInput != nil {
@@ -537,9 +547,12 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 						Type: graphql.String,
 					},
 				}
-				if orderByInput := r.orderByInput(junctionTable); orderByInput != nil {
+				if orderByArgType := r.orderByArgType(junctionTable); orderByArgType != nil {
 					connArgs["orderBy"] = &graphql.ArgumentConfig{
-						Type: orderByInput,
+						Type: orderByArgType,
+					}
+					connArgs["orderByPolicy"] = &graphql.ArgumentConfig{
+						Type: r.orderByPolicyEnum(),
 					}
 				}
 				if whereInput := r.whereInput(junctionTable); whereInput != nil {
@@ -1029,37 +1042,45 @@ func firstFieldAST(fields []*ast.Field) *ast.Field {
 	return fields[0]
 }
 
-func (r *Resolver) orderByInput(table introspection.Table) *graphql.InputObject {
-	options := planner.OrderByOptions(table)
-	if len(options) == 0 {
+func (r *Resolver) orderByArgType(table introspection.Table) graphql.Input {
+	clauseInput := r.orderByClauseInput(table)
+	if clauseInput == nil {
 		return nil
 	}
+	return graphql.NewList(graphql.NewNonNull(clauseInput))
+}
 
-	typeName := introspection.GraphQLTypeName(table) + "OrderBy"
+func (r *Resolver) orderByClauseInput(table introspection.Table) *graphql.InputObject {
+	fields := planner.OrderByIndexedFields(table)
+	if len(fields) == 0 {
+		return nil
+	}
+	typeName := introspection.GraphQLTypeName(table) + "OrderByClauseInput"
 	r.mu.RLock()
-	cached, ok := r.orderByCache[typeName]
+	cached, ok := r.orderByClauseCache[typeName]
 	r.mu.RUnlock()
 	if ok {
 		return cached
 	}
 
-	fields := graphql.InputObjectConfigFieldMap{}
-	for _, name := range sortedOrderByFieldNames(options) {
-		fields[name] = &graphql.InputObjectFieldConfig{
-			Type: r.orderDirectionEnum(),
+	orderDirection := r.orderDirectionEnum()
+	clauseFields := graphql.InputObjectConfigFieldMap{}
+	for _, name := range sortedOrderByFieldNames(fields) {
+		clauseFields[name] = &graphql.InputObjectFieldConfig{
+			Type: orderDirection,
 		}
 	}
 
 	input := graphql.NewInputObject(graphql.InputObjectConfig{
 		Name:   typeName,
-		Fields: fields,
+		Fields: clauseFields,
 	})
 	r.mu.Lock()
-	if cached, ok := r.orderByCache[typeName]; ok {
+	if cached, ok := r.orderByClauseCache[typeName]; ok {
 		r.mu.Unlock()
 		return cached
 	}
-	r.orderByCache[typeName] = input
+	r.orderByClauseCache[typeName] = input
 	r.mu.Unlock()
 
 	return input
@@ -1086,6 +1107,32 @@ func (r *Resolver) orderDirectionEnum() *graphql.Enum {
 		r.orderDirection = enumValue
 	}
 	cached = r.orderDirection
+	r.mu.Unlock()
+
+	return cached
+}
+
+func (r *Resolver) orderByPolicyEnum() *graphql.Enum {
+	r.mu.RLock()
+	cached := r.orderByPolicy
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	enumValue := graphql.NewEnum(graphql.EnumConfig{
+		Name: "OrderByPolicy",
+		Values: graphql.EnumValueConfigMap{
+			string(planner.OrderByPolicyIndexPrefixOnly): &graphql.EnumValueConfig{Value: string(planner.OrderByPolicyIndexPrefixOnly)},
+			string(planner.OrderByPolicyAllowNonPrefix):  &graphql.EnumValueConfig{Value: string(planner.OrderByPolicyAllowNonPrefix)},
+		},
+	})
+
+	r.mu.Lock()
+	if r.orderByPolicy == nil {
+		r.orderByPolicy = enumValue
+	}
+	cached = r.orderByPolicy
 	r.mu.Unlock()
 
 	return cached
@@ -1604,7 +1651,7 @@ func encodeCursorFromRow(row map[string]interface{}, plan *planner.ConnectionPla
 		fieldName := introspection.GraphQLFieldName(col)
 		values[i] = row[fieldName]
 	}
-	return cursor.EncodeCursor(typeName, plan.OrderByKey, plan.OrderBy.Direction, values...)
+	return cursor.EncodeCursor(typeName, plan.OrderByKey, plan.OrderBy.Directions, values...)
 }
 
 func shouldBatchForwardConnection(args map[string]interface{}) bool {
@@ -1671,6 +1718,7 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1732,6 +1780,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1767,15 +1816,15 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			return nil, fmt.Errorf("invalid source type")
 		}
 
-		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
-		pkValue := source[pkFieldName]
-		if pkValue == nil {
+		localColumns := rel.EffectiveLocalColumns()
+		pkValues, ok := sourceValuesForColumns(parentTable, source, localColumns)
+		if !ok {
 			return r.buildConnectionResult(p.Context, nil, nil, false, false), nil
 		}
 
 		// Batch only for forward first-page connection requests.
 		if shouldBatchForwardConnection(p.Args) {
-			if result, ok, err := r.tryBatchManyToManyConnection(p, parentTable, rel, pkValue); ok || err != nil {
+			if result, ok, err := r.tryBatchManyToManyConnection(p, parentTable, rel, pkValues); ok || err != nil {
 				return result, err
 			}
 		}
@@ -1793,6 +1842,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
@@ -1800,10 +1850,10 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 		plan, err := planner.PlanManyToManyConnection(
 			relatedTable,
 			rel.JunctionTable,
-			rel.JunctionLocalFK,
-			rel.JunctionRemoteFK,
-			rel.RemoteColumn,
-			pkValue,
+			rel.EffectiveJunctionLocalFKColumns(),
+			rel.EffectiveJunctionRemoteFKColumns(),
+			rel.EffectiveRemoteColumns(),
+			pkValues,
 			field,
 			p.Args,
 			opts...,
@@ -1838,15 +1888,15 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 			return nil, fmt.Errorf("invalid source type")
 		}
 
-		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
-		pkValue := source[pkFieldName]
-		if pkValue == nil {
+		localColumns := rel.EffectiveLocalColumns()
+		pkValues, ok := sourceValuesForColumns(parentTable, source, localColumns)
+		if !ok {
 			return r.buildConnectionResult(p.Context, nil, nil, false, false), nil
 		}
 
 		// Batch only for forward first-page connection requests.
 		if shouldBatchForwardConnection(p.Args) {
-			if result, ok, err := r.tryBatchEdgeListConnection(p, parentTable, rel, pkValue); ok || err != nil {
+			if result, ok, err := r.tryBatchEdgeListConnection(p, parentTable, rel, pkValues); ok || err != nil {
 				return result, err
 			}
 		}
@@ -1864,14 +1914,15 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 		var opts []planner.PlanOption
 		opts = append(opts, planner.WithFragments(p.Info.Fragments))
 		opts = append(opts, planner.WithDefaultListLimit(r.defaultLimit))
+		opts = append(opts, planner.WithSchema(r.dbSchema))
 		if r.limits != nil {
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
 
 		plan, err := planner.PlanEdgeListConnection(
 			junctionTable,
-			rel.JunctionLocalFK,
-			pkValue,
+			rel.EffectiveJunctionLocalFKColumns(),
+			pkValues,
 			field,
 			p.Args,
 			opts...,
@@ -1956,10 +2007,21 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 }
 
 func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
+	return r.whereInputForTable(table, true)
+}
+
+func (r *Resolver) scalarWhereInput(table introspection.Table) *graphql.InputObject {
+	return r.whereInputForTable(table, false)
+}
+
+func (r *Resolver) whereInputForTable(table introspection.Table, includeRelations bool) *graphql.InputObject {
 	if table.IsView {
 		return nil
 	}
 	typeName := introspection.GraphQLTypeName(table) + "Where"
+	if !includeRelations {
+		typeName = introspection.GraphQLTypeName(table) + "ScalarWhere"
+	}
 	r.mu.RLock()
 	cached, ok := r.whereCache[typeName]
 	r.mu.RUnlock()
@@ -1967,30 +2029,15 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 		return cached
 	}
 
-	// Build field map for WHERE input
-	fields := graphql.InputObjectConfigFieldMap{}
-
-	for _, col := range table.Columns {
-		// Skip JSON columns
-		if introspection.EffectiveGraphQLType(col) == sqltype.TypeJSON {
-			continue
-		}
-
-		fieldName := introspection.GraphQLFieldName(col)
-		filterType := r.getFilterInputType(table, col)
-		if filterType != nil {
-			fields[fieldName] = &graphql.InputObjectFieldConfig{
-				Type:        filterType,
-				Description: col.Comment,
-			}
-		}
-	}
-
 	// Create a lazy-initialized input object to handle recursive reference
 	var inputObj *graphql.InputObject
 	inputObj = graphql.NewInputObject(graphql.InputObjectConfig{
 		Name: typeName,
 		Fields: graphql.InputObjectConfigFieldMapThunk(func() graphql.InputObjectConfigFieldMap {
+			fields := r.scalarWhereFields(table)
+			if includeRelations {
+				r.addRelationshipWhereFields(fields, table)
+			}
 			// Add AND/OR operators that reference this type
 			fields["AND"] = &graphql.InputObjectFieldConfig{
 				Type: graphql.NewList(graphql.NewNonNull(inputObj)),
@@ -2010,6 +2057,128 @@ func (r *Resolver) whereInput(table introspection.Table) *graphql.InputObject {
 	r.whereCache[typeName] = inputObj
 	r.mu.Unlock()
 	return inputObj
+}
+
+func (r *Resolver) scalarWhereFields(table introspection.Table) graphql.InputObjectConfigFieldMap {
+	fields := graphql.InputObjectConfigFieldMap{}
+	for _, col := range table.Columns {
+		// Skip JSON columns
+		if introspection.EffectiveGraphQLType(col) == sqltype.TypeJSON {
+			continue
+		}
+
+		fieldName := introspection.GraphQLFieldName(col)
+		filterType := r.getFilterInputType(table, col)
+		if filterType != nil {
+			fields[fieldName] = &graphql.InputObjectFieldConfig{
+				Type:        filterType,
+				Description: col.Comment,
+			}
+		}
+	}
+	return fields
+}
+
+func (r *Resolver) addRelationshipWhereFields(fields graphql.InputObjectConfigFieldMap, table introspection.Table) {
+	for _, rel := range table.Relationships {
+		if _, exists := fields[rel.GraphQLFieldName]; exists {
+			continue
+		}
+
+		var relatedTable introspection.Table
+		var err error
+		switch {
+		case rel.IsEdgeList:
+			relatedTable, err = r.findTable(rel.JunctionTable)
+		default:
+			relatedTable, err = r.findTable(rel.RemoteTable)
+		}
+		if err != nil {
+			continue
+		}
+
+		var relationInput *graphql.InputObject
+		switch {
+		case rel.IsManyToOne:
+			relationInput = r.toOneRelationshipWhereInput(relatedTable)
+		case rel.IsOneToMany, rel.IsManyToMany, rel.IsEdgeList:
+			relationInput = r.toManyRelationshipWhereInput(relatedTable)
+		default:
+			continue
+		}
+		if relationInput == nil {
+			continue
+		}
+		fields[rel.GraphQLFieldName] = &graphql.InputObjectFieldConfig{
+			Type: relationInput,
+		}
+	}
+}
+
+func (r *Resolver) toManyRelationshipWhereInput(relatedTable introspection.Table) *graphql.InputObject {
+	nestedWhere := r.scalarWhereInput(relatedTable)
+	if nestedWhere == nil {
+		return nil
+	}
+
+	typeName := introspection.GraphQLTypeName(relatedTable) + "WhereToManyRelationFilter"
+	r.mu.RLock()
+	cached, ok := r.whereCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	input := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: typeName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"some": &graphql.InputObjectFieldConfig{Type: nestedWhere},
+			"none": &graphql.InputObjectFieldConfig{Type: nestedWhere},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.whereCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.whereCache[typeName] = input
+	r.mu.Unlock()
+
+	return input
+}
+
+func (r *Resolver) toOneRelationshipWhereInput(relatedTable introspection.Table) *graphql.InputObject {
+	nestedWhere := r.scalarWhereInput(relatedTable)
+	if nestedWhere == nil {
+		return nil
+	}
+
+	typeName := introspection.GraphQLTypeName(relatedTable) + "WhereToOneRelationFilter"
+	r.mu.RLock()
+	cached, ok := r.whereCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	input := graphql.NewInputObject(graphql.InputObjectConfig{
+		Name: typeName,
+		Fields: graphql.InputObjectConfigFieldMap{
+			"is":     &graphql.InputObjectFieldConfig{Type: nestedWhere},
+			"isNull": &graphql.InputObjectFieldConfig{Type: graphql.Boolean},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.whereCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.whereCache[typeName] = input
+	r.mu.Unlock()
+
+	return input
 }
 
 func (r *Resolver) enumTypeName(table introspection.Table, col introspection.Column) string {
@@ -2392,7 +2561,7 @@ func (r *Resolver) getFilterInputType(table introspection.Table, col introspecti
 	return filterType
 }
 
-func sortedOrderByFieldNames(options map[string][]string) []string {
+func sortedOrderByFieldNames(options map[string]string) []string {
 	names := make([]string, 0, len(options))
 	for name := range options {
 		names = append(names, name)
@@ -2457,24 +2626,26 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	}
 	if orderBy == nil {
 		pkColNames := make([]string, len(pkCols))
+		pkDirections := make([]string, len(pkCols))
 		for i, col := range pkCols {
 			pkColNames[i] = col.Name
+			pkDirections[i] = "ASC"
 		}
 		orderBy = &planner.OrderBy{
-			Columns:   pkColNames,
-			Direction: "ASC",
+			Columns:    pkColNames,
+			Directions: pkDirections,
 		}
 	}
 
 	var whereClause *planner.WhereClause
 	if whereArg, ok := p.Args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClause(relatedTable, whereMap)
+			whereClause, err = planner.BuildWhereClauseWithSchema(r.dbSchema, relatedTable, whereMap)
 			if err != nil {
 				return nil, true, err
 			}
 			if whereClause != nil {
-				if err := planner.ValidateIndexedColumns(relatedTable, whereClause.UsedColumns); err != nil {
+				if err := planner.ValidateWhereClauseIndexes(r.dbSchema, relatedTable, whereClause); err != nil {
 					return nil, true, err
 				}
 			}
@@ -2632,7 +2803,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 }
 
-func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
+func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValues []interface{}) (map[string]interface{}, bool, error) {
 	metrics := graphQLMetricsFromContext(p.Context)
 
 	state, ok := getBatchState(p.Context)
@@ -2688,24 +2859,26 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	}
 	if orderBy == nil {
 		pkColNames := make([]string, len(pkCols))
+		pkDirections := make([]string, len(pkCols))
 		for i, col := range pkCols {
 			pkColNames[i] = col.Name
+			pkDirections[i] = "ASC"
 		}
 		orderBy = &planner.OrderBy{
-			Columns:   pkColNames,
-			Direction: "ASC",
+			Columns:    pkColNames,
+			Directions: pkDirections,
 		}
 	}
 
 	var whereClause *planner.WhereClause
 	if whereArg, ok := p.Args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClauseQualified(relatedTable, relatedTable.Name, whereMap)
+			whereClause, err = planner.BuildWhereClauseQualifiedWithSchema(r.dbSchema, relatedTable, relatedTable.Name, whereMap)
 			if err != nil {
 				return nil, true, err
 			}
 			if whereClause != nil {
-				if err := planner.ValidateIndexedColumns(relatedTable, whereClause.UsedColumns); err != nil {
+				if err := planner.ValidateWhereClauseIndexes(r.dbSchema, relatedTable, whereClause); err != nil {
 					return nil, true, err
 				}
 			}
@@ -2715,13 +2888,27 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	selection := planner.SelectedColumnsForConnection(relatedTable, field, p.Info.Fragments, orderBy)
 	orderByKey := planner.OrderByKey(relatedTable, orderBy.Columns)
 	cursorCols := planner.CursorColumns(relatedTable, orderBy)
+	localColumns := rel.EffectiveLocalColumns()
+	junctionLocalColumns := rel.EffectiveJunctionLocalFKColumns()
+	junctionRemoteColumns := rel.EffectiveJunctionRemoteFKColumns()
+	remoteColumns := rel.EffectiveRemoteColumns()
+	if len(localColumns) == 0 || len(localColumns) != len(pkValues) {
+		return nil, true, fmt.Errorf("invalid many-to-many local key mapping")
+	}
+	if len(junctionLocalColumns) != len(localColumns) {
+		return nil, true, fmt.Errorf("invalid many-to-many junction local key mapping")
+	}
+	if len(junctionRemoteColumns) != len(remoteColumns) {
+		return nil, true, fmt.Errorf("invalid many-to-many junction remote key mapping")
+	}
+	currentParentTupleKey := tupleKeyFromValues(pkValues)
 
 	relKey := fmt.Sprintf(
 		"%s|%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.RemoteTable,
 		rel.JunctionTable,
-		rel.RemoteColumn,
+		strings.Join(remoteColumns, ","),
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
@@ -2732,7 +2919,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		if metrics != nil {
 			metrics.RecordBatchCacheHit(p.Context, relationManyToMany)
 		}
-		if result, ok := cached[fmt.Sprint(pkValue)]; ok {
+		if result, ok := cached[currentParentTupleKey]; ok {
 			if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
 				seedBatchRows(p, nodes)
 			}
@@ -2745,23 +2932,27 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		metrics.RecordBatchCacheMiss(p.Context, relationManyToMany)
 	}
 
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
-	parentValues := uniqueParentValues(parentRows, parentField)
-	if len(parentValues) == 0 {
+	parentFields := make([]string, len(localColumns))
+	for i, colName := range localColumns {
+		parentFields[i] = graphQLFieldNameForColumn(table, colName)
+	}
+	parentTuples := uniqueParentTuples(parentRows, parentFields)
+	if len(parentTuples) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
 		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
-	parentValueByKey := make(map[string]interface{}, len(parentValues))
-	for _, value := range parentValues {
-		parentValueByKey[fmt.Sprint(value)] = value
+	parentValueByKey := make(map[string]planner.ParentTuple, len(parentTuples))
+	for _, tuple := range parentTuples {
+		parentValueByKey[tupleKeyFromValues(tuple.Values)] = tuple
 	}
 
-	chunks := chunkValues(parentValues, batchMaxInClause)
+	chunks := chunkParentTuples(parentTuples, batchMaxInClause)
 	if metrics != nil {
-		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationManyToMany)
+		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentTuples), len(chunks)), relationManyToMany)
 	}
 
 	groupedConnections := make(map[string]map[string]interface{})
+	parentAliases := planner.BatchParentAliases(len(junctionLocalColumns))
 	for _, chunk := range chunks {
 		if metrics != nil {
 			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationManyToMany)
@@ -2769,9 +2960,9 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		planned, err := planner.PlanManyToManyConnectionBatch(
 			relatedTable,
 			rel.JunctionTable,
-			rel.JunctionLocalFK,
-			rel.JunctionRemoteFK,
-			rel.RemoteColumn,
+			junctionLocalColumns,
+			junctionRemoteColumns,
+			remoteColumns,
 			selection,
 			chunk,
 			first,
@@ -2795,7 +2986,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		if err != nil {
 			return nil, true, normalizeQueryError(err)
 		}
-		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
+		results, err := scanRowsWithExtras(rows, selection, parentAliases)
 		rows.Close()
 		if err != nil {
 			return nil, true, err
@@ -2804,9 +2995,9 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationManyToMany)
 		}
 
-		grouped := groupByAlias(results, planner.BatchParentAlias)
+		grouped := groupByAliases(results, parentAliases)
 		for parentID, rows := range grouped {
-			parentValue := parentValueByKey[parentID]
+			parentTuple := parentValueByKey[parentID]
 			hasNext := len(rows) > first
 			if hasNext {
 				rows = rows[:first]
@@ -2815,10 +3006,10 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 			countQuery, err := planner.BuildManyToManyCountSQL(
 				relatedTable,
 				rel.JunctionTable,
-				rel.JunctionLocalFK,
-				rel.JunctionRemoteFK,
-				rel.RemoteColumn,
-				parentValue,
+				junctionLocalColumns,
+				junctionRemoteColumns,
+				remoteColumns,
+				parentTuple.Values,
 				whereClause,
 			)
 			if err != nil {
@@ -2827,10 +3018,10 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 			aggregateBase, err := planner.BuildManyToManyAggregateBaseSQL(
 				relatedTable,
 				rel.JunctionTable,
-				rel.JunctionLocalFK,
-				rel.JunctionRemoteFK,
-				rel.RemoteColumn,
-				parentValue,
+				junctionLocalColumns,
+				junctionRemoteColumns,
+				remoteColumns,
+				parentTuple.Values,
 				whereClause,
 			)
 			if err != nil {
@@ -2862,7 +3053,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	}
 	state.setConnectionRows(relKey, groupedConnections)
 
-	if result, ok := groupedConnections[fmt.Sprint(pkValue)]; ok {
+	if result, ok := groupedConnections[currentParentTupleKey]; ok {
 		if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
 			seedBatchRows(p, nodes)
 		}
@@ -2871,7 +3062,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 }
 
-func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
+func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValues []interface{}) (map[string]interface{}, bool, error) {
 	metrics := graphQLMetricsFromContext(p.Context)
 
 	state, ok := getBatchState(p.Context)
@@ -2927,24 +3118,26 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	}
 	if orderBy == nil {
 		pkColNames := make([]string, len(pkCols))
+		pkDirections := make([]string, len(pkCols))
 		for i, col := range pkCols {
 			pkColNames[i] = col.Name
+			pkDirections[i] = "ASC"
 		}
 		orderBy = &planner.OrderBy{
-			Columns:   pkColNames,
-			Direction: "ASC",
+			Columns:    pkColNames,
+			Directions: pkDirections,
 		}
 	}
 
 	var whereClause *planner.WhereClause
 	if whereArg, ok := p.Args["where"]; ok {
 		if whereMap, ok := whereArg.(map[string]interface{}); ok {
-			whereClause, err = planner.BuildWhereClause(junctionTable, whereMap)
+			whereClause, err = planner.BuildWhereClauseWithSchema(r.dbSchema, junctionTable, whereMap)
 			if err != nil {
 				return nil, true, err
 			}
 			if whereClause != nil {
-				if err := planner.ValidateIndexedColumns(junctionTable, whereClause.UsedColumns); err != nil {
+				if err := planner.ValidateWhereClauseIndexes(r.dbSchema, junctionTable, whereClause); err != nil {
 					return nil, true, err
 				}
 			}
@@ -2954,12 +3147,21 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	selection := planner.SelectedColumnsForConnection(junctionTable, field, p.Info.Fragments, orderBy)
 	orderByKey := planner.OrderByKey(junctionTable, orderBy.Columns)
 	cursorCols := planner.CursorColumns(junctionTable, orderBy)
+	localColumns := rel.EffectiveLocalColumns()
+	junctionLocalColumns := rel.EffectiveJunctionLocalFKColumns()
+	if len(localColumns) == 0 || len(localColumns) != len(pkValues) {
+		return nil, true, fmt.Errorf("invalid edge-list local key mapping")
+	}
+	if len(junctionLocalColumns) != len(localColumns) {
+		return nil, true, fmt.Errorf("invalid edge-list junction local key mapping")
+	}
+	currentParentTupleKey := tupleKeyFromValues(pkValues)
 
 	relKey := fmt.Sprintf(
 		"%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.JunctionTable,
-		rel.JunctionLocalFK,
+		strings.Join(junctionLocalColumns, ","),
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
@@ -2970,7 +3172,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		if metrics != nil {
 			metrics.RecordBatchCacheHit(p.Context, relationEdgeList)
 		}
-		if result, ok := cached[fmt.Sprint(pkValue)]; ok {
+		if result, ok := cached[currentParentTupleKey]; ok {
 			if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
 				seedBatchRows(p, nodes)
 			}
@@ -2983,30 +3185,34 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		metrics.RecordBatchCacheMiss(p.Context, relationEdgeList)
 	}
 
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
-	parentValues := uniqueParentValues(parentRows, parentField)
-	if len(parentValues) == 0 {
+	parentFields := make([]string, len(localColumns))
+	for i, colName := range localColumns {
+		parentFields[i] = graphQLFieldNameForColumn(table, colName)
+	}
+	parentTuples := uniqueParentTuples(parentRows, parentFields)
+	if len(parentTuples) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
 		return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 	}
-	parentValueByKey := make(map[string]interface{}, len(parentValues))
-	for _, value := range parentValues {
-		parentValueByKey[fmt.Sprint(value)] = value
+	parentValueByKey := make(map[string]planner.ParentTuple, len(parentTuples))
+	for _, tuple := range parentTuples {
+		parentValueByKey[tupleKeyFromValues(tuple.Values)] = tuple
 	}
 
-	chunks := chunkValues(parentValues, batchMaxInClause)
+	chunks := chunkParentTuples(parentTuples, batchMaxInClause)
 	if metrics != nil {
-		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationEdgeList)
+		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentTuples), len(chunks)), relationEdgeList)
 	}
 
 	groupedConnections := make(map[string]map[string]interface{})
+	parentAliases := planner.BatchParentAliases(len(junctionLocalColumns))
 	for _, chunk := range chunks {
 		if metrics != nil {
 			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationEdgeList)
 		}
 		planned, err := planner.PlanEdgeListConnectionBatch(
 			junctionTable,
-			rel.JunctionLocalFK,
+			junctionLocalColumns,
 			selection,
 			chunk,
 			first,
@@ -3030,7 +3236,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		if err != nil {
 			return nil, true, normalizeQueryError(err)
 		}
-		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
+		results, err := scanRowsWithExtras(rows, selection, parentAliases)
 		rows.Close()
 		if err != nil {
 			return nil, true, err
@@ -3039,9 +3245,9 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationEdgeList)
 		}
 
-		grouped := groupByAlias(results, planner.BatchParentAlias)
+		grouped := groupByAliases(results, parentAliases)
 		for parentID, rows := range grouped {
-			parentValue := parentValueByKey[parentID]
+			parentTuple := parentValueByKey[parentID]
 			hasNext := len(rows) > first
 			if hasNext {
 				rows = rows[:first]
@@ -3049,8 +3255,8 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 
 			countQuery, err := planner.BuildEdgeListCountSQL(
 				junctionTable,
-				rel.JunctionLocalFK,
-				parentValue,
+				junctionLocalColumns,
+				parentTuple.Values,
 				whereClause,
 			)
 			if err != nil {
@@ -3058,8 +3264,8 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 			}
 			aggregateBase, err := planner.BuildEdgeListAggregateBaseSQL(
 				junctionTable,
-				rel.JunctionLocalFK,
-				parentValue,
+				junctionLocalColumns,
+				parentTuple.Values,
 				whereClause,
 			)
 			if err != nil {
@@ -3091,7 +3297,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	}
 	state.setConnectionRows(relKey, groupedConnections)
 
-	if result, ok := groupedConnections[fmt.Sprint(pkValue)]; ok {
+	if result, ok := groupedConnections[currentParentTupleKey]; ok {
 		if nodes, ok := result["nodes"].([]map[string]interface{}); ok {
 			seedBatchRows(p, nodes)
 		}
@@ -3100,7 +3306,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 }
 
-func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, fkValue interface{}) (map[string]interface{}, bool, error) {
+func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, fkValues []interface{}) (map[string]interface{}, bool, error) {
 	metrics := graphQLMetricsFromContext(p.Context)
 
 	state, ok := getBatchState(p.Context)
@@ -3137,38 +3343,47 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		return nil, true, fmt.Errorf("missing field AST")
 	}
 	selection := planner.SelectedColumns(relatedTable, field, p.Info.Fragments)
+	remoteColumns := rel.EffectiveRemoteColumns()
+	localColumns := rel.EffectiveLocalColumns()
+	if len(remoteColumns) == 0 || len(remoteColumns) != len(localColumns) || len(remoteColumns) != len(fkValues) {
+		return nil, true, fmt.Errorf("invalid many-to-one batch mapping")
+	}
 
-	relKey := fmt.Sprintf("%s|%s|%s|%s", relatedTable.Name, rel.RemoteColumn, parentKey, columnsKey(selection))
+	relKey := fmt.Sprintf("%s|%s|%s|%s", relatedTable.Name, strings.Join(remoteColumns, ","), parentKey, columnsKey(selection))
 	if cached := state.getChildRows(relKey); cached != nil {
 		state.IncrementCacheHit()
 		if metrics != nil {
 			metrics.RecordBatchCacheHit(p.Context, relationManyToOne)
 		}
-		return firstGroupedRecord(cached, fkValue), true, nil
+		return firstGroupedRecordByTuple(cached, fkValues), true, nil
 	}
 	state.IncrementCacheMiss()
 	if metrics != nil {
 		metrics.RecordBatchCacheMiss(p.Context, relationManyToOne)
 	}
 
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
-	parentValues := uniqueParentValues(parentRows, parentField)
-	if len(parentValues) == 0 {
+	parentFields := make([]string, len(localColumns))
+	for i, colName := range localColumns {
+		parentFields[i] = graphQLFieldNameForColumn(table, colName)
+	}
+	parentTuples := uniqueParentTuples(parentRows, parentFields)
+	if len(parentTuples) == 0 {
 		state.setChildRows(relKey, map[string][]map[string]interface{}{})
 		return nil, true, nil
 	}
 
-	chunks := chunkValues(parentValues, batchMaxInClause)
+	chunks := chunkParentTuples(parentTuples, batchMaxInClause)
 	if metrics != nil {
-		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationManyToOne)
+		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentTuples), len(chunks)), relationManyToOne)
 	}
 
 	grouped := make(map[string][]map[string]interface{})
+	parentAliases := planner.BatchParentAliases(len(remoteColumns))
 	for _, chunk := range chunks {
 		if metrics != nil {
 			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationManyToOne)
 		}
-		planned, err := planner.PlanManyToOneBatch(relatedTable, selection, rel.RemoteColumn, chunk)
+		planned, err := planner.PlanManyToOneBatch(relatedTable, selection, remoteColumns, chunk)
 		if err != nil {
 			return nil, true, err
 		}
@@ -3180,7 +3395,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		if err != nil {
 			return nil, true, normalizeQueryError(err)
 		}
-		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
+		results, err := scanRowsWithExtras(rows, selection, parentAliases)
 		rows.Close()
 		if err != nil {
 			return nil, true, err
@@ -3189,7 +3404,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationManyToOne)
 		}
 
-		mergeGrouped(grouped, groupByAlias(results, planner.BatchParentAlias))
+		mergeGrouped(grouped, groupByAliases(results, parentAliases))
 	}
 	if len(grouped) == 0 {
 		state.setChildRows(relKey, map[string][]map[string]interface{}{})
@@ -3197,7 +3412,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 	}
 	state.setChildRows(relKey, grouped)
 
-	return firstGroupedRecord(grouped, fkValue), true, nil
+	return firstGroupedRecordByTuple(grouped, fkValues), true, nil
 }
 
 func uniqueParentValues(rows []map[string]interface{}, key string) []interface{} {
@@ -3220,6 +3435,36 @@ func uniqueParentValues(rows []map[string]interface{}, key string) []interface{}
 	return values
 }
 
+func uniqueParentTuples(rows []map[string]interface{}, keys []string) []planner.ParentTuple {
+	if len(keys) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	tuples := make([]planner.ParentTuple, 0, len(rows))
+	for _, row := range rows {
+		values := make([]interface{}, len(keys))
+		missing := false
+		for i, key := range keys {
+			value := row[key]
+			if value == nil {
+				missing = true
+				break
+			}
+			values[i] = value
+		}
+		if missing {
+			continue
+		}
+		tupleKey := tupleKeyFromValues(values)
+		if _, ok := seen[tupleKey]; ok {
+			continue
+		}
+		seen[tupleKey] = struct{}{}
+		tuples = append(tuples, planner.ParentTuple{Values: values})
+	}
+	return tuples
+}
+
 func groupByField(rows []map[string]interface{}, fieldName string) map[string][]map[string]interface{} {
 	grouped := make(map[string][]map[string]interface{})
 	for _, row := range rows {
@@ -3239,6 +3484,20 @@ func groupByAlias(rows []map[string]interface{}, alias string) map[string][]map[
 	return grouped
 }
 
+func groupByAliases(rows []map[string]interface{}, aliases []string) map[string][]map[string]interface{} {
+	grouped := make(map[string][]map[string]interface{})
+	for _, row := range rows {
+		values := make([]interface{}, len(aliases))
+		for i, alias := range aliases {
+			values[i] = row[alias]
+			delete(row, alias)
+		}
+		key := tupleKeyFromValues(values)
+		grouped[key] = append(grouped[key], row)
+	}
+	return grouped
+}
+
 func mergeGrouped(target, src map[string][]map[string]interface{}) {
 	for key, rows := range src {
 		target[key] = append(target[key], rows...)
@@ -3253,6 +3512,24 @@ func chunkValues(values []interface{}, max int) [][]interface{} {
 		return [][]interface{}{values}
 	}
 	chunks := make([][]interface{}, 0, (len(values)+max-1)/max)
+	for start := 0; start < len(values); start += max {
+		end := start + max
+		if end > len(values) {
+			end = len(values)
+		}
+		chunks = append(chunks, values[start:end])
+	}
+	return chunks
+}
+
+func chunkParentTuples(values []planner.ParentTuple, max int) [][]planner.ParentTuple {
+	if len(values) == 0 {
+		return nil
+	}
+	if max <= 0 || len(values) <= max {
+		return [][]planner.ParentTuple{values}
+	}
+	chunks := make([][]planner.ParentTuple, 0, (len(values)+max-1)/max)
 	for start := 0; start < len(values); start += max {
 		end := start + max
 		if end > len(values) {
@@ -3290,7 +3567,7 @@ func orderByKey(orderBy *planner.OrderBy) string {
 	if orderBy == nil {
 		return ""
 	}
-	return strings.Join(orderBy.Columns, ",") + ":" + orderBy.Direction
+	return strings.Join(orderBy.Columns, ",") + ":" + strings.Join(orderBy.Directions, ",")
 }
 
 func aggregateColumnsKey(columns []planner.AggregateColumn) string {
@@ -3305,14 +3582,22 @@ func aggregateColumnsKey(columns []planner.AggregateColumn) string {
 }
 
 func firstGroupedRecord(grouped map[string][]map[string]interface{}, key interface{}) map[string]interface{} {
+	return firstGroupedRecordByTuple(grouped, []interface{}{key})
+}
+
+func firstGroupedRecordByTuple(grouped map[string][]map[string]interface{}, values []interface{}) map[string]interface{} {
 	if grouped == nil {
 		return nil
 	}
-	rows := grouped[fmt.Sprint(key)]
+	rows := grouped[tupleKeyFromValues(values)]
 	if len(rows) == 0 {
 		return nil
 	}
 	return rows[0]
+}
+
+func tupleKeyFromValues(values []interface{}) string {
+	return encodeCanonicalValue(values)
 }
 
 const batchParentKeyField = "__batch_parent_key"
@@ -3559,6 +3844,22 @@ func graphQLFieldNameForColumn(table introspection.Table, columnName string) str
 	return introspection.ToGraphQLFieldName(columnName)
 }
 
+func sourceValuesForColumns(table introspection.Table, source map[string]interface{}, columns []string) ([]interface{}, bool) {
+	if len(columns) == 0 {
+		return nil, false
+	}
+	values := make([]interface{}, len(columns))
+	for i, colName := range columns {
+		fieldName := graphQLFieldNameForColumn(table, colName)
+		value := source[fieldName]
+		if value == nil {
+			return nil, false
+		}
+		values[i] = value
+	}
+	return values, true
+}
+
 func columnsForPlan(plan *planner.Plan) []introspection.Column {
 	if plan == nil {
 		return nil
@@ -3629,6 +3930,8 @@ func convertValue(val interface{}) interface{} {
 
 func convertColumnValue(col introspection.Column, val interface{}) interface{} {
 	switch introspection.EffectiveGraphQLType(col) {
+	case sqltype.TypeBoolean:
+		return coerceBooleanColumnValue(val)
 	case sqltype.TypeSet:
 		return parseSetColumnValue(val)
 	case sqltype.TypeBytes:
@@ -3639,6 +3942,57 @@ func convertColumnValue(col introspection.Column, val interface{}) interface{} {
 		return val
 	default:
 		return convertValue(val)
+	}
+}
+
+func coerceBooleanColumnValue(val interface{}) interface{} {
+	if val == nil {
+		return nil
+	}
+
+	switch v := val.(type) {
+	case bool:
+		return v
+	case int:
+		return v != 0
+	case int8:
+		return v != 0
+	case int16:
+		return v != 0
+	case int32:
+		return v != 0
+	case int64:
+		return v != 0
+	case uint:
+		return v != 0
+	case uint8:
+		return v != 0
+	case uint16:
+		return v != 0
+	case uint32:
+		return v != 0
+	case uint64:
+		return v != 0
+	case float32:
+		return v != 0
+	case float64:
+		return v != 0
+	case []byte:
+		return coerceBooleanColumnValue(string(v))
+	case string:
+		raw := strings.TrimSpace(v)
+		if raw == "" {
+			return false
+		}
+		if parsed, err := strconv.ParseFloat(raw, 64); err == nil {
+			return parsed != 0
+		}
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			return parsed
+		}
+		return convertValue(v)
+	default:
+		return convertValue(v)
 	}
 }
 
@@ -3770,15 +4124,17 @@ func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspe
 			return nil, fmt.Errorf("invalid source type")
 		}
 
-		// Get FK value (e.g., chapterId from verse)
-		fkFieldName := graphQLFieldNameForColumn(table, rel.LocalColumn)
-		fkValue := source[fkFieldName]
-
-		if fkValue == nil {
+		localColumns := rel.EffectiveLocalColumns()
+		remoteColumns := rel.EffectiveRemoteColumns()
+		if len(localColumns) == 0 || len(localColumns) != len(remoteColumns) {
+			return nil, fmt.Errorf("invalid many-to-one mapping for %s", rel.GraphQLFieldName)
+		}
+		fkValues, ok := sourceValuesForColumns(table, source, localColumns)
+		if !ok {
 			return nil, nil // Nullable FK
 		}
 
-		if result, ok, err := r.tryBatchManyToOne(p, table, rel, fkValue); ok || err != nil {
+		if result, ok, err := r.tryBatchManyToOne(p, table, rel, fkValues); ok || err != nil {
 			return result, err
 		}
 
@@ -3792,10 +4148,10 @@ func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspe
 			return nil, fmt.Errorf("missing field AST")
 		}
 		planned, err := planner.PlanQuery(r.dbSchema, field, p.Args, planner.WithFragments(p.Info.Fragments), planner.WithDefaultListLimit(r.defaultLimit), planner.WithRelationship(planner.RelationshipContext{
-			RelatedTable: relatedTable,
-			RemoteColumn: rel.RemoteColumn,
-			Value:        fkValue,
-			IsManyToOne:  true,
+			RelatedTable:  relatedTable,
+			RemoteColumns: remoteColumns,
+			Values:        fkValues,
+			IsManyToOne:   true,
 		}))
 		if err != nil {
 			return nil, fmt.Errorf("failed to build query: %w", err)

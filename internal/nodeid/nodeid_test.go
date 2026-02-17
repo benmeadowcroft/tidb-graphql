@@ -75,6 +75,26 @@ func TestParsePKValue_Int(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParsePKValue_BooleanNumeric(t *testing.T) {
+	col := introspection.Column{Name: "is_active", DataType: "tinyint", ColumnType: "tinyint(1)"}
+
+	value, err := ParsePKValue(col, 0.0)
+	require.NoError(t, err)
+	assert.Equal(t, false, value)
+
+	value, err = ParsePKValue(col, 2.0)
+	require.NoError(t, err)
+	assert.Equal(t, true, value)
+
+	value, err = ParsePKValue(col, "0")
+	require.NoError(t, err)
+	assert.Equal(t, false, value)
+
+	value, err = ParsePKValue(col, "2")
+	require.NoError(t, err)
+	assert.Equal(t, true, value)
+}
+
 func TestParsePKValue_String(t *testing.T) {
 	col := introspection.Column{Name: "code", DataType: "varchar(10)"}
 	value, err := ParsePKValue(col, "abc")

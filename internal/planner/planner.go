@@ -25,6 +25,25 @@ var ErrNoPrimaryKey = errors.New("no primary key")
 // BatchParentAlias is the column alias used to return parent keys in batch queries.
 const BatchParentAlias = "__batch_parent_id"
 
+const batchParentAliasPrefix = "__batch_parent_"
+
+// ParentTuple represents an ordered composite parent key used in batch plans.
+type ParentTuple struct {
+	Values []interface{}
+}
+
+// BatchParentAliases returns the extra scan aliases emitted by batch SQL.
+func BatchParentAliases(columnCount int) []string {
+	if columnCount <= 1 {
+		return []string{BatchParentAlias}
+	}
+	aliases := make([]string, columnCount)
+	for i := 0; i < columnCount; i++ {
+		aliases[i] = batchParentAliasPrefix + fmt.Sprint(i)
+	}
+	return aliases
+}
+
 // SQLQuery represents a planned SQL statement with bound args.
 type SQLQuery struct {
 	SQL  string
@@ -92,36 +111,73 @@ func PlanUniqueKeyLookup(table introspection.Table, columns []introspection.Colu
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
-// PlanManyToOne builds the SQL for a many-to-one lookup (FK -> parent table).
-func PlanManyToOne(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, fkValue interface{}) (SQLQuery, error) {
-	query, args, err := sq.Select(columnNames(relatedTable, columns)...).
-		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue}).
-		PlaceholderFormat(sq.Question).
-		ToSql()
+// PlanManyToOne builds SQL for a many-to-one lookup (FK -> parent table), including composite mappings.
+func PlanManyToOne(relatedTable introspection.Table, columns []introspection.Column, remoteColumns []string, fkValues []interface{}) (SQLQuery, error) {
+	if len(remoteColumns) == 0 || len(remoteColumns) != len(fkValues) {
+		return SQLQuery{}, fmt.Errorf("many-to-one mapping requires equal remote columns and values")
+	}
+
+	builder := sq.Select(columnNames(relatedTable, columns)...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name))
+	if len(remoteColumns) == 1 {
+		builder = builder.Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumns[0]): fkValues[0]})
+	} else {
+		whereClause := sq.Eq{}
+		for i, col := range remoteColumns {
+			whereClause[sqlutil.QuoteIdentifier(col)] = fkValues[i]
+		}
+		builder = builder.Where(whereClause)
+	}
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return SQLQuery{}, err
 	}
-
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
 // PlanManyToOneBatch builds the SQL for a batched many-to-one lookup (FK -> parent table).
-func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumn string, values []interface{}) (SQLQuery, error) {
+func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspection.Column, remoteColumns []string, values []ParentTuple) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
 	}
+	if len(remoteColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("many-to-one batch requires at least one remote column")
+	}
+	aliases := BatchParentAliases(len(remoteColumns))
 
-	query, args, err := sq.Select(columnNames(relatedTable, columns)...).
-		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
-		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): values}).
-		Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(remoteColumn), BatchParentAlias)).
-		PlaceholderFormat(sq.Question).
-		ToSql()
+	builder := sq.Select(columnNames(relatedTable, columns)...).
+		From(sqlutil.QuoteIdentifier(relatedTable.Name))
+
+	if len(remoteColumns) == 1 {
+		flat := make([]interface{}, 0, len(values))
+		for _, tuple := range values {
+			if len(tuple.Values) != 1 {
+				return SQLQuery{}, fmt.Errorf("many-to-one batch tuple width mismatch")
+			}
+			flat = append(flat, tuple.Values[0])
+		}
+		builder = builder.
+			Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumns[0]): flat}).
+			Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(remoteColumns[0]), aliases[0]))
+	} else {
+		whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(remoteColumns, ""), values)
+		if err != nil {
+			return SQLQuery{}, err
+		}
+		if whereSQL == "" {
+			return SQLQuery{}, nil
+		}
+		builder = builder.Where(sq.Expr(whereSQL, whereArgs...))
+		for i, col := range remoteColumns {
+			builder = builder.Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(col), aliases[i]))
+		}
+	}
+
+	query, args, err := builder.PlaceholderFormat(sq.Question).ToSql()
 	if err != nil {
 		return SQLQuery{}, err
 	}
-
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
@@ -129,11 +185,11 @@ func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspectio
 func PlanManyToManyBatch(
 	junctionTable string,
 	targetTable introspection.Table,
-	junctionLocalFK string,
-	junctionRemoteFK string,
-	targetPK string,
+	junctionLocalFKColumns []string,
+	junctionRemoteFKColumns []string,
+	targetPKColumns []string,
 	columns []introspection.Column,
-	values []interface{},
+	values []ParentTuple,
 	limit, offset int,
 	orderBy *OrderBy,
 	where *WhereClause,
@@ -152,17 +208,36 @@ func PlanManyToManyBatch(
 
 	cols := columnNames(targetTable, columns)
 	columnList := strings.Join(cols, ", ")
-	placeholders := sq.Placeholders(len(values))
 
 	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
 	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
-	quotedRemoteFK := sqlutil.QuoteIdentifier(junctionRemoteFK)
-	quotedTargetPK := sqlutil.QuoteIdentifier(targetPK)
-	partitionColumn := fmt.Sprintf("%s.%s", quotedJunction, quotedLocalFK)
+	if len(junctionLocalFKColumns) == 0 || len(junctionRemoteFKColumns) == 0 || len(targetPKColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("many-to-many batch requires key column mappings")
+	}
+	if len(junctionRemoteFKColumns) != len(targetPKColumns) {
+		return SQLQuery{}, fmt.Errorf("many-to-many batch remote key mapping width mismatch")
+	}
 
-	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
-	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, partitionColumn, BatchParentAlias)
+	partitionColumns := quotedColumns(junctionLocalFKColumns, quotedJunction)
+	partitionExpr := strings.Join(partitionColumns, ", ")
+	parentAliases := BatchParentAliases(len(partitionColumns))
+	innerParentCols := make([]string, len(partitionColumns))
+	outerParentCols := make([]string, len(partitionColumns))
+	for i := range partitionColumns {
+		innerParentCols[i] = fmt.Sprintf("%s AS %s", partitionColumns[i], parentAliases[i])
+		outerParentCols[i] = parentAliases[i]
+	}
+	outerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(outerParentCols, ", "))
+	innerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(innerParentCols, ", "))
+
+	joinPredicates := make([]string, len(junctionRemoteFKColumns))
+	for i := range junctionRemoteFKColumns {
+		joinPredicates[i] = fmt.Sprintf(
+			"%s.%s = %s.%s",
+			quotedJunction, sqlutil.QuoteIdentifier(junctionRemoteFKColumns[i]),
+			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
+		)
+	}
 
 	whereSQL := ""
 	var whereArgs []interface{}
@@ -174,24 +249,29 @@ func PlanManyToManyBatch(
 		whereSQL = " AND " + condSQL
 		whereArgs = condArgs
 	}
+	parentWhereSQL, parentWhereArgs, err := buildTupleInCondition(partitionColumns, values)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if parentWhereSQL == "" {
+		return SQLQuery{}, nil
+	}
 
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s.%s = %s.%s WHERE %s.%s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s WHERE %s%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
-		partitionColumn,
+		partitionExpr,
 		orderClause,
 		quotedTarget,
 		quotedJunction,
-		quotedJunction, quotedRemoteFK,
-		quotedTarget, quotedTargetPK,
-		quotedJunction, quotedLocalFK,
-		placeholders,
+		strings.Join(joinPredicates, " AND "),
+		parentWhereSQL,
 		whereSQL,
-		BatchParentAlias,
+		strings.Join(outerParentCols, ", "),
 	)
 
-	args := append([]interface{}{}, values...)
+	args := append([]interface{}{}, parentWhereArgs...)
 	args = append(args, whereArgs...)
 	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
@@ -200,9 +280,9 @@ func PlanManyToManyBatch(
 // PlanEdgeListBatch builds a batched SQL query for edge list relationships with per-parent limits.
 func PlanEdgeListBatch(
 	junctionTable introspection.Table,
-	junctionLocalFK string,
+	junctionLocalFKColumns []string,
 	columns []introspection.Column,
-	values []interface{},
+	values []ParentTuple,
 	limit, offset int,
 	orderBy *OrderBy,
 	where *WhereClause,
@@ -221,10 +301,20 @@ func PlanEdgeListBatch(
 
 	cols := columnNames(junctionTable, columns)
 	columnList := strings.Join(cols, ", ")
-	placeholders := sq.Placeholders(len(values))
+	if len(junctionLocalFKColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("edge-list batch requires at least one local FK column")
+	}
 
 	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
-	quotedLocalFK := sqlutil.QuoteIdentifier(junctionLocalFK)
+	partitionColumns := quotedColumns(junctionLocalFKColumns, "")
+	partitionExpr := strings.Join(partitionColumns, ", ")
+	parentAliases := BatchParentAliases(len(partitionColumns))
+	innerParentCols := make([]string, len(partitionColumns))
+	outerParentCols := make([]string, len(partitionColumns))
+	for i := range partitionColumns {
+		innerParentCols[i] = fmt.Sprintf("%s AS %s", partitionColumns[i], parentAliases[i])
+		outerParentCols[i] = parentAliases[i]
+	}
 
 	whereSQL := ""
 	var whereArgs []interface{}
@@ -236,23 +326,29 @@ func PlanEdgeListBatch(
 		whereSQL = " AND " + condSQL
 		whereArgs = condArgs
 	}
+	parentWhereSQL, parentWhereArgs, err := buildTupleInCondition(partitionColumns, values)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	if parentWhereSQL == "" {
+		return SQLQuery{}, nil
+	}
 
-	outerSelect := fmt.Sprintf("%s, %s", columnList, BatchParentAlias)
-	innerSelect := fmt.Sprintf("%s, %s AS %s", columnList, quotedLocalFK, BatchParentAlias)
+	outerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(outerParentCols, ", "))
+	innerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(innerParentCols, ", "))
 	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s IN (%s)%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
+		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s WHERE %s%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
 		outerSelect,
 		innerSelect,
-		quotedLocalFK,
+		partitionExpr,
 		orderClause,
 		quotedTable,
-		quotedLocalFK,
-		placeholders,
+		parentWhereSQL,
 		whereSQL,
-		BatchParentAlias,
+		strings.Join(outerParentCols, ", "),
 	)
 
-	args := append([]interface{}{}, values...)
+	args := append([]interface{}{}, parentWhereArgs...)
 	args = append(args, whereArgs...)
 	args = append(args, offset, offset+limit)
 	return SQLQuery{SQL: query, Args: args}, nil
@@ -330,6 +426,53 @@ func PlanOneToManyBatch(
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
+func quotedColumns(columns []string, tableAlias string) []string {
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		if tableAlias == "" {
+			quoted[i] = sqlutil.QuoteIdentifier(col)
+			continue
+		}
+		quoted[i] = fmt.Sprintf("%s.%s", tableAlias, sqlutil.QuoteIdentifier(col))
+	}
+	return quoted
+}
+
+func buildTupleInCondition(quotedColumns []string, tuples []ParentTuple) (string, []interface{}, error) {
+	if len(tuples) == 0 {
+		return "", nil, nil
+	}
+	width := len(quotedColumns)
+	if width == 0 {
+		return "", nil, fmt.Errorf("tuple IN requires at least one column")
+	}
+
+	if width == 1 {
+		placeholders := sq.Placeholders(len(tuples))
+		args := make([]interface{}, 0, len(tuples))
+		for _, tuple := range tuples {
+			if len(tuple.Values) != 1 {
+				return "", nil, fmt.Errorf("tuple width mismatch: expected 1 value")
+			}
+			args = append(args, tuple.Values[0])
+		}
+		return fmt.Sprintf("%s IN (%s)", quotedColumns[0], placeholders), args, nil
+	}
+
+	args := make([]interface{}, 0, len(tuples)*width)
+	rowPlaceholders := make([]string, 0, len(tuples))
+	valuePlaceholders := "(" + strings.TrimSuffix(strings.Repeat("?,", width), ",") + ")"
+	for _, tuple := range tuples {
+		if len(tuple.Values) != width {
+			return "", nil, fmt.Errorf("tuple width mismatch: expected %d values", width)
+		}
+		rowPlaceholders = append(rowPlaceholders, valuePlaceholders)
+		args = append(args, tuple.Values...)
+	}
+
+	return fmt.Sprintf("(%s) IN (%s)", strings.Join(quotedColumns, ", "), strings.Join(rowPlaceholders, ", ")), args, nil
+}
+
 func columnNames(table introspection.Table, columns []introspection.Column) []string {
 	cols := columns
 	if len(cols) == 0 {
@@ -348,7 +491,11 @@ func orderByClauses(orderBy *OrderBy) []string {
 	}
 	clauses := make([]string, len(orderBy.Columns))
 	for i, col := range orderBy.Columns {
-		clauses[i] = fmt.Sprintf("%s %s", sqlutil.QuoteIdentifier(col), orderBy.Direction)
+		direction := "ASC"
+		if i < len(orderBy.Directions) && strings.EqualFold(orderBy.Directions[i], "DESC") {
+			direction = "DESC"
+		}
+		clauses[i] = fmt.Sprintf("%s %s", sqlutil.QuoteIdentifier(col), direction)
 	}
 	return clauses
 }
@@ -372,64 +519,141 @@ func batchOrderClause(table introspection.Table, orderBy *OrderBy) (string, erro
 
 // WhereClause represents a parsed WHERE condition
 type WhereClause struct {
-	Condition   sq.Sqlizer
-	UsedColumns []string
+	Condition          sq.Sqlizer
+	UsedColumns        []string
+	UsedColumnsByTable map[string][]string
 }
 
 // BuildWhereClause parses a GraphQL WHERE input into a SQL WHERE clause.
 // Returns the condition and a list of columns used (for indexed validation).
 func BuildWhereClause(table introspection.Table, whereInput map[string]interface{}) (*WhereClause, error) {
-	return buildWhereClauseWithAlias(table, "", whereInput)
+	return buildWhereClauseWithAliasAndSchema(nil, table, "", whereInput)
+}
+
+// BuildWhereClauseWithSchema parses a GraphQL WHERE input into a SQL WHERE clause
+// and enables relationship-aware filters using schema metadata.
+func BuildWhereClauseWithSchema(schema *introspection.Schema, table introspection.Table, whereInput map[string]interface{}) (*WhereClause, error) {
+	return buildWhereClauseWithAliasAndSchema(schema, table, "", whereInput)
 }
 
 // BuildWhereClauseQualified parses a GraphQL WHERE input into a SQL WHERE clause
 // with qualified column names (alias.column).
 func BuildWhereClauseQualified(table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
-	return buildWhereClauseWithAlias(table, alias, whereInput)
+	return buildWhereClauseWithAliasAndSchema(nil, table, alias, whereInput)
 }
 
-func buildWhereClauseWithAlias(table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
+// BuildWhereClauseQualifiedWithSchema parses a GraphQL WHERE input into a SQL WHERE clause
+// with qualified column names (alias.column) and enables relationship-aware filters.
+func BuildWhereClauseQualifiedWithSchema(schema *introspection.Schema, table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
+	return buildWhereClauseWithAliasAndSchema(schema, table, alias, whereInput)
+}
+
+type whereBuildState struct {
+	schema       *introspection.Schema
+	aliasCounter int
+	usedByTable  map[string]map[string]struct{}
+}
+
+func newWhereBuildState(schema *introspection.Schema) *whereBuildState {
+	return &whereBuildState{
+		schema:      schema,
+		usedByTable: make(map[string]map[string]struct{}),
+	}
+}
+
+func (s *whereBuildState) nextAlias(prefix string) string {
+	normalized := strings.TrimSpace(prefix)
+	if normalized == "" {
+		normalized = "rel"
+	}
+	normalized = strings.ReplaceAll(normalized, "`", "")
+	normalized = strings.ReplaceAll(normalized, ".", "_")
+	s.aliasCounter++
+	return fmt.Sprintf("__%s_%d", normalized, s.aliasCounter)
+}
+
+func (s *whereBuildState) addUsedColumn(tableName, columnName string) {
+	if tableName == "" || columnName == "" {
+		return
+	}
+	cols, ok := s.usedByTable[tableName]
+	if !ok {
+		cols = make(map[string]struct{})
+		s.usedByTable[tableName] = cols
+	}
+	cols[columnName] = struct{}{}
+}
+
+func (s *whereBuildState) usedColumnsByTable() map[string][]string {
+	out := make(map[string][]string, len(s.usedByTable))
+	for tableName, colSet := range s.usedByTable {
+		cols := make([]string, 0, len(colSet))
+		for col := range colSet {
+			cols = append(cols, col)
+		}
+		sort.Strings(cols)
+		out[tableName] = cols
+	}
+	return out
+}
+
+func buildWhereClauseWithAliasAndSchema(schema *introspection.Schema, table introspection.Table, alias string, whereInput map[string]interface{}) (*WhereClause, error) {
 	if len(whereInput) == 0 {
 		return nil, nil
 	}
 
-	condition, usedCols, err := buildWhereCondition(table, alias, whereInput)
+	state := newWhereBuildState(schema)
+	condition, err := buildWhereCondition(table, alias, whereInput, state, true, "")
 	if err != nil {
 		return nil, err
 	}
+	usedByTable := state.usedColumnsByTable()
+	rootUsed := usedByTable[table.Name]
 
 	return &WhereClause{
-		Condition:   condition,
-		UsedColumns: usedCols,
+		Condition:          condition,
+		UsedColumns:        rootUsed,
+		UsedColumnsByTable: usedByTable,
 	}, nil
 }
 
 // buildWhereCondition recursively builds WHERE conditions with AND/OR support.
 // When alias is non-empty, column names are qualified as alias.column.
-func buildWhereCondition(table introspection.Table, alias string, whereInput map[string]interface{}) (sq.Sqlizer, []string, error) {
-	usedColumns := []string{}
+func buildWhereCondition(
+	table introspection.Table,
+	alias string,
+	whereInput map[string]interface{},
+	state *whereBuildState,
+	allowRelations bool,
+	path string,
+) (sq.Sqlizer, error) {
 	conditions := []sq.Sqlizer{}
+	keys := make([]string, 0, len(whereInput))
+	for key := range whereInput {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
 
-	for key, value := range whereInput {
+	for _, key := range keys {
+		value := whereInput[key]
 		switch key {
 		case "AND":
 			andArray, ok := value.([]interface{})
 			if !ok {
-				return nil, nil, fmt.Errorf("AND must be an array")
+				return nil, fmt.Errorf("AND must be an array")
 			}
 			andConditions := []sq.Sqlizer{}
 			for _, item := range andArray {
 				itemMap, ok := item.(map[string]interface{})
 				if !ok {
-					return nil, nil, fmt.Errorf("AND array items must be objects")
+					return nil, fmt.Errorf("AND array items must be objects")
 				}
-				cond, cols, err := buildWhereCondition(table, alias, itemMap)
+				cond, err := buildWhereCondition(table, alias, itemMap, state, allowRelations, path)
 				if err != nil {
-					return nil, nil, err
+					return nil, err
 				}
 				if cond != nil {
 					andConditions = append(andConditions, cond)
-					usedColumns = append(usedColumns, cols...)
 				}
 			}
 			if len(andConditions) > 0 {
@@ -439,21 +663,20 @@ func buildWhereCondition(table introspection.Table, alias string, whereInput map
 		case "OR":
 			orArray, ok := value.([]interface{})
 			if !ok {
-				return nil, nil, fmt.Errorf("OR must be an array")
+				return nil, fmt.Errorf("OR must be an array")
 			}
 			orConditions := []sq.Sqlizer{}
 			for _, item := range orArray {
 				itemMap, ok := item.(map[string]interface{})
 				if !ok {
-					return nil, nil, fmt.Errorf("OR array items must be objects")
+					return nil, fmt.Errorf("OR array items must be objects")
 				}
-				cond, cols, err := buildWhereCondition(table, alias, itemMap)
+				cond, err := buildWhereCondition(table, alias, itemMap, state, allowRelations, path)
 				if err != nil {
-					return nil, nil, err
+					return nil, err
 				}
 				if cond != nil {
 					orConditions = append(orConditions, cond)
-					usedColumns = append(usedColumns, cols...)
 				}
 			}
 			if len(orConditions) > 0 {
@@ -462,31 +685,390 @@ func buildWhereCondition(table introspection.Table, alias string, whereInput map
 
 		default:
 			col := findColumnByGraphQLName(table, key)
-			if col == nil {
-				return nil, nil, fmt.Errorf("unknown column: %s", key)
-			}
-			usedColumns = append(usedColumns, col.Name)
+			if col != nil {
+				state.addUsedColumn(table.Name, col.Name)
 
-			filterMap, ok := value.(map[string]interface{})
-			if !ok {
-				return nil, nil, fmt.Errorf("filter for %s must be an object", key)
+				filterMap, ok := value.(map[string]interface{})
+				if !ok {
+					return nil, fmt.Errorf("filter for %s must be an object", key)
+				}
+
+				colConditions, err := buildColumnFilter(*col, alias, filterMap)
+				if err != nil {
+					return nil, err
+				}
+				conditions = append(conditions, colConditions...)
+				continue
 			}
 
-			colConditions, err := buildColumnFilter(*col, alias, filterMap)
+			rel := findRelationshipByGraphQLName(table, key)
+			if rel == nil {
+				return nil, fmt.Errorf("unknown column: %s", key)
+			}
+			if !allowRelations {
+				if path != "" {
+					return nil, fmt.Errorf("relationship where filters support single hop only (nested relation at %s.%s)", path, key)
+				}
+				return nil, fmt.Errorf("relationship where filters support single hop only (nested relation %s)", key)
+			}
+
+			relCond, err := buildRelationshipFilterCondition(table, alias, *rel, key, value, state, key)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
-			conditions = append(conditions, colConditions...)
+			if relCond != nil {
+				conditions = append(conditions, relCond)
+			}
 		}
 	}
 
 	if len(conditions) == 0 {
-		return nil, usedColumns, nil
+		return nil, nil
 	}
 	if len(conditions) == 1 {
-		return conditions[0], usedColumns, nil
+		return conditions[0], nil
 	}
-	return sq.And(conditions), usedColumns, nil
+	return sq.And(conditions), nil
+}
+
+func buildRelationshipFilterCondition(
+	table introspection.Table,
+	alias string,
+	rel introspection.Relationship,
+	fieldName string,
+	value interface{},
+	state *whereBuildState,
+	path string,
+) (sq.Sqlizer, error) {
+	filterMap, ok := value.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("filter for relationship %s must be an object", fieldName)
+	}
+
+	if rel.IsManyToOne {
+		for op := range filterMap {
+			if op != "is" && op != "isNull" {
+				return nil, fmt.Errorf("unknown relationship filter operator: %s", op)
+			}
+		}
+		_, hasIs := filterMap["is"]
+		_, hasIsNull := filterMap["isNull"]
+		if hasIs && hasIsNull {
+			return nil, fmt.Errorf("relationship filter %s cannot use both is and isNull", fieldName)
+		}
+		conditions := []sq.Sqlizer{}
+		if rawIs, ok := filterMap["is"]; ok {
+			isWhere, ok := rawIs.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("relationship filter %s.is must be an object", fieldName)
+			}
+			cond, err := buildRelationshipExistsPredicate(table, alias, rel, isWhere, true, state, path)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, cond)
+		}
+		if rawIsNull, ok := filterMap["isNull"]; ok {
+			isNull, ok := rawIsNull.(bool)
+			if !ok {
+				return nil, fmt.Errorf("relationship filter %s.isNull must be a boolean", fieldName)
+			}
+			cond, err := buildRelationshipExistsPredicate(table, alias, rel, map[string]interface{}{}, !isNull, state, path)
+			if err != nil {
+				return nil, err
+			}
+			conditions = append(conditions, cond)
+		}
+		if len(conditions) == 0 {
+			return nil, fmt.Errorf("relationship filter %s must include is or isNull", fieldName)
+		}
+		if len(conditions) == 1 {
+			return conditions[0], nil
+		}
+		return sq.And(conditions), nil
+	}
+
+	if !(rel.IsOneToMany || rel.IsManyToMany || rel.IsEdgeList) {
+		return nil, fmt.Errorf("unsupported relationship filter on %s", fieldName)
+	}
+	for op := range filterMap {
+		if op != "some" && op != "none" {
+			return nil, fmt.Errorf("unknown relationship filter operator: %s", op)
+		}
+	}
+
+	conditions := []sq.Sqlizer{}
+	if rawSome, ok := filterMap["some"]; ok {
+		someWhere, ok := rawSome.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("relationship filter %s.some must be an object", fieldName)
+		}
+		cond, err := buildRelationshipExistsPredicate(table, alias, rel, someWhere, true, state, path)
+		if err != nil {
+			return nil, err
+		}
+		conditions = append(conditions, cond)
+	}
+	if rawNone, ok := filterMap["none"]; ok {
+		noneWhere, ok := rawNone.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("relationship filter %s.none must be an object", fieldName)
+		}
+		cond, err := buildRelationshipExistsPredicate(table, alias, rel, noneWhere, false, state, path)
+		if err != nil {
+			return nil, err
+		}
+		conditions = append(conditions, cond)
+	}
+	if len(conditions) == 0 {
+		return nil, fmt.Errorf("relationship filter %s must include some or none", fieldName)
+	}
+	if len(conditions) == 1 {
+		return conditions[0], nil
+	}
+	return sq.And(conditions), nil
+}
+
+func buildRelationshipExistsPredicate(
+	table introspection.Table,
+	outerAlias string,
+	rel introspection.Relationship,
+	nestedWhere map[string]interface{},
+	shouldExist bool,
+	state *whereBuildState,
+	path string,
+) (sq.Sqlizer, error) {
+	subquery, args, err := buildRelationshipSubquerySQL(table, outerAlias, rel, nestedWhere, state, path)
+	if err != nil {
+		return nil, err
+	}
+	prefix := "EXISTS"
+	if !shouldExist {
+		prefix = "NOT EXISTS"
+	}
+	return sq.Expr(fmt.Sprintf("%s (%s)", prefix, subquery), args...), nil
+}
+
+func buildRelationshipSubquerySQL(
+	table introspection.Table,
+	outerAlias string,
+	rel introspection.Relationship,
+	nestedWhere map[string]interface{},
+	state *whereBuildState,
+	path string,
+) (string, []interface{}, error) {
+	outerRefAlias := outerAlias
+	if outerRefAlias == "" {
+		// Root-table relationship filters still need deterministic correlation targets.
+		// Using table name avoids ambiguous bare-column references inside subqueries.
+		outerRefAlias = table.Name
+	}
+
+	resolveTable := func(tableName string) (introspection.Table, error) {
+		if state.schema == nil {
+			return introspection.Table{}, fmt.Errorf("relationship where filters require schema context")
+		}
+		for _, candidate := range state.schema.Tables {
+			if candidate.Name == tableName {
+				return candidate, nil
+			}
+		}
+		return introspection.Table{}, fmt.Errorf("relationship where table not found: %s", tableName)
+	}
+	qualifiedColumn := func(alias, col string) string {
+		if alias == "" {
+			return sqlutil.QuoteIdentifier(col)
+		}
+		return fmt.Sprintf("%s.%s", sqlutil.QuoteIdentifier(alias), sqlutil.QuoteIdentifier(col))
+	}
+	quotedFrom := func(tableName, alias string) string {
+		if alias == "" {
+			return sqlutil.QuoteIdentifier(tableName)
+		}
+		return fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(tableName), sqlutil.QuoteIdentifier(alias))
+	}
+
+	joinPairs := func(leftAlias string, leftCols []string, rightAlias string, rightCols []string) ([]string, error) {
+		if len(leftCols) == 0 || len(leftCols) != len(rightCols) {
+			return nil, fmt.Errorf("relationship mapping width mismatch")
+		}
+		pairs := make([]string, len(leftCols))
+		for i := range leftCols {
+			pairs[i] = fmt.Sprintf(
+				"%s = %s",
+				qualifiedColumn(leftAlias, leftCols[i]),
+				qualifiedColumn(rightAlias, rightCols[i]),
+			)
+		}
+		return pairs, nil
+	}
+
+	localCols := rel.EffectiveLocalColumns()
+	remoteCols := rel.EffectiveRemoteColumns()
+	if len(localCols) == 0 {
+		return "", nil, fmt.Errorf("relationship %s has no local key mapping", rel.GraphQLFieldName)
+	}
+
+	switch {
+	case rel.IsManyToOne:
+		remoteTable, err := resolveTable(rel.RemoteTable)
+		if err != nil {
+			return "", nil, err
+		}
+		remoteAlias := state.nextAlias(remoteTable.Name)
+		corrPairs, err := joinPairs(remoteAlias, remoteCols, outerRefAlias, localCols)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, col := range remoteCols {
+			state.addUsedColumn(remoteTable.Name, col)
+		}
+		for _, col := range localCols {
+			state.addUsedColumn(table.Name, col)
+		}
+
+		builder := sq.Select("1").From(quotedFrom(remoteTable.Name, remoteAlias))
+		for _, pair := range corrPairs {
+			builder = builder.Where(sq.Expr(pair))
+		}
+		if len(nestedWhere) > 0 {
+			nestedCond, err := buildWhereCondition(remoteTable, remoteAlias, nestedWhere, state, false, path)
+			if err != nil {
+				return "", nil, err
+			}
+			if nestedCond != nil {
+				builder = builder.Where(nestedCond)
+			}
+		}
+		return builder.PlaceholderFormat(sq.Question).ToSql()
+
+	case rel.IsOneToMany:
+		remoteTable, err := resolveTable(rel.RemoteTable)
+		if err != nil {
+			return "", nil, err
+		}
+		remoteAlias := state.nextAlias(remoteTable.Name)
+		corrPairs, err := joinPairs(remoteAlias, remoteCols, outerRefAlias, localCols)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, col := range remoteCols {
+			state.addUsedColumn(remoteTable.Name, col)
+		}
+		for _, col := range localCols {
+			state.addUsedColumn(table.Name, col)
+		}
+
+		builder := sq.Select("1").From(quotedFrom(remoteTable.Name, remoteAlias))
+		for _, pair := range corrPairs {
+			builder = builder.Where(sq.Expr(pair))
+		}
+		if len(nestedWhere) > 0 {
+			nestedCond, err := buildWhereCondition(remoteTable, remoteAlias, nestedWhere, state, false, path)
+			if err != nil {
+				return "", nil, err
+			}
+			if nestedCond != nil {
+				builder = builder.Where(nestedCond)
+			}
+		}
+		return builder.PlaceholderFormat(sq.Question).ToSql()
+
+	case rel.IsEdgeList:
+		junctionTable, err := resolveTable(rel.JunctionTable)
+		if err != nil {
+			return "", nil, err
+		}
+		junctionAlias := state.nextAlias(junctionTable.Name)
+		junctionLocalCols := rel.EffectiveJunctionLocalFKColumns()
+		corrPairs, err := joinPairs(junctionAlias, junctionLocalCols, outerRefAlias, localCols)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, col := range junctionLocalCols {
+			state.addUsedColumn(junctionTable.Name, col)
+		}
+		for _, col := range localCols {
+			state.addUsedColumn(table.Name, col)
+		}
+
+		builder := sq.Select("1").From(quotedFrom(junctionTable.Name, junctionAlias))
+		for _, pair := range corrPairs {
+			builder = builder.Where(sq.Expr(pair))
+		}
+		if len(nestedWhere) > 0 {
+			nestedCond, err := buildWhereCondition(junctionTable, junctionAlias, nestedWhere, state, false, path)
+			if err != nil {
+				return "", nil, err
+			}
+			if nestedCond != nil {
+				builder = builder.Where(nestedCond)
+			}
+		}
+		return builder.PlaceholderFormat(sq.Question).ToSql()
+
+	case rel.IsManyToMany:
+		remoteTable, err := resolveTable(rel.RemoteTable)
+		if err != nil {
+			return "", nil, err
+		}
+		junctionTable, err := resolveTable(rel.JunctionTable)
+		if err != nil {
+			return "", nil, err
+		}
+
+		junctionLocalCols := rel.EffectiveJunctionLocalFKColumns()
+		junctionRemoteCols := rel.EffectiveJunctionRemoteFKColumns()
+		if len(junctionLocalCols) != len(localCols) {
+			return "", nil, fmt.Errorf("many-to-many local mapping width mismatch")
+		}
+		if len(junctionRemoteCols) != len(remoteCols) {
+			return "", nil, fmt.Errorf("many-to-many remote mapping width mismatch")
+		}
+		for _, col := range junctionLocalCols {
+			state.addUsedColumn(junctionTable.Name, col)
+		}
+		for _, col := range junctionRemoteCols {
+			state.addUsedColumn(junctionTable.Name, col)
+		}
+		for _, col := range remoteCols {
+			state.addUsedColumn(remoteTable.Name, col)
+		}
+		for _, col := range localCols {
+			state.addUsedColumn(table.Name, col)
+		}
+
+		junctionAlias := state.nextAlias(junctionTable.Name)
+		remoteAlias := state.nextAlias(remoteTable.Name)
+		joinConditions, err := joinPairs(junctionAlias, junctionRemoteCols, remoteAlias, remoteCols)
+		if err != nil {
+			return "", nil, err
+		}
+		corrPairs, err := joinPairs(junctionAlias, junctionLocalCols, outerRefAlias, localCols)
+		if err != nil {
+			return "", nil, err
+		}
+
+		builder := sq.Select("1").
+			From(quotedFrom(junctionTable.Name, junctionAlias)).
+			Join(fmt.Sprintf("%s ON %s", quotedFrom(remoteTable.Name, remoteAlias), strings.Join(joinConditions, " AND ")))
+		for _, pair := range corrPairs {
+			builder = builder.Where(sq.Expr(pair))
+		}
+		if len(nestedWhere) > 0 {
+			nestedCond, err := buildWhereCondition(remoteTable, remoteAlias, nestedWhere, state, false, path)
+			if err != nil {
+				return "", nil, err
+			}
+			if nestedCond != nil {
+				builder = builder.Where(nestedCond)
+			}
+		}
+		return builder.PlaceholderFormat(sq.Question).ToSql()
+
+	default:
+		return "", nil, fmt.Errorf("unsupported relationship filter on %s", rel.GraphQLFieldName)
+	}
 }
 
 // buildColumnFilter builds filter conditions for a specific column.
@@ -859,6 +1441,15 @@ func findColumnByGraphQLName(table introspection.Table, graphQLName string) *int
 	return nil
 }
 
+func findRelationshipByGraphQLName(table introspection.Table, graphQLName string) *introspection.Relationship {
+	for i := range table.Relationships {
+		if table.Relationships[i].GraphQLFieldName == graphQLName {
+			return &table.Relationships[i]
+		}
+	}
+	return nil
+}
+
 // ValidateIndexedColumns checks if at least one indexed column is used in the WHERE clause
 func ValidateIndexedColumns(table introspection.Table, usedColumns []string) error {
 	if len(usedColumns) == 0 {
@@ -883,6 +1474,65 @@ func ValidateIndexedColumns(table introspection.Table, usedColumns []string) err
 	return fmt.Errorf(
 		"where clause must include at least one indexed column for performance",
 	)
+}
+
+// ValidateWhereClauseIndexes validates indexed-column guardrails for all tables used by a WHERE clause.
+func ValidateWhereClauseIndexes(schema *introspection.Schema, rootTable introspection.Table, whereClause *WhereClause) error {
+	if whereClause == nil {
+		return nil
+	}
+	if len(whereClause.UsedColumnsByTable) == 0 {
+		return ValidateIndexedColumns(rootTable, whereClause.UsedColumns)
+	}
+
+	indexedColumns := func(table introspection.Table) []string {
+		columnSet := make(map[string]struct{})
+		for _, idx := range table.Indexes {
+			for _, col := range idx.Columns {
+				columnSet[col] = struct{}{}
+			}
+		}
+		cols := make([]string, 0, len(columnSet))
+		for col := range columnSet {
+			cols = append(cols, col)
+		}
+		sort.Strings(cols)
+		return cols
+	}
+
+	findTable := func(tableName string) (introspection.Table, bool) {
+		if rootTable.Name == tableName {
+			return rootTable, true
+		}
+		if schema == nil {
+			return introspection.Table{}, false
+		}
+		for _, table := range schema.Tables {
+			if table.Name == tableName {
+				return table, true
+			}
+		}
+		return introspection.Table{}, false
+	}
+
+	for tableName, cols := range whereClause.UsedColumnsByTable {
+		table, ok := findTable(tableName)
+		if !ok {
+			return fmt.Errorf("where clause references unknown table %s for indexed validation", tableName)
+		}
+		if err := ValidateIndexedColumns(table, cols); err != nil {
+			indexed := indexedColumns(table)
+			if len(indexed) == 0 {
+				return fmt.Errorf("where clause for table %s must include at least one indexed column for performance (table has no indexes)", tableName)
+			}
+			return fmt.Errorf(
+				"where clause for table %s must include at least one indexed column for performance (indexed columns: %s)",
+				tableName,
+				strings.Join(indexed, ", "),
+			)
+		}
+	}
+	return nil
 }
 
 func validateLimitOffset(limit, offset int) error {

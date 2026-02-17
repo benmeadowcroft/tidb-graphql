@@ -10,6 +10,8 @@ import (
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/graphql-go/graphql/language/ast"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testTable() introspection.Table {
@@ -32,7 +34,7 @@ func testTable() introspection.Table {
 }
 
 func TestBuildSeekCondition_ASC(t *testing.T) {
-	cond := BuildSeekCondition([]string{"id"}, []interface{}{42}, "ASC")
+	cond := BuildSeekCondition([]string{"id"}, []interface{}{42}, []string{"ASC"})
 	sql, args, err := cond.ToSql()
 	if err != nil {
 		t.Fatalf("ToSql error: %v", err)
@@ -46,7 +48,7 @@ func TestBuildSeekCondition_ASC(t *testing.T) {
 }
 
 func TestBuildSeekCondition_DESC(t *testing.T) {
-	cond := BuildSeekCondition([]string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, "DESC")
+	cond := BuildSeekCondition([]string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, []string{"DESC", "DESC"})
 	sql, args, err := cond.ToSql()
 	if err != nil {
 		t.Fatalf("ToSql error: %v", err)
@@ -54,13 +56,13 @@ func TestBuildSeekCondition_DESC(t *testing.T) {
 	if !strings.Contains(sql, "<") {
 		t.Errorf("expected < operator for DESC, got: %s", sql)
 	}
-	if len(args) != 2 {
-		t.Errorf("expected 2 args, got %d", len(args))
+	if len(args) != 3 {
+		t.Errorf("expected 3 args for lexicographic seek, got %d", len(args))
 	}
 }
 
 func TestBuildSeekConditionQualified(t *testing.T) {
-	cond := BuildSeekConditionQualified("users", []string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, "ASC")
+	cond := BuildSeekConditionQualified("users", []string{"created_at", "id"}, []interface{}{"2024-01-01", 7}, []string{"ASC", "ASC"})
 	sql, args, err := cond.ToSql()
 	if err != nil {
 		t.Fatalf("ToSql error: %v", err)
@@ -68,8 +70,8 @@ func TestBuildSeekConditionQualified(t *testing.T) {
 	if !strings.Contains(sql, "`users`.`created_at`") || !strings.Contains(sql, "`users`.`id`") {
 		t.Errorf("expected qualified columns in SQL, got: %s", sql)
 	}
-	if len(args) != 2 {
-		t.Errorf("expected 2 args, got %d", len(args))
+	if len(args) != 3 {
+		t.Errorf("expected 3 args for lexicographic seek, got %d", len(args))
 	}
 }
 
@@ -178,8 +180,8 @@ func TestParseConnectionOrderBy_DefaultPK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if orderBy.Direction != "ASC" {
-		t.Errorf("expected ASC, got %s", orderBy.Direction)
+	if len(orderBy.Directions) != 1 || orderBy.Directions[0] != "ASC" {
+		t.Errorf("expected [ASC], got %v", orderBy.Directions)
 	}
 	if len(orderBy.Columns) != 1 || orderBy.Columns[0] != "id" {
 		t.Errorf("expected [id], got %v", orderBy.Columns)
@@ -191,8 +193,9 @@ func TestParseConnectionOrderBy_ExplicitIndexed(t *testing.T) {
 	pkCols := introspection.PrimaryKeyColumns(table)
 
 	args := map[string]interface{}{
-		"orderBy": map[string]interface{}{
-			"createdAt_databaseId": "DESC",
+		"orderBy": []interface{}{
+			map[string]interface{}{"createdAt": "DESC"},
+			map[string]interface{}{"databaseId": "ASC"},
 		},
 	}
 
@@ -200,8 +203,8 @@ func TestParseConnectionOrderBy_ExplicitIndexed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if orderBy.Direction != "DESC" {
-		t.Errorf("expected DESC, got %s", orderBy.Direction)
+	if len(orderBy.Directions) != 2 || orderBy.Directions[0] != "DESC" || orderBy.Directions[1] != "ASC" {
+		t.Errorf("expected [DESC ASC], got %v", orderBy.Directions)
 	}
 	if len(orderBy.Columns) < 2 {
 		t.Errorf("expected at least 2 columns, got %v", orderBy.Columns)
@@ -211,8 +214,8 @@ func TestParseConnectionOrderBy_ExplicitIndexed(t *testing.T) {
 func TestCursorColumns(t *testing.T) {
 	table := testTable()
 	orderBy := &OrderBy{
-		Columns:   []string{"created_at", "id"},
-		Direction: "ASC",
+		Columns:    []string{"created_at", "id"},
+		Directions: []string{"ASC", "ASC"},
 	}
 	cols := CursorColumns(table, orderBy)
 	if len(cols) != 2 {
@@ -230,8 +233,8 @@ func TestBuildConnectionSQL(t *testing.T) {
 	table := testTable()
 	columns := table.Columns
 	orderBy := &OrderBy{
-		Columns:   []string{"id"},
-		Direction: "ASC",
+		Columns:    []string{"id"},
+		Directions: []string{"ASC"},
 	}
 
 	result, err := buildConnectionSQL(table, columns, nil, nil, orderBy, 26)
@@ -324,8 +327,8 @@ func TestPlanConnection_BackwardLast(t *testing.T) {
 	if plan.First != 2 {
 		t.Fatalf("expected page size 2, got %d", plan.First)
 	}
-	if plan.OrderBy.Direction != "ASC" {
-		t.Fatalf("expected canonical order ASC, got %s", plan.OrderBy.Direction)
+	if len(plan.OrderBy.Directions) != 1 || plan.OrderBy.Directions[0] != "ASC" {
+		t.Fatalf("expected canonical directions [ASC], got %v", plan.OrderBy.Directions)
 	}
 	if !strings.Contains(plan.Root.SQL, "ORDER BY `id` DESC") {
 		t.Fatalf("expected DESC traversal SQL, got: %s", plan.Root.SQL)
@@ -355,7 +358,7 @@ func TestPlanConnection_BeforeCursorBackwardSeek(t *testing.T) {
 			},
 		},
 	}
-	before := cursor.EncodeCursor("User", "databaseId", "ASC", 5)
+	before := cursor.EncodeCursor("User", "databaseId", []string{"ASC"}, 5)
 	plan, err := PlanConnection(schema, table, field, map[string]interface{}{
 		"last":   1,
 		"before": before,
@@ -406,7 +409,16 @@ func TestPlanManyToManyConnection_Basic(t *testing.T) {
 		},
 	}
 	args := map[string]interface{}{"first": 2}
-	plan, err := PlanManyToManyConnection(table, "user_tags", "user_id", "tag_id", "id", 7, field, args)
+	plan, err := PlanManyToManyConnection(
+		table,
+		"user_tags",
+		[]string{"user_id"},
+		[]string{"tag_id"},
+		[]string{"id"},
+		[]interface{}{7},
+		field,
+		args,
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -465,7 +477,7 @@ func TestPlanEdgeListConnection_Basic(t *testing.T) {
 		},
 	}
 	args := map[string]interface{}{"first": 2}
-	plan, err := PlanEdgeListConnection(junction, "user_id", 7, field, args)
+	plan, err := PlanEdgeListConnection(junction, []string{"user_id"}, []interface{}{7}, field, args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -494,6 +506,90 @@ func TestPlanEdgeListConnection_Basic(t *testing.T) {
 	if !strings.Contains(plan.AggregateBase.SQL, "FROM `user_tags`") {
 		t.Errorf("expected aggregate base SQL to reference junction table, got: %s", plan.AggregateBase.SQL)
 	}
+}
+
+func TestPlanManyToManyConnection_CompositeKeys(t *testing.T) {
+	table := introspection.Table{
+		Name: "groups",
+		Columns: []introspection.Column{
+			{Name: "tenant_id", IsPrimaryKey: true, GraphQLFieldName: "tenantId"},
+			{Name: "id", IsPrimaryKey: true, GraphQLFieldName: "databaseId"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"tenant_id", "id"}},
+		},
+		GraphQLTypeName: "Group",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "groupsConnection"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	plan, err := PlanManyToManyConnection(
+		table,
+		"user_groups",
+		[]string{"tenant_id", "user_id"},
+		[]string{"group_tenant_id", "group_id"},
+		[]string{"tenant_id", "id"},
+		[]interface{}{7, 100},
+		field,
+		map[string]interface{}{"first": 1},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, plan.Root.SQL, "`user_groups`.`group_tenant_id` = `groups`.`tenant_id`")
+	assert.Contains(t, plan.Root.SQL, "`user_groups`.`group_id` = `groups`.`id`")
+	assert.Contains(t, plan.Root.SQL, "(`user_groups`.`tenant_id`, `user_groups`.`user_id`) IN ((?,?))")
+	assert.Equal(t, []interface{}{7, 100}, plan.Root.Args)
+}
+
+func TestPlanEdgeListConnection_CompositeKeys(t *testing.T) {
+	junction := introspection.Table{
+		Name: "user_groups",
+		Columns: []introspection.Column{
+			{Name: "tenant_id", IsPrimaryKey: true, GraphQLFieldName: "tenantId"},
+			{Name: "user_id", IsPrimaryKey: true, GraphQLFieldName: "userId"},
+			{Name: "group_id", IsPrimaryKey: true, GraphQLFieldName: "groupId"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"tenant_id", "user_id", "group_id"}},
+		},
+		GraphQLTypeName: "UserGroup",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "userGroupsConnection"},
+		SelectionSet: &ast.SelectionSet{
+			Selections: []ast.Selection{
+				&ast.Field{
+					Name: &ast.Name{Value: "nodes"},
+					SelectionSet: &ast.SelectionSet{
+						Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "groupId"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	plan, err := PlanEdgeListConnection(
+		junction,
+		[]string{"tenant_id", "user_id"},
+		[]interface{}{7, 100},
+		field,
+		map[string]interface{}{"first": 1},
+	)
+	require.NoError(t, err)
+	assert.Contains(t, plan.Root.SQL, "(`tenant_id`, `user_id`) IN ((?,?))")
+	assert.Equal(t, []interface{}{7, 100}, plan.Root.Args)
 }
 
 func TestBuildOneToManyCountSQL_WithWhere(t *testing.T) {

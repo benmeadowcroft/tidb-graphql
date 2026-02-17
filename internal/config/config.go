@@ -42,6 +42,12 @@ type Config struct {
 type TypeMappingsConfig struct {
 	// UUIDColumns maps table glob patterns to column glob patterns that should be treated as UUID.
 	UUIDColumns map[string][]string `mapstructure:"uuid_columns"`
+	// TinyInt1BooleanColumns maps table glob patterns to tinyint(1) column glob patterns
+	// that should be treated as GraphQL Boolean.
+	TinyInt1BooleanColumns map[string][]string `mapstructure:"tinyint1_boolean_columns"`
+	// TinyInt1IntColumns maps table glob patterns to tinyint(1) column glob patterns
+	// that should be treated as GraphQL Int (escape hatch when tinyint(1) is not semantic boolean).
+	TinyInt1IntColumns map[string][]string `mapstructure:"tinyint1_int_columns"`
 }
 
 // PoolConfig holds connection pool parameters.
@@ -720,6 +726,8 @@ func setDefaults(v *viper.Viper) {
 
 	// Explicit type mapping defaults.
 	v.SetDefault("type_mappings.uuid_columns", map[string][]string{})
+	v.SetDefault("type_mappings.tinyint1_boolean_columns", map[string][]string{})
+	v.SetDefault("type_mappings.tinyint1_int_columns", map[string][]string{})
 
 	// Naming defaults
 	v.SetDefault("naming.plural_overrides", map[string]string{})
@@ -989,6 +997,8 @@ func (c *Config) Validate() *ValidationResult {
 
 func (t *TypeMappingsConfig) validate(result *ValidationResult) {
 	validatePatternMap(result, "type_mappings.uuid_columns", t.UUIDColumns)
+	validatePatternMap(result, "type_mappings.tinyint1_boolean_columns", t.TinyInt1BooleanColumns)
+	validatePatternMap(result, "type_mappings.tinyint1_int_columns", t.TinyInt1IntColumns)
 }
 
 func validatePatternMap(result *ValidationResult, field string, patternMap map[string][]string) {

@@ -17,6 +17,8 @@ CREATE TABLE users (
   email_domain VARCHAR(255) AS (SUBSTRING_INDEX(email, '@', -1)) VIRTUAL COMMENT 'Derived email domain.',
   full_name VARCHAR(255) NOT NULL COMMENT 'Full name for display.',
   status ENUM('active','inactive','pending') NOT NULL COMMENT 'Account status.',
+  email_verified_at TIMESTAMP NULL COMMENT 'When email was verified (UTC).',
+  is_email_verified BOOLEAN AS (email_verified_at IS NOT NULL) VIRTUAL COMMENT 'Whether the user has a verified email.',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Row creation time (UTC).',
   last_updated TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Row update time (UTC).',
   UNIQUE KEY uq_users_email (email),
@@ -73,16 +75,15 @@ CREATE TABLE orders (
 ) COMMENT='Customer orders placed in the store.';
 
 CREATE TABLE order_items (
-  id BIGINT PRIMARY KEY AUTO_RANDOM COMMENT 'Primary key for order items.',
   order_id BIGINT NOT NULL COMMENT 'Order identifier.',
   product_id BIGINT NOT NULL COMMENT 'Product identifier.',
   quantity INT NOT NULL COMMENT 'Quantity of the product.',
   unit_price DECIMAL(10,2) NOT NULL COMMENT 'Unit price in dollars (two decimal places) at purchase time.',
+  PRIMARY KEY (order_id, product_id),
   CONSTRAINT fk_order_items_order
     FOREIGN KEY (order_id) REFERENCES orders(id),
   CONSTRAINT fk_order_items_product
     FOREIGN KEY (product_id) REFERENCES products(id),
-  KEY idx_items_order_id (order_id),
   KEY idx_items_product_id (product_id)
 ) COMMENT='Line items belonging to orders.';
 
@@ -187,6 +188,25 @@ INSERT INTO users (email, full_name, status) VALUES
   ('eli.moore@example.com', 'Eli Moore', 'inactive'),
   ('eli.jackson@example.com', 'Eli Jackson', 'pending'),
   ('eli.martin@example.com', 'Eli Martin', 'active');
+
+-- Mark most users as verified, then leave a small subset unverified (~90/10 split).
+UPDATE users
+SET email_verified_at = created_at + INTERVAL 1 DAY;
+
+UPDATE users
+SET email_verified_at = NULL
+WHERE email IN (
+  'ava.williams@example.com',
+  'ava.lopez@example.com',
+  'ben.brown@example.com',
+  'ben.moore@example.com',
+  'chloe.johnson@example.com',
+  'chloe.martin@example.com',
+  'drew.garcia@example.com',
+  'drew.taylor@example.com',
+  'eli.smith@example.com',
+  'eli.hernandez@example.com'
+);
 
 INSERT INTO categories (name, description) VALUES
   ('stationery', 'Paper goods, notebooks, and desk accessories'),
@@ -505,7 +525,8 @@ CREATE TEMPORARY TABLE order_item_seeds (
   order_ref VARCHAR(16) NOT NULL,
   sku VARCHAR(64) NOT NULL,
   quantity INT NOT NULL,
-  unit_price DECIMAL(10,2) NOT NULL
+  unit_price DECIMAL(10,2) NOT NULL,
+  PRIMARY KEY (order_ref, sku)
 );
 
 INSERT INTO order_item_seeds (order_ref, sku, quantity, unit_price) VALUES

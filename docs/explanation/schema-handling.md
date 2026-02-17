@@ -23,7 +23,9 @@ A snapshot includes:
 
 The guiding rule is: never mutate in place. Build a new snapshot and swap.
 
-The refresh manager detects changes by hashing table details from `INFORMATION_SCHEMA.TABLES` and uses adaptive polling to balance freshness and load.
+The refresh manager detects changes with a TiDB-first structural fingerprint over schema metadata
+(tables/views, columns, primary keys, foreign keys, and indexes). If that path fails, it falls
+back to a lightweight table timestamp fingerprint. Adaptive polling still balances freshness and load.
 
 ---
 # Related Docs

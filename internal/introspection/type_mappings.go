@@ -17,7 +17,55 @@ func EffectiveGraphQLType(col Column) sqltype.GraphQLType {
 	if col.HasOverrideType {
 		return col.OverrideType
 	}
+	if isTinyIntOne(col) {
+		return sqltype.TypeBoolean
+	}
 	return sqltype.MapToGraphQL(col.DataType)
+}
+
+// ApplyTinyInt1TypeOverrides marks tinyint(1) columns as explicit bool/int overrides
+// based on SQL table/column glob patterns. Patterns are matched case-insensitively
+// against SQL names. intPatterns take precedence over boolPatterns when both match.
+func ApplyTinyInt1TypeOverrides(schema *Schema, boolPatterns, intPatterns map[string][]string) error {
+	if schema == nil || (len(boolPatterns) == 0 && len(intPatterns) == 0) {
+		return nil
+	}
+
+	for ti := range schema.Tables {
+		table := &schema.Tables[ti]
+		boolColumnPatterns := mergePatterns(boolPatterns, table.Name)
+		intColumnPatterns := mergePatterns(intPatterns, table.Name)
+		if len(boolColumnPatterns) == 0 && len(intColumnPatterns) == 0 {
+			continue
+		}
+
+		for ci := range table.Columns {
+			col := &table.Columns[ci]
+			matchesBool := matchesAny(col.Name, boolColumnPatterns)
+			matchesInt := matchesAny(col.Name, intColumnPatterns)
+			if !matchesBool && !matchesInt {
+				continue
+			}
+
+			if !isTinyIntOne(*col) {
+				typeSpec := strings.TrimSpace(col.ColumnType)
+				if typeSpec == "" {
+					typeSpec = strings.TrimSpace(col.DataType)
+				}
+				return fmt.Errorf("invalid tinyint(1) mapping for %s.%s: expected tinyint(1), got %q", table.Name, col.Name, typeSpec)
+			}
+
+			// int mappings are the explicit escape hatch and always win.
+			if matchesInt {
+				col.OverrideType = sqltype.TypeInt
+				col.HasOverrideType = true
+				continue
+			}
+			col.OverrideType = sqltype.TypeBoolean
+			col.HasOverrideType = true
+		}
+	}
+	return nil
 }
 
 // ApplyUUIDTypeOverrides marks columns as TypeUUID based on SQL table/column glob patterns.
@@ -117,6 +165,28 @@ func validateUUIDOverrideColumn(col Column) error {
 	default:
 		return fmt.Errorf("unsupported SQL type %q for UUID mapping", col.DataType)
 	}
+}
+
+func isTinyIntOne(col Column) bool {
+	typeSpec := strings.ToLower(strings.TrimSpace(col.ColumnType))
+	if typeSpec == "" {
+		return false
+	}
+	if !strings.HasPrefix(typeSpec, "tinyint(") {
+		return false
+	}
+
+	open := strings.Index(typeSpec, "(")
+	close := strings.Index(typeSpec, ")")
+	if open == -1 || close == -1 || close <= open+1 {
+		return false
+	}
+	widthSpec := strings.TrimSpace(typeSpec[open+1 : close])
+	width, err := strconv.Atoi(widthSpec)
+	if err != nil {
+		return false
+	}
+	return width == 1
 }
 
 func sqlTypeLength(col Column) (int, bool) {

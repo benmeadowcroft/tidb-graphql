@@ -50,6 +50,15 @@ func hasArg(field *graphql.FieldDefinition, name string) bool {
 	return false
 }
 
+func getArg(field *graphql.FieldDefinition, name string) *graphql.Argument {
+	for _, arg := range field.Args {
+		if arg != nil && arg.Name() == name {
+			return arg
+		}
+	}
+	return nil
+}
+
 func unwrapObjectType(t *testing.T, typ graphql.Type) *graphql.Object {
 	t.Helper()
 	if nonNull, ok := typ.(*graphql.NonNull); ok {
@@ -263,7 +272,7 @@ func TestConnectionResolver_BackwardBeforeSetsHasNextLightweight(t *testing.T) {
 			},
 		}},
 	}
-	before := cursor.EncodeCursor("Users", "databaseId", "ASC", 4)
+	before := cursor.EncodeCursor("Users", "databaseId", []string{"ASC"}, 4)
 	args := map[string]interface{}{
 		"last":   1,
 		"before": before,
@@ -606,6 +615,79 @@ func TestConnectionAggregateSchemaWiring(t *testing.T) {
 	assert.True(t, hasRelationshipConnectionAggregate, "expected aggregate field on relationship connection type")
 }
 
+func TestConnectionOrderByPolicyArgWiring(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "email"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "idx_users_email", Columns: []string{"email"}},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsOneToMany:      true,
+				LocalColumn:      "id",
+				RemoteTable:      "posts",
+				RemoteColumn:     "user_id",
+				GraphQLFieldName: "posts",
+			},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "created_at"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "idx_posts_user_created", Columns: []string{"user_id", "created_at"}},
+		},
+	}
+
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	schema, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	rootCollectionField := schema.QueryType().Fields()["users"]
+	require.NotNil(t, rootCollectionField)
+	require.True(t, hasArg(rootCollectionField, "orderBy"), "expected users orderBy arg")
+	require.True(t, hasArg(rootCollectionField, "orderByPolicy"), "expected users orderByPolicy arg")
+
+	orderByPolicyArg := getArg(rootCollectionField, "orderByPolicy")
+	require.NotNil(t, orderByPolicyArg)
+	policyEnum, ok := orderByPolicyArg.Type.(*graphql.Enum)
+	require.True(t, ok, "expected orderByPolicy enum type, got %T", orderByPolicyArg.Type)
+	var hasIndexPrefixOnly bool
+	var hasAllowNonPrefix bool
+	for _, value := range policyEnum.Values() {
+		if value.Name == "INDEX_PREFIX_ONLY" {
+			hasIndexPrefixOnly = true
+		}
+		if value.Name == "ALLOW_NON_PREFIX" {
+			hasAllowNonPrefix = true
+		}
+	}
+	require.True(t, hasIndexPrefixOnly, "expected INDEX_PREFIX_ONLY enum value")
+	require.True(t, hasAllowNonPrefix, "expected ALLOW_NON_PREFIX enum value")
+
+	userType := r.buildGraphQLType(users)
+	fields := userType.Fields()
+	postsField := fields["posts"]
+	require.NotNil(t, postsField)
+	require.True(t, hasArg(postsField, "orderBy"), "expected posts relationship orderBy arg")
+	require.True(t, hasArg(postsField, "orderByPolicy"), "expected posts relationship orderByPolicy arg")
+}
+
 func TestRootCollectionFieldNotGeneratedWithoutPrimaryKey(t *testing.T) {
 	logs := introspection.Table{
 		Name: "logs",
@@ -758,6 +840,82 @@ func TestSchemaDescriptionsFromComments(t *testing.T) {
 	whereInput := r.whereInput(table)
 	whereFields := whereInput.Fields()
 	assert.Equal(t, "User email address.", whereFields["email"].Description())
+}
+
+func TestWhereInputIncludesRelationshipFiltersSingleHop(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "published", DataType: "boolean"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+
+	users.Relationships = []introspection.Relationship{
+		{
+			IsOneToMany:      true,
+			LocalColumns:     []string{"id"},
+			RemoteTable:      "posts",
+			RemoteColumns:    []string{"user_id"},
+			GraphQLFieldName: "posts",
+		},
+	}
+	posts.Relationships = []introspection.Relationship{
+		{
+			IsManyToOne:      true,
+			LocalColumns:     []string{"user_id"},
+			RemoteTable:      "users",
+			RemoteColumns:    []string{"id"},
+			GraphQLFieldName: "user",
+		},
+	}
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	usersWhere := r.whereInput(users)
+	require.NotNil(t, usersWhere)
+	usersWhereFields := usersWhere.Fields()
+	postsField, ok := usersWhereFields["posts"]
+	require.True(t, ok, "expected users.where.posts relationship filter field")
+	postsFilterInput, ok := postsField.Type.(*graphql.InputObject)
+	require.True(t, ok, "expected users.where.posts to be an input object")
+	postsFilterFields := postsFilterInput.Fields()
+	require.Contains(t, postsFilterFields, "some")
+	require.Contains(t, postsFilterFields, "none")
+
+	someType, ok := postsFilterFields["some"].Type.(*graphql.InputObject)
+	require.True(t, ok, "expected posts.some nested where type")
+	someWhereFields := someType.Fields()
+	require.Contains(t, someWhereFields, "published")
+	require.NotContains(t, someWhereFields, "user", "single-hop nested where should be scalar-only")
+
+	postsWhere := r.whereInput(posts)
+	require.NotNil(t, postsWhere)
+	postsWhereFields := postsWhere.Fields()
+	userField, ok := postsWhereFields["user"]
+	require.True(t, ok, "expected posts.where.user relationship filter field")
+	userFilterInput, ok := userField.Type.(*graphql.InputObject)
+	require.True(t, ok, "expected posts.where.user to be an input object")
+	userFilterFields := userFilterInput.Fields()
+	require.Contains(t, userFilterFields, "is")
+	require.Contains(t, userFilterFields, "isNull")
+
+	isType, ok := userFilterFields["is"].Type.(*graphql.InputObject)
+	require.True(t, ok, "expected user.is nested where type")
+	isWhereFields := isType.Fields()
+	require.Contains(t, isWhereFields, "username")
+	require.NotContains(t, isWhereFields, "posts", "single-hop nested where should be scalar-only")
 }
 
 func TestDeletePayloadIncludesID(t *testing.T) {
@@ -1214,6 +1372,16 @@ func TestConvertColumnValue_BytesPreserved(t *testing.T) {
 	assert.Equal(t, raw, converted)
 }
 
+func TestConvertColumnValue_BooleanCoercion(t *testing.T) {
+	col := introspection.Column{Name: "is_active", DataType: "tinyint", ColumnType: "tinyint(1)"}
+
+	assert.Equal(t, false, convertColumnValue(col, int64(0)))
+	assert.Equal(t, true, convertColumnValue(col, int64(1)))
+	assert.Equal(t, true, convertColumnValue(col, int64(2)))
+	assert.Equal(t, true, convertColumnValue(col, []byte("2")))
+	assert.Equal(t, false, convertColumnValue(col, "0"))
+}
+
 func TestUUIDColumnResolver_NormalizesBinaryValue(t *testing.T) {
 	col := introspection.Column{
 		Name:             "id",
@@ -1560,7 +1728,10 @@ func TestManyToOneResolverBatch(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, parentRows, 2)
 
-	batchPlan, err := planner.PlanManyToOneBatch(users, nil, "id", []interface{}{1, 2})
+	batchPlan, err := planner.PlanManyToOneBatch(users, nil, []string{"id"}, []planner.ParentTuple{
+		{Values: []interface{}{1}},
+		{Values: []interface{}{2}},
+	})
 	require.NoError(t, err)
 	userRows := sqlmock.NewRows([]string{"id", "username", "__batch_parent_id"}).
 		AddRow(1, "alice", 1).
@@ -1640,7 +1811,7 @@ func TestTryBatchOneToManyConnection_NoBatchState(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
 		},
-	}, users, rel, 1)
+	}, users, rel, []interface{}{1})
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, result)
@@ -1705,7 +1876,7 @@ func TestTryBatchOneToManyConnection_CachesResults(t *testing.T) {
 		}},
 	}
 
-	orderBy := &planner.OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	orderBy := &planner.OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	selection := planner.SelectedColumnsForConnection(posts, field, nil, orderBy)
 	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumn, selection, []interface{}{1, 2}, 1, orderBy, nil)
 	require.NoError(t, err)
@@ -1809,7 +1980,7 @@ func TestTryBatchOneToManyConnection_FirstZero(t *testing.T) {
 		}},
 	}
 
-	orderBy := &planner.OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	orderBy := &planner.OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	selection := planner.SelectedColumnsForConnection(posts, field, nil, orderBy)
 	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumn, selection, []interface{}{1, 2}, 0, orderBy, nil)
 	require.NoError(t, err)
@@ -1897,7 +2068,7 @@ func TestOneToManyConnectionResolver_WithAfterSkipsBatching(t *testing.T) {
 		}},
 	}
 
-	after := cursor.EncodeCursor("Posts", "databaseId", "ASC", 100)
+	after := cursor.EncodeCursor("Posts", "databaseId", []string{"ASC"}, 100)
 	args := map[string]interface{}{
 		"first": 1,
 		"after": after,
@@ -2025,7 +2196,7 @@ func TestTryBatchManyToOne_NoBatchState(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{field},
 		},
-	}, users, rel, 1)
+	}, users, rel, []interface{}{1})
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, result)
@@ -2096,7 +2267,10 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 	require.Len(t, parentRows, 2)
 
 	// Expect the batched many-to-one query to execute once.
-	batchPlan, err := planner.PlanManyToOneBatch(users, nil, "id", []interface{}{1, 2})
+	batchPlan, err := planner.PlanManyToOneBatch(users, nil, []string{"id"}, []planner.ParentTuple{
+		{Values: []interface{}{1}},
+		{Values: []interface{}{2}},
+	})
 	require.NoError(t, err)
 	userRows := sqlmock.NewRows([]string{"id", "username", "__batch_parent_id"}).
 		AddRow(1, "alice", 1).
@@ -2125,7 +2299,7 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{childField},
 		},
-	}, posts, rel, 1)
+	}, posts, rel, []interface{}{1})
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.EqualValues(t, 1, first["databaseId"])
@@ -2137,7 +2311,7 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 		Info: graphql.ResolveInfo{
 			FieldASTs: []*ast.Field{childField},
 		},
-	}, posts, rel, 2)
+	}, posts, rel, []interface{}{2})
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.EqualValues(t, 2, second["databaseId"])

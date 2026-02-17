@@ -414,7 +414,7 @@ func TestSelectedColumnsForConnection_RootFragmentSpread(t *testing.T) {
 		},
 	}
 
-	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Direction: "ASC"}
+	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Directions: []string{"ASC", "ASC"}}
 	cols := SelectedColumnsForConnection(table, field, fragments, orderBy)
 	names := columnNamesOnly(cols)
 
@@ -456,7 +456,7 @@ func TestSelectedColumnsForConnection_EdgesNodeViaFragment(t *testing.T) {
 		},
 	}
 
-	orderBy := &OrderBy{Columns: []string{"id"}, Direction: "ASC"}
+	orderBy := &OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	cols := SelectedColumnsForConnection(table, field, fragments, orderBy)
 	names := columnNamesOnly(cols)
 
@@ -486,11 +486,55 @@ func TestSelectedColumnsForConnection_MetadataOnlyUsesCursorColumns(t *testing.T
 		}},
 	}
 
-	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Direction: "ASC"}
+	orderBy := &OrderBy{Columns: []string{"created_at", "id"}, Directions: []string{"ASC", "ASC"}}
 	cols := SelectedColumnsForConnection(table, field, nil, orderBy)
 	names := columnNamesOnly(cols)
 
 	assert.Equal(t, []string{"id", "created_at"}, names)
+}
+
+func TestSelectedColumnsForConnection_IncludesRelationshipLocalKeys(t *testing.T) {
+	table := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+			{Name: "title"},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsManyToOne:      true,
+				LocalColumns:     []string{"user_id"},
+				RemoteTable:      "users",
+				RemoteColumns:    []string{"id"},
+				GraphQLFieldName: "user",
+			},
+		},
+	}
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "postsConnection"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+					&ast.Field{
+						Name: &ast.Name{Value: "user"},
+						SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+							&ast.Field{Name: &ast.Name{Value: "username"}},
+						}},
+					},
+				}},
+			},
+		}},
+	}
+
+	orderBy := &OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
+	cols := SelectedColumnsForConnection(table, field, nil, orderBy)
+	names := columnNamesOnly(cols)
+
+	assert.Equal(t, []string{"id", "user_id"}, names)
 }
 
 func columnNamesOnly(cols []introspection.Column) []string {

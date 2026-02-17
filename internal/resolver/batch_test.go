@@ -344,6 +344,18 @@ func TestGroupByAlias(t *testing.T) {
 	}
 }
 
+func TestGroupByAliasesComposite(t *testing.T) {
+	rows := []map[string]interface{}{
+		{"id": 1, "__batch_parent_0": 7, "__batch_parent_1": 10},
+		{"id": 2, "__batch_parent_0": 7, "__batch_parent_1": 10},
+		{"id": 3, "__batch_parent_0": 7, "__batch_parent_1": 11},
+	}
+	grouped := groupByAliases(rows, []string{"__batch_parent_0", "__batch_parent_1"})
+	assert.Len(t, grouped, 2)
+	assert.Len(t, grouped[tupleKeyFromValues([]interface{}{7, 10})], 2)
+	assert.Len(t, grouped[tupleKeyFromValues([]interface{}{7, 11})], 1)
+}
+
 func TestScanRowsWithExtras(t *testing.T) {
 	columns := []introspection.Column{
 		{Name: "id"},

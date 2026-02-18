@@ -5,6 +5,7 @@ These are guided walkthroughs. Each one builds something working, with just enou
 - [Your first schema in five minutes](first-schema.md)
 - [Secure local dev with OIDC/JWKS](local-oidc.md)
 - [Query with filters and unique keys](query-basics.md)
+- [Mutate data with typed results](mutation-basics.md)
 - [Vector search with embeddings](vector-search.md)
 - [Vector search on TiDB Cloud Zero (auto-embedding)](vector-search-db-zero-auto-embedding.md)
 - [Operations with guardrails](ops-guardrails.md)

@@ -732,6 +732,88 @@ func TestConfigValidate_DatabaseResolution(t *testing.T) {
 	})
 }
 
+func TestConfigValidate_NamingTypeOverrides(t *testing.T) {
+	newValidConfig := func() *Config {
+		return &Config{
+			Database: DatabaseConfig{
+				Host:     "localhost",
+				Port:     4000,
+				User:     "root",
+				Database: "test",
+				TLS: DatabaseTLSConfig{
+					Mode: "off",
+				},
+				Pool: PoolConfig{
+					MaxOpen: 25,
+					MaxIdle: 5,
+				},
+			},
+			Server: ServerConfig{
+				Port: 8080,
+			},
+			Observability: ObservabilityConfig{
+				Logging: LoggingConfig{
+					Level:  "info",
+					Format: "json",
+				},
+				OTLP: OTLPConfig{
+					Protocol:    "grpc",
+					Compression: "gzip",
+				},
+			},
+		}
+	}
+
+	t.Run("valid type override", func(t *testing.T) {
+		cfg := newValidConfig()
+		cfg.Naming.TypeOverrides = map[string]string{
+			"users": "Account",
+		}
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+	})
+
+	t.Run("empty table name errors", func(t *testing.T) {
+		cfg := newValidConfig()
+		cfg.Naming.TypeOverrides = map[string]string{
+			" ": "Account",
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "naming.type_overrides")
+	})
+
+	t.Run("empty type name errors", func(t *testing.T) {
+		cfg := newValidConfig()
+		cfg.Naming.TypeOverrides = map[string]string{
+			"users": " ",
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "naming.type_overrides")
+	})
+
+	t.Run("non PascalCase type name errors", func(t *testing.T) {
+		cfg := newValidConfig()
+		cfg.Naming.TypeOverrides = map[string]string{
+			"users": "user_profile",
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "must be PascalCase")
+	})
+
+	t.Run("reserved mutation type name errors", func(t *testing.T) {
+		cfg := newValidConfig()
+		cfg.Naming.TypeOverrides = map[string]string{
+			"users": "ConstraintError",
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "reserved for mutation error/result types")
+	})
+}
+
 func TestParseMyCnf(t *testing.T) {
 	t.Run("parses supported client keys", func(t *testing.T) {
 		raw := `

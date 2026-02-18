@@ -329,3 +329,10 @@ Controls how SQL table names are converted to GraphQL type names (singularizatio
   Maps singular form to custom plural. Example: `{"person": "people", "status": "statuses"}`
 - `naming.singular_overrides` (map of string => string, default: `{}`)
   Maps plural form to custom singular. Example: `{"people": "person", "data": "datum"}`
+- `naming.type_overrides` (map of string => string, default: `{}`)
+  Maps SQL table name to an explicit GraphQL type name. Table-name matching is case-insensitive.
+  Example: `{"users": "Account", "audit_log": "AuditEvent"}`.
+
+`naming.type_overrides` validation rules:
+- override values must be non-empty PascalCase GraphQL type names
+- override values cannot use reserved mutation type names: `MutationError`, `InputValidationError`, `ConflictError`, `ConstraintError`, `PermissionError`, `NotFoundError`, `InternalError`

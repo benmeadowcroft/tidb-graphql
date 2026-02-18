@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"regexp"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"tidb-graphql/internal/sqltype"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/language/ast"
 	"github.com/stretchr/testify/assert"
@@ -984,7 +986,8 @@ func TestMutationEnumRoundTrip_Create(t *testing.T) {
 	require.NoError(t, err)
 	ctx := WithMutationContext(context.Background(), NewMutationContext(tx))
 
-	resolverFn := r.makeCreateResolver(table, insertable)
+	successType := r.createSuccessType(table, r.buildGraphQLType(table))
+	resolverFn := r.makeCreateResolver(table, insertable, successType)
 	result, err := resolverFn(graphql.ResolveParams{
 		Args: map[string]interface{}{
 			"input": inputArg,
@@ -996,12 +999,604 @@ func TestMutationEnumRoundTrip_Create(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	record, ok := result.(map[string]interface{})
+	wrapper, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	record, ok := wrapper["user"].(map[string]interface{})
 	require.True(t, ok)
 	assert.EqualValues(t, 1, record["databaseId"])
 	assert.Equal(t, "ready", record["status"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateResolver_UniqueViolation_ConflictError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "username", DataType: "varchar"},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	inputArg := map[string]interface{}{"username": "alice"}
+	insertable := columnNameSet(r.mutationInsertableColumns(table))
+	columns, values, err := mapInputColumns(table, inputArg, insertable)
+	require.NoError(t, err)
+	insertPlan, err := planner.PlanInsert(table, columns, values)
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(insertPlan.SQL)).
+		WithArgs(toDriverValues(insertPlan.Args)...).
+		WillReturnError(&mysql.MySQLError{Number: 1062, Message: "Duplicate entry"})
+	mock.ExpectRollback()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	resolverFn := r.makeCreateResolver(table, insertable, r.createSuccessType(table, r.buildGraphQLType(table)))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"input": inputArg,
+		},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "ConflictError", payload["__typename"])
+	assert.Equal(t, "Duplicate entry", payload["message"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateResolver_InvalidInput_ValidationError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "username", DataType: "varchar"},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	insertable := columnNameSet(r.mutationInsertableColumns(table))
+	resolverFn := r.makeCreateResolver(table, insertable, r.createSuccessType(table, r.buildGraphQLType(table)))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"input": map[string]interface{}{"unknownField": "value"},
+		},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "InputValidationError", payload["__typename"])
+	assert.Contains(t, payload["message"], "unknown or disallowed column")
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUpdateResolver_NotFound_SuccessWithNullEntity(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+			{Name: "username", DataType: "varchar"},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	updatable := columnNameSet(r.mutationUpdatableColumns(table))
+	pkCols := introspection.PrimaryKeyColumns(table)
+	pkValues := map[string]interface{}{"id": int64(999)}
+	setValues := map[string]interface{}{"username": "new-name"}
+	plan, err := planner.PlanUpdate(table, setValues, pkValues)
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(toDriverValues(plan.Args)...).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	id := nodeid.Encode(introspection.GraphQLTypeName(table), 999)
+	resolverFn := r.makeUpdateResolver(table, updatable, pkCols, r.updateSuccessType(table, r.buildGraphQLType(table)))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"id":  id,
+			"set": map[string]interface{}{"username": "new-name"},
+		},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	entityField := r.mutationEntityFieldName(table)
+	_, exists := payload[entityField]
+	require.True(t, exists)
+	assert.Nil(t, payload[entityField])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteResolver_SuccessShape(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	pkValues := map[string]interface{}{"id": int64(7)}
+	plan, err := planner.PlanDelete(table, pkValues)
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(toDriverValues(plan.Args)...).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	id := nodeid.Encode(introspection.GraphQLTypeName(table), 7)
+	resolverFn := r.makeDeleteResolver(table, pkCols, r.deleteSuccessType(table, pkCols))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    map[string]interface{}{"id": id},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, id, payload["id"])
+	assert.EqualValues(t, 7, payload["databaseId"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteResolver_NotFound_NotFoundError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	pkValues := map[string]interface{}{"id": int64(42)}
+	plan, err := planner.PlanDelete(table, pkValues)
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(toDriverValues(plan.Args)...).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	id := nodeid.Encode(introspection.GraphQLTypeName(table), 42)
+	resolverFn := r.makeDeleteResolver(table, pkCols, r.deleteSuccessType(table, pkCols))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    map[string]interface{}{"id": id},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "NotFoundError", payload["__typename"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteResolver_BadNodeID_ValidationError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	resolverFn := r.makeDeleteResolver(table, pkCols, r.deleteSuccessType(table, pkCols))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    map[string]interface{}{"id": "not-a-valid-node-id"},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "InputValidationError", payload["__typename"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteResolver_FKRestrict_ConstraintError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	pkValues := map[string]interface{}{"id": int64(12)}
+	plan, err := planner.PlanDelete(table, pkValues)
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(toDriverValues(plan.Args)...).
+		WillReturnError(&mysql.MySQLError{Number: 1451, Message: "Cannot delete or update a parent row"})
+	mock.ExpectRollback()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	id := nodeid.Encode(introspection.GraphQLTypeName(table), 12)
+	resolverFn := r.makeDeleteResolver(table, pkCols, r.deleteSuccessType(table, pkCols))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    map[string]interface{}{"id": id},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "ConstraintError", payload["__typename"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteResolver_PermissionDenied_PermissionError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	pkValues := map[string]interface{}{"id": int64(22)}
+	plan, err := planner.PlanDelete(table, pkValues)
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(plan.SQL)).
+		WithArgs(toDriverValues(plan.Args)...).
+		WillReturnError(&mysql.MySQLError{Number: 1142, Message: "DELETE command denied"})
+	mock.ExpectRollback()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	id := nodeid.Encode(introspection.GraphQLTypeName(table), 22)
+	resolverFn := r.makeDeleteResolver(table, pkCols, r.deleteSuccessType(table, pkCols))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    map[string]interface{}{"id": id},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "PermissionError", payload["__typename"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestDeleteSuccessTypeIncludesID(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{table}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	pkCols := introspection.PrimaryKeyColumns(table)
+	payload := r.deleteSuccessType(table, pkCols)
+	fields := payload.Fields()
+	_, ok := fields["id"]
+	require.True(t, ok)
+	_, ok = fields["databaseId"]
+	require.True(t, ok)
+}
+
+func TestMutationErrorInterface_AllTypesImplementIt(t *testing.T) {
+	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	mutationErrorInterface := r.sharedMutationErrorInterface()
+	types := []*graphql.Object{
+		r.sharedValidationErrorType(),
+		r.sharedConflictErrorType(),
+		r.sharedConstraintErrorType(),
+		r.sharedPermissionErrorType(),
+		r.sharedNotFoundErrorType(),
+		r.sharedInternalErrorType(),
+	}
+	for _, typ := range types {
+		interfaces := typ.Interfaces()
+		require.Len(t, interfaces, 1)
+		assert.Same(t, mutationErrorInterface, interfaces[0])
+	}
+}
+
+func TestErrorTypesSingleton(t *testing.T) {
+	r := NewResolver(nil, &introspection.Schema{}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	assert.Same(t, r.sharedValidationErrorType(), r.sharedValidationErrorType())
+	assert.Same(t, r.sharedConflictErrorType(), r.sharedConflictErrorType())
+	assert.Same(t, r.sharedConstraintErrorType(), r.sharedConstraintErrorType())
+	assert.Same(t, r.sharedPermissionErrorType(), r.sharedPermissionErrorType())
+	assert.Same(t, r.sharedNotFoundErrorType(), r.sharedNotFoundErrorType())
+	assert.Same(t, r.sharedInternalErrorType(), r.sharedInternalErrorType())
+}
+
+func TestCreateResultUnion_TypeNameAndMembers(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "username"},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{table}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	success := r.createSuccessType(table, r.buildGraphQLType(table))
+	union := r.createResultUnion(table, success)
+
+	assert.Equal(t, "CreateUserResult", union.Name())
+	types := union.Types()
+	require.Len(t, types, 6)
+	names := make([]string, 0, len(types))
+	for _, typ := range types {
+		names = append(names, typ.Name())
+	}
+	assert.Contains(t, names, "CreateUserSuccess")
+	assert.Contains(t, names, "InputValidationError")
+	assert.Contains(t, names, "ConflictError")
+	assert.Contains(t, names, "ConstraintError")
+	assert.Contains(t, names, "PermissionError")
+	assert.Contains(t, names, "InternalError")
+}
+
+func TestDeleteResultUnion_Members(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{table}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	success := r.deleteSuccessType(table, introspection.PrimaryKeyColumns(table))
+	union := r.deleteResultUnion(table, success)
+
+	types := union.Types()
+	require.Len(t, types, 6)
+	names := make([]string, 0, len(types))
+	for _, typ := range types {
+		names = append(names, typ.Name())
+	}
+	assert.Contains(t, names, "DeleteUserSuccess")
+	assert.Contains(t, names, "InputValidationError")
+	assert.Contains(t, names, "NotFoundError")
+	assert.Contains(t, names, "ConstraintError")
+	assert.Contains(t, names, "PermissionError")
+	assert.Contains(t, names, "InternalError")
+}
+
+func TestResolveType_AllErrorTypesRoute(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{table}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	success := r.createSuccessType(table, r.buildGraphQLType(table))
+	union := r.createResultUnion(table, success)
+
+	cases := map[string]string{
+		"InputValidationError": "InputValidationError",
+		"ConflictError":        "ConflictError",
+		"ConstraintError":      "ConstraintError",
+		"PermissionError":      "PermissionError",
+		"NotFoundError":        "NotFoundError",
+		"InternalError":        "InternalError",
+	}
+	for typename, want := range cases {
+		got := union.ResolveType(graphql.ResolveTypeParams{
+			Value: map[string]interface{}{"__typename": typename},
+		})
+		require.NotNil(t, got)
+		assert.Equal(t, want, got.Name())
+	}
+}
+
+func TestBuildGraphQLSchema_MutationFieldTypes(t *testing.T) {
+	table := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "username", DataType: "varchar"},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{table}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	schema, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
+	mutationType := schema.MutationType()
+	require.NotNil(t, mutationType)
+
+	for _, fieldName := range []string{"createUser", "updateUser", "deleteUser"} {
+		field, ok := mutationType.Fields()[fieldName]
+		require.True(t, ok)
+		nonNull, ok := field.Type.(*graphql.NonNull)
+		require.True(t, ok, "field %s should be non-null", fieldName)
+		_, ok = nonNull.OfType.(*graphql.Union)
+		require.True(t, ok, "field %s should return a union", fieldName)
+	}
+}
+
+func TestMutationErrToPayload_AllCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "invalid input", err: newMutationError("bad input", "invalid_input", 0), want: "InputValidationError"},
+		{name: "unique", err: newMutationError("dup", "unique_violation", 1062), want: "ConflictError"},
+		{name: "foreign key", err: newMutationError("fk", "foreign_key_violation", 1451), want: "ConstraintError"},
+		{name: "not null", err: newMutationError("null", "not_null_violation", 1048), want: "ConstraintError"},
+		{name: "access denied", err: newMutationError("denied", "access_denied", 1142), want: "PermissionError"},
+		{name: "plain", err: errors.New("boom"), want: "InternalError"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := mutationErrToPayload(tc.err)
+			assert.Equal(t, tc.want, payload["__typename"])
+			message, _ := payload["message"].(string)
+			if tc.want == "InternalError" {
+				assert.Equal(t, "internal server error", message)
+			}
+		})
+	}
+}
+
+func TestBuildGraphQLSchema_ReservedTypeName_Fails(t *testing.T) {
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{
+			{
+				Name: "constraint_error",
+				Columns: []introspection.Column{
+					{Name: "id", IsPrimaryKey: true},
+					{Name: "message"},
+				},
+			},
+		},
+	}
+	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	_, err := r.BuildGraphQLSchema()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ConstraintError")
+	assert.Contains(t, err.Error(), "<reserved mutation type>")
+}
+
+func TestBuildGraphQLSchema_TypeOverrideCanMatchSingleType(t *testing.T) {
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{
+			{
+				Name: "users",
+				Columns: []introspection.Column{
+					{Name: "id", IsPrimaryKey: true},
+					{Name: "username"},
+				},
+			},
+		},
+	}
+	cfg := naming.DefaultConfig()
+	cfg.TypeOverrides["users"] = "User"
+	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, cfg)
+
+	_, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
 }
 
 func TestDateTimeFieldType(t *testing.T) {

@@ -9,6 +9,7 @@ Concepts and design rationale for how TiDB GraphQL works.
 - [Deployment overview](deployment-overview.md)
 - [Schema handling: build, snapshot, refresh](schema-handling.md)
 - [Query planning as a seam](query-planning.md)
+- [Mutation result design and rationale](mutation-design.md)
 - [Resolver batching to avoid N+1](resolver-batching.md)
 - [Performance constraints as safety rails](performance-constraints.md)
 - [Database-first authorization](database-first-auth.md)

@@ -47,7 +47,7 @@ For example, we can filter the users to those who do not have certain statuses:
 
 ```graphql
 query {
-  users(where: { status: { notIn: ["pending", "inactive"] } }) {
+  users(where: { status: { notIn: [PENDING, INACTIVE] } }) {
     nodes {
       fullName
       email

@@ -35,46 +35,59 @@ import (
 // Resolver handles GraphQL query execution against a database.
 // It maintains caches for GraphQL types and input objects to avoid redundant construction.
 type Resolver struct {
-	executor           dbexec.QueryExecutor
-	dbSchema           *introspection.Schema
-	typeCache          map[string]*graphql.Object
-	orderByClauseCache map[string]*graphql.InputObject
-	whereCache         map[string]*graphql.InputObject
-	filterCache        map[string]*graphql.InputObject
-	aggregateCache     map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
-	createInputCache   map[string]*graphql.InputObject
-	updateInputCache   map[string]*graphql.InputObject
-	deletePayloadCache map[string]*graphql.Object
-	enumCache          map[string]*graphql.Enum
-	enumFilterCache    map[string]*graphql.InputObject
-	setFilterCache     map[string]*graphql.InputObject
-	vectorEdgeCache    map[string]*graphql.Object
-	vectorConnCache    map[string]*graphql.Object
-	singularQueryCache map[string]string
-	singularTypeCache  map[string]string
-	singularNamer      *naming.Namer
-	orderDirection     *graphql.Enum
-	orderByPolicy      *graphql.Enum
-	nonNegativeInt     *graphql.Scalar
-	bigIntType         *graphql.Scalar
-	decimalType        *graphql.Scalar
-	jsonType           *graphql.Scalar
-	dateType           *graphql.Scalar
-	timeType           *graphql.Scalar
-	yearType           *graphql.Scalar
-	bytesType          *graphql.Scalar
-	uuidType           *graphql.Scalar
-	vectorType         *graphql.Scalar
-	nodeInterface      *graphql.Interface
-	pageInfoType       *graphql.Object
-	vectorDistance     *graphql.Enum
-	edgeCache          map[string]*graphql.Object
-	connectionCache    map[string]*graphql.Object
-	limits             *planner.PlanLimits
-	defaultLimit       int
-	filters            schemafilter.Config
-	vectorSearch       VectorSearchConfig
-	mu                 sync.RWMutex
+	executor               dbexec.QueryExecutor
+	dbSchema               *introspection.Schema
+	typeCache              map[string]*graphql.Object
+	orderByClauseCache     map[string]*graphql.InputObject
+	whereCache             map[string]*graphql.InputObject
+	filterCache            map[string]*graphql.InputObject
+	aggregateCache         map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
+	createInputCache       map[string]*graphql.InputObject
+	updateInputCache       map[string]*graphql.InputObject
+	deletePayloadCache     map[string]*graphql.Object
+	mutationErrorInterface *graphql.Interface
+	validationErrorType    *graphql.Object
+	conflictErrorType      *graphql.Object
+	constraintErrorType    *graphql.Object
+	permissionErrorType    *graphql.Object
+	notFoundErrorType      *graphql.Object
+	internalErrorType      *graphql.Object
+	createSuccessCache     map[string]*graphql.Object
+	updateSuccessCache     map[string]*graphql.Object
+	deleteSuccessCache     map[string]*graphql.Object
+	createResultCache      map[string]*graphql.Union
+	updateResultCache      map[string]*graphql.Union
+	deleteResultCache      map[string]*graphql.Union
+	enumCache              map[string]*graphql.Enum
+	enumFilterCache        map[string]*graphql.InputObject
+	setFilterCache         map[string]*graphql.InputObject
+	vectorEdgeCache        map[string]*graphql.Object
+	vectorConnCache        map[string]*graphql.Object
+	singularQueryCache     map[string]string
+	singularTypeCache      map[string]string
+	singularNamer          *naming.Namer
+	orderDirection         *graphql.Enum
+	orderByPolicy          *graphql.Enum
+	nonNegativeInt         *graphql.Scalar
+	bigIntType             *graphql.Scalar
+	decimalType            *graphql.Scalar
+	jsonType               *graphql.Scalar
+	dateType               *graphql.Scalar
+	timeType               *graphql.Scalar
+	yearType               *graphql.Scalar
+	bytesType              *graphql.Scalar
+	uuidType               *graphql.Scalar
+	vectorType             *graphql.Scalar
+	nodeInterface          *graphql.Interface
+	pageInfoType           *graphql.Object
+	vectorDistance         *graphql.Enum
+	edgeCache              map[string]*graphql.Object
+	connectionCache        map[string]*graphql.Object
+	limits                 *planner.PlanLimits
+	defaultLimit           int
+	filters                schemafilter.Config
+	vectorSearch           VectorSearchConfig
+	mu                     sync.RWMutex
 }
 
 // VectorSearchConfig controls generated vector-search fields.
@@ -82,6 +95,16 @@ type VectorSearchConfig struct {
 	RequireIndex bool
 	MaxTopK      int
 	DefaultFirst int
+}
+
+var staticMutationTypeNames = map[string]bool{
+	"MutationError":        true,
+	"InputValidationError": true,
+	"ConflictError":        true,
+	"ConstraintError":      true,
+	"PermissionError":      true,
+	"NotFoundError":        true,
+	"InternalError":        true,
 }
 
 func normalizeVectorSearchConfig(cfg VectorSearchConfig) VectorSearchConfig {
@@ -115,6 +138,12 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		createInputCache:   make(map[string]*graphql.InputObject),
 		updateInputCache:   make(map[string]*graphql.InputObject),
 		deletePayloadCache: make(map[string]*graphql.Object),
+		createSuccessCache: make(map[string]*graphql.Object),
+		updateSuccessCache: make(map[string]*graphql.Object),
+		deleteSuccessCache: make(map[string]*graphql.Object),
+		createResultCache:  make(map[string]*graphql.Union),
+		updateResultCache:  make(map[string]*graphql.Union),
+		deleteResultCache:  make(map[string]*graphql.Union),
 		enumCache:          make(map[string]*graphql.Enum),
 		enumFilterCache:    make(map[string]*graphql.InputObject),
 		setFilterCache:     make(map[string]*graphql.InputObject),
@@ -146,6 +175,9 @@ func (r *Resolver) SetVectorSearchConfig(cfg VectorSearchConfig) {
 // relationship resolvers for foreign key navigation.
 func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 	r.applyNaming()
+	if err := r.checkMutationTypeNameCollisions(); err != nil {
+		return graphql.Schema{}, err
+	}
 
 	queryFields := graphql.Fields{}
 
@@ -199,6 +231,51 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 	}
 
 	return graphql.NewSchema(schemaConfig)
+}
+
+func (r *Resolver) checkMutationTypeNameCollisions() error {
+	if r.dbSchema == nil {
+		return nil
+	}
+	seen := make(map[string]string, len(staticMutationTypeNames)+len(r.dbSchema.Tables)*8)
+	for name := range staticMutationTypeNames {
+		seen[name] = "<reserved mutation type>"
+	}
+	for _, table := range r.dbSchema.Tables {
+		single := table.GraphQLSingleTypeName
+		if single == "" {
+			single = introspection.GraphQLSingleTypeName(table)
+		}
+		typeName := table.GraphQLTypeName
+		if typeName == "" {
+			typeName = introspection.GraphQLTypeName(table)
+		}
+		names := []string{
+			typeName,
+			single,
+			"Create" + single + "Success",
+			"Update" + single + "Success",
+			"Delete" + single + "Success",
+			"Create" + single + "Result",
+			"Update" + single + "Result",
+			"Delete" + single + "Result",
+		}
+		localSeen := make(map[string]bool, len(names))
+		for _, name := range names {
+			if localSeen[name] {
+				continue
+			}
+			localSeen[name] = true
+			if claimedBy, exists := seen[name]; exists {
+				return fmt.Errorf(
+					"schema build failed: table %q produces GraphQL type name %q which conflicts with %s; rename the table or set naming.type_overrides.%s to a different name",
+					table.Name, name, claimedBy, table.Name,
+				)
+			}
+			seen[name] = fmt.Sprintf("table %q", table.Name)
+		}
+	}
+	return nil
 }
 
 func (r *Resolver) applyNaming() {

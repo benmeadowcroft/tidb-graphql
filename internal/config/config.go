@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -743,6 +744,7 @@ func setDefaults(v *viper.Viper) {
 	// Naming defaults
 	v.SetDefault("naming.plural_overrides", map[string]string{})
 	v.SetDefault("naming.singular_overrides", map[string]string{})
+	v.SetDefault("naming.type_overrides", map[string]string{})
 }
 
 // promptPassword prompts the user for a password without echoing to terminal.
@@ -1006,6 +1008,9 @@ func (c *Config) Validate() *ValidationResult {
 	// Validate schema filters
 	validateSchemaFilters(result, c.SchemaFilters)
 
+	// Validate naming config
+	validateNamingConfig(result, c.Naming)
+
 	return result
 }
 
@@ -1022,6 +1027,52 @@ func validateSchemaFilters(result *ValidationResult, filters schemafilter.Config
 	validatePatternMap(result, "schema_filters.allow_columns", filters.AllowColumns)
 	validatePatternMap(result, "schema_filters.deny_columns", filters.DenyColumns)
 	validatePatternMap(result, "schema_filters.deny_mutation_columns", filters.DenyMutationColumns)
+}
+
+var mutationReservedTypeNames = map[string]bool{
+	"MutationError":        true,
+	"InputValidationError": true,
+	"ConflictError":        true,
+	"ConstraintError":      true,
+	"PermissionError":      true,
+	"NotFoundError":        true,
+	"InternalError":        true,
+}
+
+var pascalCaseTypePattern = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*$`)
+
+func validateNamingConfig(result *ValidationResult, cfg naming.Config) {
+	for tableName, typeName := range cfg.TypeOverrides {
+		tableName = strings.TrimSpace(tableName)
+		typeName = strings.TrimSpace(typeName)
+		if tableName == "" {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "naming.type_overrides",
+				Message: "table name cannot be empty",
+			})
+			continue
+		}
+		if typeName == "" {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "naming.type_overrides",
+				Message: fmt.Sprintf("type override for table %q cannot be empty", tableName),
+			})
+			continue
+		}
+		if !pascalCaseTypePattern.MatchString(typeName) {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "naming.type_overrides",
+				Message: fmt.Sprintf("type override %q for table %q must be PascalCase", typeName, tableName),
+			})
+			continue
+		}
+		if mutationReservedTypeNames[typeName] {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "naming.type_overrides",
+				Message: fmt.Sprintf("type override %q for table %q is reserved for mutation error/result types", typeName, tableName),
+			})
+		}
+	}
 }
 
 func validatePatternMap(result *ValidationResult, field string, patternMap map[string][]string) {

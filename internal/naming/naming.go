@@ -241,6 +241,12 @@ func (n *Namer) RegisterType(tableName string) string {
 	return n.resolver.RegisterType(graphqlName, tableName)
 }
 
+// RegisterTypeName registers an explicit GraphQL type name for a table source.
+func (n *Namer) RegisterTypeName(graphqlName, tableName string) string {
+	graphqlName = n.validateTypeAndSuffix(graphqlName)
+	return n.resolver.RegisterType(graphqlName, tableName)
+}
+
 // RegisterColumnField registers a column field and returns the resolved field name.
 // Columns always win in precedence, so this establishes the field name.
 func (n *Namer) RegisterColumnField(typeName, columnName string) string {

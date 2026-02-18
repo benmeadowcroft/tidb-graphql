@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"unicode"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
@@ -44,14 +45,16 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 	insertableMap := columnNameSet(insertableCols)
 	if hasPK && len(insertableCols) > 0 && !missingRequiredInsertColumns(table, insertableMap) {
 		createInput := r.createInputType(table, insertableCols)
+		createSuccess := r.createSuccessType(table, tableType)
+		createResult := r.createResultUnion(table, createSuccess)
 		fields["create"+typeName] = &graphql.Field{
-			Type: tableType,
+			Type: graphql.NewNonNull(createResult),
 			Args: graphql.FieldConfigArgument{
 				"input": &graphql.ArgumentConfig{
 					Type: graphql.NewNonNull(createInput),
 				},
 			},
-			Resolve: r.makeCreateResolver(table, insertableMap),
+			Resolve: r.makeCreateResolver(table, insertableMap, createSuccess),
 		}
 	}
 
@@ -59,24 +62,27 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 	updatableMap := columnNameSet(updatableCols)
 	if hasPK && len(updatableCols) > 0 {
 		updateInput := r.updateSetInputType(table, updatableCols)
+		updateSuccess := r.updateSuccessType(table, tableType)
+		updateResult := r.updateResultUnion(table, updateSuccess)
 		args := r.primaryKeyArgs()
 		args["set"] = &graphql.ArgumentConfig{
 			Type: updateInput,
 		}
 		fields["update"+typeName] = &graphql.Field{
-			Type:    tableType,
+			Type:    graphql.NewNonNull(updateResult),
 			Args:    args,
-			Resolve: r.makeUpdateResolver(table, updatableMap, pkCols),
+			Resolve: r.makeUpdateResolver(table, updatableMap, pkCols, updateSuccess),
 		}
 	}
 
 	if hasPK {
-		deletePayload := r.deletePayloadType(table, pkCols)
+		deleteSuccess := r.deleteSuccessType(table, pkCols)
+		deleteResult := r.deleteResultUnion(table, deleteSuccess)
 		args := r.primaryKeyArgs()
 		fields["delete"+typeName] = &graphql.Field{
-			Type:    deletePayload,
+			Type:    graphql.NewNonNull(deleteResult),
 			Args:    args,
-			Resolve: r.makeDeleteResolver(table, pkCols),
+			Resolve: r.makeDeleteResolver(table, pkCols, deleteSuccess),
 		}
 	}
 
@@ -221,6 +227,412 @@ func (r *Resolver) deletePayloadType(table introspection.Table, pkCols []introsp
 	return objType
 }
 
+func (r *Resolver) sharedMutationErrorInterface() *graphql.Interface {
+	r.mu.RLock()
+	cached := r.mutationErrorInterface
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	iface := graphql.NewInterface(graphql.InterfaceConfig{
+		Name: "MutationError",
+		Fields: graphql.Fields{
+			"message": &graphql.Field{
+				Type: graphql.NewNonNull(graphql.String),
+			},
+		},
+	})
+
+	r.mu.Lock()
+	if r.mutationErrorInterface == nil {
+		r.mutationErrorInterface = iface
+	}
+	cached = r.mutationErrorInterface
+	r.mu.Unlock()
+	return cached
+}
+
+func (r *Resolver) sharedValidationErrorType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.validationErrorType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	obj := graphql.NewObject(graphql.ObjectConfig{
+		Name: "InputValidationError",
+		Fields: graphql.Fields{
+			"message": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+			"field":   &graphql.Field{Type: graphql.String},
+		},
+		Interfaces: []*graphql.Interface{r.sharedMutationErrorInterface()},
+	})
+
+	r.mu.Lock()
+	if r.validationErrorType == nil {
+		r.validationErrorType = obj
+	}
+	cached = r.validationErrorType
+	r.mu.Unlock()
+	return cached
+}
+
+func (r *Resolver) sharedConflictErrorType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.conflictErrorType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	obj := graphql.NewObject(graphql.ObjectConfig{
+		Name: "ConflictError",
+		Fields: graphql.Fields{
+			"message":          &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+			"conflictingField": &graphql.Field{Type: graphql.String},
+		},
+		Interfaces: []*graphql.Interface{r.sharedMutationErrorInterface()},
+	})
+
+	r.mu.Lock()
+	if r.conflictErrorType == nil {
+		r.conflictErrorType = obj
+	}
+	cached = r.conflictErrorType
+	r.mu.Unlock()
+	return cached
+}
+
+func (r *Resolver) sharedConstraintErrorType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.constraintErrorType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	obj := graphql.NewObject(graphql.ObjectConfig{
+		Name: "ConstraintError",
+		Fields: graphql.Fields{
+			"message": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		},
+		Interfaces: []*graphql.Interface{r.sharedMutationErrorInterface()},
+	})
+
+	r.mu.Lock()
+	if r.constraintErrorType == nil {
+		r.constraintErrorType = obj
+	}
+	cached = r.constraintErrorType
+	r.mu.Unlock()
+	return cached
+}
+
+func (r *Resolver) sharedPermissionErrorType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.permissionErrorType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	obj := graphql.NewObject(graphql.ObjectConfig{
+		Name: "PermissionError",
+		Fields: graphql.Fields{
+			"message": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		},
+		Interfaces: []*graphql.Interface{r.sharedMutationErrorInterface()},
+	})
+
+	r.mu.Lock()
+	if r.permissionErrorType == nil {
+		r.permissionErrorType = obj
+	}
+	cached = r.permissionErrorType
+	r.mu.Unlock()
+	return cached
+}
+
+func (r *Resolver) sharedNotFoundErrorType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.notFoundErrorType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	obj := graphql.NewObject(graphql.ObjectConfig{
+		Name: "NotFoundError",
+		Fields: graphql.Fields{
+			"message": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		},
+		Interfaces: []*graphql.Interface{r.sharedMutationErrorInterface()},
+	})
+
+	r.mu.Lock()
+	if r.notFoundErrorType == nil {
+		r.notFoundErrorType = obj
+	}
+	cached = r.notFoundErrorType
+	r.mu.Unlock()
+	return cached
+}
+
+func (r *Resolver) sharedInternalErrorType() *graphql.Object {
+	r.mu.RLock()
+	cached := r.internalErrorType
+	r.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+
+	obj := graphql.NewObject(graphql.ObjectConfig{
+		Name: "InternalError",
+		Fields: graphql.Fields{
+			"message": &graphql.Field{Type: graphql.NewNonNull(graphql.String)},
+		},
+		Interfaces: []*graphql.Interface{r.sharedMutationErrorInterface()},
+	})
+
+	r.mu.Lock()
+	if r.internalErrorType == nil {
+		r.internalErrorType = obj
+	}
+	cached = r.internalErrorType
+	r.mu.Unlock()
+	return cached
+}
+
+func (r *Resolver) mutationEntityFieldName(table introspection.Table) string {
+	return lowerFirst(r.singularTypeName(table))
+}
+
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	runes := []rune(s)
+	runes[0] = unicode.ToLower(runes[0])
+	return string(runes)
+}
+
+func (r *Resolver) createSuccessType(table introspection.Table, tableType *graphql.Object) *graphql.Object {
+	typeName := "Create" + r.singularTypeName(table) + "Success"
+	r.mu.RLock()
+	cached, ok := r.createSuccessCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	fieldName := r.mutationEntityFieldName(table)
+	objType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			fieldName: &graphql.Field{Type: graphql.NewNonNull(tableType)},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.createSuccessCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.createSuccessCache[typeName] = objType
+	r.mu.Unlock()
+	return objType
+}
+
+func (r *Resolver) updateSuccessType(table introspection.Table, tableType *graphql.Object) *graphql.Object {
+	typeName := "Update" + r.singularTypeName(table) + "Success"
+	r.mu.RLock()
+	cached, ok := r.updateSuccessCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	fieldName := r.mutationEntityFieldName(table)
+	objType := graphql.NewObject(graphql.ObjectConfig{
+		Name: typeName,
+		Fields: graphql.Fields{
+			fieldName: &graphql.Field{Type: tableType},
+		},
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.updateSuccessCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.updateSuccessCache[typeName] = objType
+	r.mu.Unlock()
+	return objType
+}
+
+func (r *Resolver) deleteSuccessType(table introspection.Table, pkCols []introspection.Column) *graphql.Object {
+	typeName := "Delete" + r.singularTypeName(table) + "Success"
+	r.mu.RLock()
+	cached, ok := r.deleteSuccessCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	fields := graphql.Fields{
+		"id": &graphql.Field{
+			Type: graphql.NewNonNull(graphql.ID),
+		},
+	}
+	for _, col := range pkCols {
+		fieldType := r.mapColumnTypeToGraphQL(table, &col)
+		if !col.IsNullable {
+			fieldType = graphql.NewNonNull(fieldType)
+		}
+		fields[introspection.GraphQLFieldName(col)] = &graphql.Field{
+			Type: fieldType,
+		}
+	}
+
+	objType := graphql.NewObject(graphql.ObjectConfig{
+		Name:   typeName,
+		Fields: fields,
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.deleteSuccessCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.deleteSuccessCache[typeName] = objType
+	r.mu.Unlock()
+	return objType
+}
+
+func (r *Resolver) createResultUnion(table introspection.Table, successType *graphql.Object) *graphql.Union {
+	typeName := "Create" + r.singularTypeName(table) + "Result"
+	r.mu.RLock()
+	cached, ok := r.createResultCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	union := graphql.NewUnion(graphql.UnionConfig{
+		Name: typeName,
+		Types: []*graphql.Object{
+			successType,
+			r.sharedValidationErrorType(),
+			r.sharedConflictErrorType(),
+			r.sharedConstraintErrorType(),
+			r.sharedPermissionErrorType(),
+			r.sharedInternalErrorType(),
+		},
+		ResolveType: r.mutationResolveType(successType),
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.createResultCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.createResultCache[typeName] = union
+	r.mu.Unlock()
+	return union
+}
+
+func (r *Resolver) updateResultUnion(table introspection.Table, successType *graphql.Object) *graphql.Union {
+	typeName := "Update" + r.singularTypeName(table) + "Result"
+	r.mu.RLock()
+	cached, ok := r.updateResultCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	union := graphql.NewUnion(graphql.UnionConfig{
+		Name: typeName,
+		Types: []*graphql.Object{
+			successType,
+			r.sharedValidationErrorType(),
+			r.sharedConflictErrorType(),
+			r.sharedConstraintErrorType(),
+			r.sharedPermissionErrorType(),
+			r.sharedInternalErrorType(),
+		},
+		ResolveType: r.mutationResolveType(successType),
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.updateResultCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.updateResultCache[typeName] = union
+	r.mu.Unlock()
+	return union
+}
+
+func (r *Resolver) deleteResultUnion(table introspection.Table, successType *graphql.Object) *graphql.Union {
+	typeName := "Delete" + r.singularTypeName(table) + "Result"
+	r.mu.RLock()
+	cached, ok := r.deleteResultCache[typeName]
+	r.mu.RUnlock()
+	if ok {
+		return cached
+	}
+
+	union := graphql.NewUnion(graphql.UnionConfig{
+		Name: typeName,
+		Types: []*graphql.Object{
+			successType,
+			r.sharedValidationErrorType(),
+			r.sharedNotFoundErrorType(),
+			r.sharedConstraintErrorType(),
+			r.sharedPermissionErrorType(),
+			r.sharedInternalErrorType(),
+		},
+		ResolveType: r.mutationResolveType(successType),
+	})
+
+	r.mu.Lock()
+	if cached, ok := r.deleteResultCache[typeName]; ok {
+		r.mu.Unlock()
+		return cached
+	}
+	r.deleteResultCache[typeName] = union
+	r.mu.Unlock()
+	return union
+}
+
+func (r *Resolver) mutationResolveType(successType *graphql.Object) graphql.ResolveTypeFn {
+	return func(p graphql.ResolveTypeParams) *graphql.Object {
+		m, ok := p.Value.(map[string]interface{})
+		if !ok {
+			return successType
+		}
+		typename, _ := m["__typename"].(string)
+		switch typename {
+		case "InputValidationError":
+			return r.sharedValidationErrorType()
+		case "ConflictError":
+			return r.sharedConflictErrorType()
+		case "ConstraintError":
+			return r.sharedConstraintErrorType()
+		case "PermissionError":
+			return r.sharedPermissionErrorType()
+		case "NotFoundError":
+			return r.sharedNotFoundErrorType()
+		case "InternalError":
+			return r.sharedInternalErrorType()
+		default:
+			return successType
+		}
+	}
+}
+
 func (r *Resolver) primaryKeyArgs() graphql.FieldConfigArgument {
 	return graphql.FieldConfigArgument{
 		"id": &graphql.ArgumentConfig{
@@ -229,8 +641,53 @@ func (r *Resolver) primaryKeyArgs() graphql.FieldConfigArgument {
 	}
 }
 
-func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[string]bool) graphql.FieldResolveFn {
-	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
+func mutationErrorPayload(typename, message string, extra map[string]interface{}) map[string]interface{} {
+	payload := map[string]interface{}{
+		"__typename": typename,
+		"message":    message,
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	return payload
+}
+
+func mutationErrToPayload(err error) map[string]interface{} {
+	var me *mutationError
+	if !errors.As(err, &me) {
+		return mutationErrorPayload("InternalError", "internal server error", nil)
+	}
+	switch me.code {
+	case "invalid_input":
+		return mutationErrorPayload("InputValidationError", me.message, nil)
+	case "unique_violation":
+		return mutationErrorPayload("ConflictError", me.message, nil)
+	case "foreign_key_violation", "not_null_violation":
+		return mutationErrorPayload("ConstraintError", me.message, nil)
+	case "access_denied":
+		return mutationErrorPayload("PermissionError", me.message, nil)
+	default:
+		return mutationErrorPayload("InternalError", "internal server error", nil)
+	}
+}
+
+func withMutationContextUnion(fn func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error)) graphql.FieldResolveFn {
+	return func(p graphql.ResolveParams) (interface{}, error) {
+		mc := MutationContextFromContext(p.Context)
+		if mc == nil || mc.Tx() == nil {
+			return mutationErrorPayload("InternalError", "mutation transaction not available", nil), nil
+		}
+		result, err := fn(p, mc)
+		if err != nil {
+			mc.MarkError()
+			return mutationErrToPayload(err), nil
+		}
+		return result, nil
+	}
+}
+
+func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[string]bool, _ *graphql.Object) graphql.FieldResolveFn {
+	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
 
 		inputArg, ok := p.Args["input"].(map[string]interface{})
 		if !ok {
@@ -268,12 +725,18 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 		if err != nil {
 			return nil, err
 		}
-		return row, nil
+		if row == nil {
+			return nil, fmt.Errorf("created row could not be loaded")
+		}
+		return map[string]interface{}{
+			r.mutationEntityFieldName(table): row,
+		}, nil
 	})
 }
 
-func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[string]bool, pkCols []introspection.Column) graphql.FieldResolveFn {
-	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
+func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[string]bool, pkCols []introspection.Column, _ *graphql.Object) graphql.FieldResolveFn {
+	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
+		entityFieldName := r.mutationEntityFieldName(table)
 
 		pkValues, err := pkValuesFromArgs(table, pkCols, p.Args)
 		if err != nil {
@@ -286,7 +749,9 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 			if err != nil {
 				return nil, err
 			}
-			return row, nil
+			return map[string]interface{}{
+				entityFieldName: row,
+			}, nil
 		}
 
 		setMap, ok := setArg.(map[string]interface{})
@@ -298,7 +763,9 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 			if err != nil {
 				return nil, err
 			}
-			return row, nil
+			return map[string]interface{}{
+				entityFieldName: row,
+			}, nil
 		}
 
 		setValues, err := mapSetColumns(table, setMap, updatable)
@@ -324,19 +791,23 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 			return nil, err
 		}
 		if rowsAffected == 0 {
-			return nil, nil
+			return map[string]interface{}{
+				entityFieldName: nil,
+			}, nil
 		}
 
 		row, err := r.selectRowByPK(p, table, pkCols, pkValues, mc.Tx())
 		if err != nil {
 			return nil, err
 		}
-		return row, nil
+		return map[string]interface{}{
+			entityFieldName: row,
+		}, nil
 	})
 }
 
-func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
-	return withMutationContext(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
+func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []introspection.Column, _ *graphql.Object) graphql.FieldResolveFn {
+	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
 
 		pkValues, err := pkValuesFromArgs(table, pkCols, p.Args)
 		if err != nil {
@@ -358,7 +829,7 @@ func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []intros
 			return nil, err
 		}
 		if rowsAffected == 0 {
-			return nil, nil
+			return mutationErrorPayload("NotFoundError", "row not found", nil), nil
 		}
 
 		payload := map[string]interface{}{}
@@ -370,20 +841,6 @@ func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []intros
 
 		return payload, nil
 	})
-}
-
-func withMutationContext(fn func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error)) graphql.FieldResolveFn {
-	return func(p graphql.ResolveParams) (interface{}, error) {
-		mc := MutationContextFromContext(p.Context)
-		if mc == nil || mc.Tx() == nil {
-			return nil, fmt.Errorf("mutation transaction not available")
-		}
-		result, err := fn(p, mc)
-		if err != nil {
-			mc.MarkError()
-		}
-		return result, err
-	}
 }
 
 func (r *Resolver) selectRowByPK(p graphql.ResolveParams, table introspection.Table, pkCols []introspection.Column, pkValues map[string]interface{}, tx dbexec.TxExecutor) (map[string]interface{}, error) {
@@ -626,7 +1083,7 @@ func parseMutationVectorNumber(value interface{}) (float64, error) {
 func pkValuesFromArgs(table introspection.Table, pkCols []introspection.Column, args map[string]interface{}) (map[string]interface{}, error) {
 	rawID, ok := args["id"]
 	if !ok || rawID == nil {
-		return nil, fmt.Errorf("missing primary key argument: id")
+		return nil, newMutationError("missing primary key argument: id", "invalid_input", 0)
 	}
 	id, ok := rawID.(string)
 	if !ok {
@@ -634,20 +1091,20 @@ func pkValuesFromArgs(table introspection.Table, pkCols []introspection.Column, 
 	}
 	typeName, values, err := nodeid.Decode(id)
 	if err != nil {
-		return nil, err
+		return nil, newMutationError(err.Error(), "invalid_input", 0)
 	}
 	expectedType := introspection.GraphQLTypeName(table)
 	if typeName != expectedType {
-		return nil, fmt.Errorf("invalid id for %s", expectedType)
+		return nil, newMutationError("invalid id for "+expectedType, "invalid_input", 0)
 	}
 	if len(values) != len(pkCols) {
-		return nil, fmt.Errorf("invalid id for %s", expectedType)
+		return nil, newMutationError("invalid id for "+expectedType, "invalid_input", 0)
 	}
 	pkValues := make(map[string]interface{}, len(pkCols))
 	for i, col := range pkCols {
 		parsed, err := nodeid.ParsePKValue(col, values[i])
 		if err != nil {
-			return nil, err
+			return nil, newMutationError(err.Error(), "invalid_input", 0)
 		}
 		pkValues[col.Name] = parsed
 	}

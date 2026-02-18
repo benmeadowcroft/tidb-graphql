@@ -62,16 +62,27 @@ func executeMutationExpectRollback(t *testing.T, schema graphql.Schema, db *dbex
 		Context:        ctx,
 	})
 
-	// Mark error if there were GraphQL errors
-	if len(result.Errors) > 0 {
-		mc.MarkError()
-	}
+	// Business errors are represented in mutation data unions, not result.Errors.
+	// This helper is only used by tests that expect rollback semantics.
+	mc.MarkError()
 
 	// Finalize the transaction (should rollback due to errors)
 	err = mc.Finalize()
 	require.NoError(t, err, "Failed to finalize transaction")
 
 	return result
+}
+
+func mutationResultField(t *testing.T, result *graphql.Result, fieldName string) map[string]interface{} {
+	t.Helper()
+	require.Empty(t, result.Errors, "Mutation should not return GraphQL errors: %v", result.Errors)
+	require.NotNil(t, result.Data, "Mutation result data should not be nil")
+	data := result.Data.(map[string]interface{})
+	raw, ok := data[fieldName]
+	require.True(t, ok, "Mutation field %q missing from response", fieldName)
+	out, ok := raw.(map[string]interface{})
+	require.True(t, ok, "Mutation field %q should return an object, got %T", fieldName, raw)
+	return out
 }
 
 func buildMutationSchema(t *testing.T, testDB *tidbcloud.TestDB) (graphql.Schema, *dbexec.StandardExecutor) {
@@ -103,18 +114,24 @@ func TestMutation_CreateSimple(t *testing.T) {
 	mutation := `
 		mutation {
 			createCategory(input: {name: "Home & Garden", description: "Home improvement items"}) {
-				id
-				name
-				description
+				__typename
+				... on CreateCategorySuccess {
+					category {
+						id
+						name
+						description
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-	require.NotNil(t, result.Data, "Result data should not be nil")
-
-	data := result.Data.(map[string]interface{})
-	category := data["createCategory"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "createCategory")
+	assert.Equal(t, "CreateCategorySuccess", wrapper["__typename"])
+	category := wrapper["category"].(map[string]interface{})
 
 	assert.NotNil(t, category["id"], "Created category should have an ID")
 	assert.Equal(t, "Home & Garden", category["name"])
@@ -135,17 +152,24 @@ func TestMutation_CreateWithExplicitPK(t *testing.T) {
 	mutation := `
 		mutation {
 			createCategory(input: {databaseId: 100, name: "Test Category"}) {
-				id
-				databaseId
-				name
+				__typename
+				... on CreateCategorySuccess {
+					category {
+						id
+						databaseId
+						name
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	category := data["createCategory"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "createCategory")
+	assert.Equal(t, "CreateCategorySuccess", wrapper["__typename"])
+	category := wrapper["category"].(map[string]interface{})
 
 	assert.EqualValues(t, 100, category["databaseId"], "Category should have explicit ID 100")
 	assert.Equal(t, "Test Category", category["name"])
@@ -166,19 +190,26 @@ func TestMutation_CreateWithForeignKey(t *testing.T) {
 	mutation := `
 		mutation {
 			createProduct(input: {categoryId: 1, sku: "NEW-001", name: "New Product", price: 99.99}) {
-				id
-				sku
-				name
-				price
-				categoryId
+				__typename
+				... on CreateProductSuccess {
+					product {
+						id
+						sku
+						name
+						price
+						categoryId
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	product := data["createProduct"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "createProduct")
+	assert.Equal(t, "CreateProductSuccess", wrapper["__typename"])
+	product := wrapper["product"].(map[string]interface{})
 
 	assert.NotNil(t, product["id"])
 	assert.Equal(t, "NEW-001", product["sku"])
@@ -200,19 +231,26 @@ func TestMutation_CreateWithCompositePK(t *testing.T) {
 	mutation := `
 		mutation {
 			createOrderItem(input: {orderId: 200, lineNumber: 1, productId: 1, quantity: 5, unitPrice: 899.99}) {
-				orderId
-				lineNumber
-				productId
-				quantity
-				unitPrice
+				__typename
+				... on CreateOrderItemSuccess {
+					orderItem {
+						orderId
+						lineNumber
+						productId
+						quantity
+						unitPrice
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	item := data["createOrderItem"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "createOrderItem")
+	assert.Equal(t, "CreateOrderItemSuccess", wrapper["__typename"])
+	item := wrapper["orderItem"].(map[string]interface{})
 
 	assert.EqualValues(t, 200, item["orderId"])
 	assert.EqualValues(t, 1, item["lineNumber"])
@@ -236,18 +274,25 @@ func TestMutation_UpdateSimple(t *testing.T) {
 	mutation := `
 		mutation {
 			updateCategory(id: "` + nodeID + `", set: {description: "Updated description"}) {
-				id
-				databaseId
-				name
-				description
+				__typename
+				... on UpdateCategorySuccess {
+					category {
+						id
+						databaseId
+						name
+						description
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	category := data["updateCategory"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "updateCategory")
+	assert.Equal(t, "UpdateCategorySuccess", wrapper["__typename"])
+	category := wrapper["category"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, category["databaseId"])
 	assert.Equal(t, "Electronics", category["name"])
@@ -270,18 +315,25 @@ func TestMutation_UpdateWithEmptySet(t *testing.T) {
 	mutation := `
 		mutation {
 			updateCategory(id: "` + nodeID + `", set: {}) {
-				id
-				databaseId
-				name
-				description
+				__typename
+				... on UpdateCategorySuccess {
+					category {
+						id
+						databaseId
+						name
+						description
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	category := data["updateCategory"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "updateCategory")
+	assert.Equal(t, "UpdateCategorySuccess", wrapper["__typename"])
+	category := wrapper["category"].(map[string]interface{})
 
 	assert.EqualValues(t, 1, category["databaseId"])
 	assert.Equal(t, "Electronics", category["name"])
@@ -298,22 +350,29 @@ func TestMutation_UpdateNonExistent(t *testing.T) {
 
 	schema, executor := buildMutationSchema(t, testDB)
 
-	// Test: Update non-existent row should return null
+	// Test: Update non-existent row should return success wrapper with null entity
 	nodeID := nodeIDForTable("categories", 999)
 	mutation := `
 		mutation {
 			updateCategory(id: "` + nodeID + `", set: {description: "New description"}) {
-				id
-				name
+				__typename
+				... on UpdateCategorySuccess {
+					category {
+						id
+						name
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors")
-
-	data := result.Data.(map[string]interface{})
-	category := data["updateCategory"]
-	assert.Nil(t, category, "Update of non-existent row should return null")
+	wrapper := mutationResultField(t, result, "updateCategory")
+	assert.Equal(t, "UpdateCategorySuccess", wrapper["__typename"])
+	category := wrapper["category"]
+	assert.Nil(t, category, "Update of non-existent row should return success with null category")
 }
 
 func TestMutation_UpdateCompositePK(t *testing.T) {
@@ -332,18 +391,25 @@ func TestMutation_UpdateCompositePK(t *testing.T) {
 	mutation := `
 		mutation {
 			updateOrderItem(id: "` + nodeID + `", set: {quantity: 10}) {
-				orderId
-				lineNumber
-				quantity
-				unitPrice
+				__typename
+				... on UpdateOrderItemSuccess {
+					orderItem {
+						orderId
+						lineNumber
+						quantity
+						unitPrice
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	item := data["updateOrderItem"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "updateOrderItem")
+	assert.Equal(t, "UpdateOrderItemSuccess", wrapper["__typename"])
+	item := wrapper["orderItem"].(map[string]interface{})
 
 	assert.EqualValues(t, 100, item["orderId"])
 	assert.EqualValues(t, 1, item["lineNumber"])
@@ -366,29 +432,41 @@ func TestMutation_DeleteSimple(t *testing.T) {
 	mutation := `
 		mutation {
 			createAuditLog(input: {action: "TEST", entityType: "test", entityId: 1}) {
-				id
+				__typename
+				... on CreateAuditLogSuccess {
+					auditLog {
+						id
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors)
-	data := result.Data.(map[string]interface{})
-	created := data["createAuditLog"].(map[string]interface{})
+	createdWrapper := mutationResultField(t, result, "createAuditLog")
+	assert.Equal(t, "CreateAuditLogSuccess", createdWrapper["__typename"])
+	created := createdWrapper["auditLog"].(map[string]interface{})
 	createdID := created["id"].(string)
 
 	// Now delete it
 	deleteMutation := `
 		mutation($id: ID!) {
 			deleteAuditLog(id: $id) {
-				id
+				__typename
+				... on DeleteAuditLogSuccess {
+					id
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result = executeMutation(t, schema, executor, deleteMutation, map[string]interface{}{"id": createdID})
-	require.Empty(t, result.Errors, "Delete mutation should not return errors: %v", result.Errors)
-
-	data = result.Data.(map[string]interface{})
-	deleted := data["deleteAuditLog"].(map[string]interface{})
+	deleted := mutationResultField(t, result, "deleteAuditLog")
+	assert.Equal(t, "DeleteAuditLogSuccess", deleted["__typename"])
 	assert.Equal(t, createdID, deleted["id"])
 }
 
@@ -403,21 +481,27 @@ func TestMutation_DeleteNonExistent(t *testing.T) {
 
 	schema, executor := buildMutationSchema(t, testDB)
 
-	// Test: Delete non-existent row should return null
+	// Test: Delete non-existent row should return NotFoundError
 	nodeID := nodeIDForTable("audit_log", 999)
 	mutation := `
 		mutation {
 			deleteAuditLog(id: "` + nodeID + `") {
-				id
+				__typename
+				... on DeleteAuditLogSuccess {
+					id
+				}
+				... on NotFoundError {
+					message
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Delete mutation should not return errors")
-
-	data := result.Data.(map[string]interface{})
-	deleted := data["deleteAuditLog"]
-	assert.Nil(t, deleted, "Delete of non-existent row should return null")
+	deleted := mutationResultField(t, result, "deleteAuditLog")
+	assert.Equal(t, "NotFoundError", deleted["__typename"])
 }
 
 func TestMutation_DeleteCompositePK(t *testing.T) {
@@ -436,16 +520,20 @@ func TestMutation_DeleteCompositePK(t *testing.T) {
 	mutation := `
 		mutation {
 			deleteOrderItem(id: "` + nodeID + `") {
-				orderId
-				lineNumber
+				__typename
+				... on DeleteOrderItemSuccess {
+					orderId
+					lineNumber
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Delete mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	deleted := data["deleteOrderItem"].(map[string]interface{})
+	deleted := mutationResultField(t, result, "deleteOrderItem")
+	assert.Equal(t, "DeleteOrderItemSuccess", deleted["__typename"])
 
 	assert.EqualValues(t, 100, deleted["orderId"])
 	assert.EqualValues(t, 2, deleted["lineNumber"])
@@ -480,27 +568,29 @@ func TestMutation_UniqueConstraintViolation(t *testing.T) {
 
 	schema, executor := buildMutationSchema(t, testDB)
 
-	// Test: Create category with duplicate name (should fail with unique violation)
+	// Test: Create category with duplicate name (should return ConflictError in data)
 	mutation := `
 		mutation {
 			createCategory(input: {name: "Electronics"}) {
-				id
-				name
+				__typename
+				... on CreateCategorySuccess {
+					category {
+						id
+						name
+					}
+				}
+				... on ConflictError {
+					message
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutationExpectRollback(t, schema, executor, mutation, nil)
-	require.NotEmpty(t, result.Errors, "Mutation should return error for unique violation")
-
-	// Check that error has the right code
-	err := result.Errors[0]
-	extensions := err.Extensions
-	if extensions != nil {
-		code, ok := extensions["code"].(string)
-		if ok {
-			assert.Equal(t, "unique_violation", code, "Error code should be unique_violation")
-		}
-	}
+	wrapper := mutationResultField(t, result, "createCategory")
+	assert.Equal(t, "ConflictError", wrapper["__typename"])
 }
 
 func TestMutation_ForeignKeyViolation(t *testing.T) {
@@ -514,26 +604,28 @@ func TestMutation_ForeignKeyViolation(t *testing.T) {
 
 	schema, executor := buildMutationSchema(t, testDB)
 
-	// Test: Create product with non-existent category (should fail with FK violation)
+	// Test: Create product with non-existent category (should return ConstraintError in data)
 	mutation := `
 		mutation {
 			createProduct(input: {categoryId: 999, sku: "FAIL-001", name: "Will Fail", price: 10.00}) {
-				id
+				__typename
+				... on CreateProductSuccess {
+					product {
+						id
+					}
+				}
+				... on ConstraintError {
+					message
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutationExpectRollback(t, schema, executor, mutation, nil)
-	require.NotEmpty(t, result.Errors, "Mutation should return error for FK violation")
-
-	// Check that error has the right code
-	err := result.Errors[0]
-	extensions := err.Extensions
-	if extensions != nil {
-		code, ok := extensions["code"].(string)
-		if ok {
-			assert.Equal(t, "foreign_key_violation", code, "Error code should be foreign_key_violation")
-		}
-	}
+	wrapper := mutationResultField(t, result, "createProduct")
+	assert.Equal(t, "ConstraintError", wrapper["__typename"])
 }
 
 func TestMutation_ForeignKeyDeleteRestrict(t *testing.T) {
@@ -547,27 +639,27 @@ func TestMutation_ForeignKeyDeleteRestrict(t *testing.T) {
 
 	schema, executor := buildMutationSchema(t, testDB)
 
-	// Test: Delete category that has products (should fail due to FK constraint)
+	// Test: Delete category that has products (should return ConstraintError in data)
 	nodeID := nodeIDForTable("categories", 1)
 	mutation := `
 		mutation {
 			deleteCategory(id: "` + nodeID + `") {
-				id
+				__typename
+				... on DeleteCategorySuccess {
+					id
+				}
+				... on ConstraintError {
+					message
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutationExpectRollback(t, schema, executor, mutation, nil)
-	require.NotEmpty(t, result.Errors, "Mutation should return error when deleting referenced row")
-
-	// Check that error has the right code
-	err := result.Errors[0]
-	extensions := err.Extensions
-	if extensions != nil {
-		code, ok := extensions["code"].(string)
-		if ok {
-			assert.Equal(t, "foreign_key_violation", code, "Error code should be foreign_key_violation")
-		}
-	}
+	wrapper := mutationResultField(t, result, "deleteCategory")
+	assert.Equal(t, "ConstraintError", wrapper["__typename"])
 }
 
 func TestMutation_GeneratedColumnExcluded(t *testing.T) {
@@ -586,20 +678,27 @@ func TestMutation_GeneratedColumnExcluded(t *testing.T) {
 	mutation := `
 		mutation {
 			createInventory(input: {productId: 1, quantity: 100, unitCost: 10.50, location: "New Location"}) {
-				id
-				productId
-				quantity
-				unitCost
-				totalValue
-				location
+				__typename
+				... on CreateInventorySuccess {
+					inventory {
+						id
+						productId
+						quantity
+						unitCost
+						totalValue
+						location
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors, "Mutation should not return errors: %v", result.Errors)
-
-	data := result.Data.(map[string]interface{})
-	inventory := data["createInventory"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "createInventory")
+	assert.Equal(t, "CreateInventorySuccess", wrapper["__typename"])
+	inventory := wrapper["inventory"].(map[string]interface{})
 
 	assert.NotNil(t, inventory["id"])
 	assert.EqualValues(t, 1, inventory["productId"])
@@ -638,8 +737,16 @@ func TestMutation_TransactionRollbackOnSecondMutation(t *testing.T) {
 	mutation1 := `
 		mutation {
 			createCategory(input: {name: "Will Be Rolled Back"}) {
-				id
-				name
+				__typename
+				... on CreateCategorySuccess {
+					category {
+						id
+						name
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
@@ -649,12 +756,25 @@ func TestMutation_TransactionRollbackOnSecondMutation(t *testing.T) {
 		Context:       ctx,
 	})
 	require.Empty(t, result1.Errors, "First mutation should succeed")
+	wrapper1 := mutationResultField(t, result1, "createCategory")
+	assert.Equal(t, "CreateCategorySuccess", wrapper1["__typename"])
 
 	// Second mutation should fail (duplicate unique key)
 	mutation2 := `
 		mutation {
 			createCategory(input: {name: "Electronics"}) {
-				id
+				__typename
+				... on CreateCategorySuccess {
+					category {
+						id
+					}
+				}
+				... on ConflictError {
+					message
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
@@ -663,7 +783,9 @@ func TestMutation_TransactionRollbackOnSecondMutation(t *testing.T) {
 		RequestString: mutation2,
 		Context:       ctx,
 	})
-	require.NotEmpty(t, result2.Errors, "Second mutation should fail")
+	require.Empty(t, result2.Errors, "Second mutation should not produce GraphQL errors")
+	wrapper2 := mutationResultField(t, result2, "createCategory")
+	assert.Equal(t, "ConflictError", wrapper2["__typename"])
 
 	// Mark error and finalize (should rollback)
 	mc.MarkError()

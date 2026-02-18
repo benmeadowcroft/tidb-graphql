@@ -29,13 +29,23 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 	for ti := range schema.Tables {
 		table := &schema.Tables[ti]
 
-		typeName := namer.RegisterType(table.Name)
+		overrideTypeName, hasTypeOverride := findTypeOverride(namer.Config().TypeOverrides, table.Name)
+		var typeName string
+		if hasTypeOverride {
+			typeName = namer.RegisterTypeName(overrideTypeName, table.Name)
+		} else {
+			typeName = namer.RegisterType(table.Name)
+		}
 		table.GraphQLTypeName = typeName
 		pluralTableName := namer.Pluralize(table.Name)
 		table.GraphQLQueryName = namer.RegisterQueryField(pluralTableName)
 		singularTableName := singularNamer.Singularize(table.Name)
 		table.GraphQLSingleQueryName = singularNamer.RegisterQueryField(singularTableName)
-		table.GraphQLSingleTypeName = singularNamer.RegisterType(singularTableName)
+		if hasTypeOverride {
+			table.GraphQLSingleTypeName = singularNamer.RegisterTypeName(overrideTypeName, singularTableName)
+		} else {
+			table.GraphQLSingleTypeName = singularNamer.RegisterType(singularTableName)
+		}
 
 		for ci := range table.Columns {
 			col := &table.Columns[ci]
@@ -100,4 +110,13 @@ func uniqueDatabaseIDName(columns []introspection.Column, skipIndex int) string 
 		suffix++
 	}
 	return candidate
+}
+
+func findTypeOverride(overrides map[string]string, tableName string) (string, bool) {
+	for key, value := range overrides {
+		if strings.EqualFold(key, tableName) {
+			return value, true
+		}
+	}
+	return "", false
 }

@@ -288,8 +288,8 @@ func TestEdgeTypeName(t *testing.T) {
 	namer := Default()
 
 	tests := []struct {
-		name      string
-		leftTable string
+		name       string
+		leftTable  string
 		rightTable string
 		expected   string
 	}{
@@ -488,4 +488,22 @@ func TestRegisterManyToManyField(t *testing.T) {
 	namer.RegisterColumnField("User", "roles") // Pre-existing column
 	result2 := namer.RegisterManyToManyField("User", "roles", "user_roles")
 	assert.Equal(t, "rolesViaUserRoles", result2)
+}
+
+func TestRegisterTypeName(t *testing.T) {
+	namer := Default()
+
+	t.Run("explicit name collision is suffixed", func(t *testing.T) {
+		result1 := namer.RegisterTypeName("User", "users")
+		result2 := namer.RegisterTypeName("User", "accounts")
+
+		assert.Equal(t, "User", result1)
+		assert.Equal(t, "User2", result2)
+	})
+
+	t.Run("reserved type name is suffixed", func(t *testing.T) {
+		namer.Reset()
+		result := namer.RegisterTypeName("Mutation", "users")
+		assert.Equal(t, "Mutation_", result)
+	})
 }

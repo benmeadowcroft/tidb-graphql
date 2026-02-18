@@ -13,6 +13,7 @@ If you want to get something working end-to-end and understand it as you go.
 - [Your first schema in five minutes](tutorials/first-schema.md)
 - [Secure local dev with OIDC/JWKS](tutorials/local-oidc.md)
 - [Query with filters and unique keys](tutorials/query-basics.md)
+- [Mutate data with typed results](tutorials/mutation-basics.md)
 - [Operations with guardrails](tutorials/ops-guardrails.md)
 
 ## How-To Guides
@@ -51,6 +52,7 @@ If you want the "why" behind the design choices.
 - [Deployment overview](explanation/deployment-overview.md)
 - [Schema handling: build, snapshot, refresh](explanation/schema-handling.md)
 - [Query planning as a seam](explanation/query-planning.md)
+- [Mutation result design and rationale](explanation/mutation-design.md)
 - [Resolver batching to avoid N+1](explanation/resolver-batching.md)
 - [Performance constraints as safety rails](explanation/performance-constraints.md)
 - [Database-first authorization](explanation/database-first-auth.md)

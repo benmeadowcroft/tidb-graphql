@@ -33,15 +33,17 @@ Notes:
 
 For each table `users`:
 
-- Create: `createUser(input: CreateUserInput!): User`
-- Update: `updateUser(id: ID!, set: UpdateUserSetInput): User`
-- Delete: `deleteUser(id: ID!): DeleteUserPayload`
+- Create: `createUser(input: CreateUserInput!): CreateUserResult!`
+- Update: `updateUser(id: ID!, set: UpdateUserSetInput): UpdateUserResult!`
+- Delete: `deleteUser(id: ID!): DeleteUserResult!`
 
 Notes:
 - Mutations are not generated for views.
 - Update/delete require the global Node `id: ID!`.
-- Create/update return the row directly using the selection set on the table type.
-- Delete returns the primary key fields and `id` in `DeleteXPayload`.
+- Mutations return per-operation union types with success and typed error members.
+- Success payloads are wrapped (`CreateXxxSuccess`, `UpdateXxxSuccess`, `DeleteXxxSuccess`).
+- Errors are returned in `data` as union members (for example `InputValidationError`, `ConflictError`, `ConstraintError`, `PermissionError`, `NotFoundError`, `InternalError`), not as top-level GraphQL execution errors.
+- All mutation error types implement the shared `MutationError` interface, so clients can use `... on MutationError { message }` as a forward-compatible fallback.
 
 ## Node interface and global IDs
 

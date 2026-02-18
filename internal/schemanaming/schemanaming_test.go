@@ -92,3 +92,46 @@ func TestUniqueDatabaseIDName_MultipleFallbacks(t *testing.T) {
 	}
 	assert.Equal(t, "databaseId_raw3", uniqueDatabaseIDName(columns, -1))
 }
+
+func TestApply_TypeOverrides(t *testing.T) {
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{
+			{Name: "users"},
+			{Name: "orders"},
+		},
+	}
+
+	namer := naming.New(naming.Config{
+		TypeOverrides: map[string]string{
+			"users": "Account",
+		},
+	}, nil)
+
+	Apply(schema, namer)
+
+	assert.Equal(t, "Account", schema.Tables[0].GraphQLTypeName)
+	assert.Equal(t, "Account", schema.Tables[0].GraphQLSingleTypeName)
+	assert.Equal(t, "Order", schema.Tables[1].GraphQLSingleTypeName)
+}
+
+func TestApply_TypeOverridesDoNotReserveDefaultNames(t *testing.T) {
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{
+			{Name: "users"},
+			{Name: "user"},
+		},
+	}
+
+	namer := naming.New(naming.Config{
+		TypeOverrides: map[string]string{
+			"users": "Person",
+		},
+	}, nil)
+
+	Apply(schema, namer)
+
+	assert.Equal(t, "Person", schema.Tables[0].GraphQLTypeName)
+	assert.Equal(t, "Person", schema.Tables[0].GraphQLSingleTypeName)
+	assert.Equal(t, "User", schema.Tables[1].GraphQLTypeName)
+	assert.Equal(t, "User", schema.Tables[1].GraphQLSingleTypeName)
+}

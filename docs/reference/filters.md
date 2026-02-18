@@ -13,7 +13,7 @@ Example:
 
 ```graphql
 {
-  users(where: { AND: [{ status: { eq: "active" } }, { createdAt: { gte: "2024-01-01T00:00:00Z" } }] }) {
+  users(where: { AND: [{ status: { eq: ACTIVE } }, { createdAt: { gte: "2024-01-01T00:00:00Z" } }] }) {
     nodes {
       id
       email

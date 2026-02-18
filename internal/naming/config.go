@@ -12,6 +12,10 @@ type Config struct {
 	// SingularOverrides maps plural -> custom singular
 	// Example: {"people": "person", "data": "datum"}
 	SingularOverrides map[string]string `mapstructure:"singular_overrides"`
+
+	// TypeOverrides maps SQL table name -> explicit GraphQL type name.
+	// Matching is case-insensitive at lookup time.
+	TypeOverrides map[string]string `mapstructure:"type_overrides"`
 }
 
 // DefaultConfig returns sensible defaults
@@ -19,5 +23,6 @@ func DefaultConfig() Config {
 	return Config{
 		PluralOverrides:   make(map[string]string),
 		SingularOverrides: make(map[string]string),
+		TypeOverrides:     make(map[string]string),
 	}
 }

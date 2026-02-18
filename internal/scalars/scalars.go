@@ -83,6 +83,153 @@ func JSON() *graphql.Scalar {
 	})
 }
 
+func Vector() *graphql.Scalar {
+	return graphql.NewScalar(graphql.ScalarConfig{
+		Name:        "Vector",
+		Description: "Vector value represented as a list of finite floats.",
+		Serialize: func(value interface{}) interface{} {
+			if parsed, ok := normalizeVectorValue(value); ok {
+				return parsed
+			}
+			return nil
+		},
+		ParseValue: func(value interface{}) interface{} {
+			if parsed, ok := normalizeVectorValue(value); ok {
+				return parsed
+			}
+			return nil
+		},
+		ParseLiteral: func(valueAST ast.Value) interface{} {
+			listValue, ok := valueAST.(*ast.ListValue)
+			if !ok {
+				return nil
+			}
+			parsed := make([]float64, 0, len(listValue.Values))
+			for _, item := range listValue.Values {
+				switch v := item.(type) {
+				case *ast.FloatValue:
+					n, err := strconv.ParseFloat(v.Value, 64)
+					if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+						return nil
+					}
+					parsed = append(parsed, n)
+				case *ast.IntValue:
+					n, err := strconv.ParseFloat(v.Value, 64)
+					if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+						return nil
+					}
+					parsed = append(parsed, n)
+				default:
+					return nil
+				}
+			}
+			return parsed
+		},
+	})
+}
+
+func normalizeVectorValue(value interface{}) ([]float64, bool) {
+	switch v := value.(type) {
+	case []float64:
+		out := make([]float64, len(v))
+		copy(out, v)
+		for _, n := range out {
+			if math.IsNaN(n) || math.IsInf(n, 0) {
+				return nil, false
+			}
+		}
+		return out, true
+	case []float32:
+		out := make([]float64, len(v))
+		for i, n := range v {
+			f := float64(n)
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				return nil, false
+			}
+			out[i] = f
+		}
+		return out, true
+	case []interface{}:
+		out := make([]float64, len(v))
+		for i, raw := range v {
+			parsed, ok := coerceVectorNumber(raw)
+			if !ok {
+				return nil, false
+			}
+			out[i] = parsed
+		}
+		return out, true
+	case string:
+		return parseVectorString(v)
+	case []byte:
+		return parseVectorString(string(v))
+	default:
+		return nil, false
+	}
+}
+
+func parseVectorString(raw string) ([]float64, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false
+	}
+	var values []interface{}
+	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+		return nil, false
+	}
+	return normalizeVectorValue(values)
+}
+
+func coerceVectorNumber(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0, false
+		}
+		return v, true
+	case float32:
+		n := float64(v)
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0, false
+		}
+		return n, true
+	case int:
+		return float64(v), true
+	case int8:
+		return float64(v), true
+	case int16:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint8:
+		return float64(v), true
+	case uint16:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case json.Number:
+		n, err := v.Float64()
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0, false
+		}
+		return n, true
+	case string:
+		n, err := strconv.ParseFloat(v, 64)
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
 func BigInt() *graphql.Scalar {
 	// GraphQL inputs may arrive as float64; guard bounds before int64 conversion
 	// to avoid silent overflow on large numeric values.

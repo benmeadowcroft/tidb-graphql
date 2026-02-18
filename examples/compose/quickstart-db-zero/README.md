@@ -5,6 +5,12 @@ This scenario provisions/reuses a TiDB Zero instance, seeds tutorial sample data
 `tidb-graphql` reads MySQL client settings from `.auth/tidb-zero.my.cnf` using `database.mycnf_file`.
 That file is the canonical source for connection settings in this scenario.
 
+The seed step loads:
+- `docs/tutorials/sample-data.sql`
+- `docs/tutorials/sample-data-vectors-auto-embedding.sql`
+
+The vector dataset uses TiDB auto-embedding with model `tidbcloud_free/amazon/titan-embed-text-v2` and a generated `VECTOR(1024)` column.
+
 ## First run
 
 ```bash
@@ -22,6 +28,10 @@ docker compose -f examples/compose/quickstart-db-zero/docker-compose.yml up
 ```
 
 Open [http://localhost:8080/graphql](http://localhost:8080/graphql).
+
+You should see a vector search root field for reviews (for example `searchProductReviewsByEmbeddingVector`) with:
+- `vector` (explicit vector mode)
+- `queryText` (auto-embedding text mode)
 
 ## Useful flags
 

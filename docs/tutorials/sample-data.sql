@@ -4,12 +4,22 @@
 CREATE DATABASE IF NOT EXISTS tidb_graphql_tutorial;
 USE tidb_graphql_tutorial;
 
+-- Reset teardown: temporarily disable FK checks so base sample data can be
+-- recreated even when optional add-on tables exist.
+SET @OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS;
+SET FOREIGN_KEY_CHECKS = 0;
+
+-- Optional add-on tables (loaded by other sample scripts).
+DROP TABLE IF EXISTS product_reviews;
+
 DROP TABLE IF EXISTS order_items;
 DROP TABLE IF EXISTS product_categories;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS products;
 DROP TABLE IF EXISTS categories;
 DROP TABLE IF EXISTS users;
+
+SET FOREIGN_KEY_CHECKS = @OLD_FOREIGN_KEY_CHECKS;
 
 CREATE TABLE users (
   id BIGINT PRIMARY KEY AUTO_RANDOM COMMENT 'Primary key for users.',

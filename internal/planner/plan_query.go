@@ -428,7 +428,12 @@ func SelectedColumnsForConnection(table introspection.Table, field *ast.Field, f
 					continue
 				}
 				switch sel.Name.Value {
-				case "nodes", "node":
+				case "nodes":
+					collectColumnFields(sel, columnByField, relationshipByField, selected, fragments)
+					if sel.SelectionSet != nil {
+						visitConnectionSelections(sel.SelectionSet.Selections)
+					}
+				case "node":
 					collectColumnFields(sel, columnByField, relationshipByField, selected, fragments)
 				case "edges":
 					if sel.SelectionSet != nil {

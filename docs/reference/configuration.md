@@ -197,6 +197,8 @@ database:
 - `server.graphql_max_complexity` (int, default: `0` = unlimited)
 - `server.graphql_max_rows` (int, default: `0` = unlimited)
 - `server.graphql_default_limit` (int, default: `100`) - default forward page size (`first` when omitted) for root and relationship connection collection fields
+- `server.search.vector_require_index` (bool, default: `true`) - require a vector-search-capable index before exposing vector search root fields
+- `server.search.vector_max_top_k` (int, default: `100`) - maximum allowed `first` value for vector search connection fields
 - `server.schema_refresh_min_interval` (duration, default: `30s`)
 - `server.schema_refresh_max_interval` (duration, default: `5m`)
 - `server.read_timeout` (duration, default: `15s`)

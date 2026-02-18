@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,6 +118,27 @@ func ParseCursorValues(stringVals []string, columns []introspection.Column) ([]i
 		result[i] = parsed
 	}
 	return result, nil
+}
+
+// ParseVectorCursorValues parses a vector-search cursor payload where the first
+// value is the computed distance (float) followed by table primary key values.
+func ParseVectorCursorValues(stringVals []string, pkColumns []introspection.Column) (float64, []interface{}, error) {
+	if len(stringVals) != len(pkColumns)+1 {
+		return 0, nil, fmt.Errorf("cursor value count mismatch: expected %d, got %d", len(pkColumns)+1, len(stringVals))
+	}
+	distance, err := strconv.ParseFloat(stringVals[0], 64)
+	if err != nil || math.IsNaN(distance) || math.IsInf(distance, 0) {
+		return 0, nil, fmt.Errorf("invalid cursor distance value")
+	}
+	pkValues := make([]interface{}, len(pkColumns))
+	for i := range pkColumns {
+		parsed, err := nodeid.ParsePKValue(pkColumns[i], stringVals[i+1])
+		if err != nil {
+			return 0, nil, fmt.Errorf("invalid cursor value for %s: %w", pkColumns[i].Name, err)
+		}
+		pkValues[i] = parsed
+	}
+	return distance, pkValues, nil
 }
 
 func coerceToString(v interface{}) string {

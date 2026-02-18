@@ -2,7 +2,7 @@
 
 This scenario starts a complete local development stack:
 - TiDB
-- tutorial sample data
+- tutorial sample data (including vector review add-on data)
 - `tidb-graphql`
 
 ## Start

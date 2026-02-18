@@ -44,16 +44,12 @@ func TestRebuildRelationshipsWithJunctions_CompositeMappings(t *testing.T) {
 				ReferencedTable:   "users",
 				ColumnNames:       []string{"tenant_id", "user_id"},
 				ReferencedColumns: []string{"tenant_id", "id"},
-				ColumnName:        "tenant_id",
-				ReferencedColumn:  "tenant_id",
 			},
 			RightFK: JunctionFKInfo{
 				ConstraintName:    "fk_user_groups_groups",
 				ReferencedTable:   "groups",
 				ColumnNames:       []string{"group_tenant_id", "group_id"},
 				ReferencedColumns: []string{"tenant_id", "id"},
-				ColumnName:        "group_tenant_id",
-				ReferencedColumn:  "tenant_id",
 			},
 		},
 	}
@@ -79,7 +75,10 @@ func TestRebuildRelationshipsWithJunctions_CompositeMappings(t *testing.T) {
 	if len(userRel.JunctionLocalFKColumns) != 2 || userRel.JunctionLocalFKColumns[0] != "tenant_id" || userRel.JunctionLocalFKColumns[1] != "user_id" {
 		t.Fatalf("unexpected junction local columns: %#v", userRel.JunctionLocalFKColumns)
 	}
-	if userRel.LocalColumn != "tenant_id" || userRel.JunctionLocalFK != "tenant_id" {
-		t.Fatalf("single-column compatibility fields were not populated")
+	if len(userRel.LocalColumns) == 0 || userRel.LocalColumns[0] != "tenant_id" {
+		t.Fatalf("local columns not populated correctly: %v", userRel.LocalColumns)
+	}
+	if len(userRel.JunctionLocalFKColumns) == 0 || userRel.JunctionLocalFKColumns[0] != "tenant_id" {
+		t.Fatalf("junction local FK columns not populated correctly: %v", userRel.JunctionLocalFKColumns)
 	}
 }

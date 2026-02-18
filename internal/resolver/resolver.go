@@ -2139,8 +2139,12 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 		if !ok {
 			return nil, fmt.Errorf("invalid source type")
 		}
+		localColumn, remoteColumn, err := oneToManyMappingColumns(rel)
+		if err != nil {
+			return nil, err
+		}
 
-		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
+		pkFieldName := graphQLFieldNameForColumn(parentTable, localColumn)
 		pkValue := source[pkFieldName]
 		if pkValue == nil {
 			return r.buildConnectionResult(p.Context, nil, nil, false, false), nil
@@ -2171,7 +2175,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
 
-		plan, err := planner.PlanOneToManyConnection(relatedTable, rel.RemoteColumn, pkValue, field, p.Args, opts...)
+		plan, err := planner.PlanOneToManyConnection(relatedTable, remoteColumn, pkValue, field, p.Args, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to plan connection: %w", err)
 		}
@@ -2957,6 +2961,15 @@ func sortedOrderByFieldNames(options map[string]string) []string {
 	return names
 }
 
+func oneToManyMappingColumns(rel introspection.Relationship) (localColumn string, remoteColumn string, err error) {
+	localColumns := rel.EffectiveLocalColumns()
+	remoteColumns := rel.EffectiveRemoteColumns()
+	if len(localColumns) != 1 || len(remoteColumns) != 1 {
+		return "", "", fmt.Errorf("invalid one-to-many mapping for %s", rel.GraphQLFieldName)
+	}
+	return localColumns[0], remoteColumns[0], nil
+}
+
 func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
 	metrics := graphQLMetricsFromContext(p.Context)
 
@@ -3000,6 +3013,10 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	field := firstFieldAST(p.Info.FieldASTs)
 	if field == nil {
 		return nil, true, fmt.Errorf("missing field AST")
+	}
+	localColumn, remoteColumn, err := oneToManyMappingColumns(rel)
+	if err != nil {
+		return nil, true, err
 	}
 
 	first, err := planner.ParseFirstWithDefault(p.Args, r.defaultLimit)
@@ -3047,7 +3064,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		"%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.RemoteTable,
-		rel.RemoteColumn,
+		remoteColumn,
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
@@ -3071,7 +3088,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		metrics.RecordBatchCacheMiss(p.Context, relationOneToMany)
 	}
 
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
+	parentField := graphQLFieldNameForColumn(table, localColumn)
 	parentValues := uniqueParentValues(parentRows, parentField)
 	if len(parentValues) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
@@ -3095,7 +3112,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		}
 		planned, err := planner.PlanOneToManyConnectionBatch(
 			relatedTable,
-			rel.RemoteColumn,
+			remoteColumn,
 			selection,
 			chunk,
 			first,
@@ -3139,7 +3156,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 
 			countQuery, err := planner.BuildOneToManyCountSQL(
 				relatedTable,
-				rel.RemoteColumn,
+				remoteColumn,
 				parentValue,
 				whereClause,
 			)
@@ -3148,7 +3165,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 			}
 			aggregateBase, err := planner.BuildOneToManyAggregateBaseSQL(
 				relatedTable,
-				rel.RemoteColumn,
+				remoteColumn,
 				parentValue,
 				whereClause,
 			)

@@ -21,7 +21,6 @@ type Plan struct {
 // RelationshipContext provides relationship-specific planning inputs.
 type RelationshipContext struct {
 	RelatedTable  introspection.Table
-	RemoteColumn  string
 	RemoteColumns []string
 	Value         interface{}
 	Values        []interface{}
@@ -107,9 +106,6 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 	if options.relationship != nil {
 		ctx := options.relationship
 		remoteCols := ctx.RemoteColumns
-		if len(remoteCols) == 0 && ctx.RemoteColumn != "" {
-			remoteCols = []string{ctx.RemoteColumn}
-		}
 		if ctx.RelatedTable.Name == "" || len(remoteCols) == 0 {
 			return nil, errors.New("relationship context is incomplete")
 		}

@@ -495,27 +495,27 @@ func TestRelationshipConnectionFields_Wiring(t *testing.T) {
 	users.Relationships = []introspection.Relationship{
 		{
 			IsOneToMany:      true,
-			LocalColumn:      "id",
+			LocalColumns:     []string{"id"},
 			RemoteTable:      "posts",
-			RemoteColumn:     "user_id",
+			RemoteColumns:    []string{"user_id"},
 			GraphQLFieldName: "posts",
 		},
 		{
-			IsManyToMany:     true,
-			LocalColumn:      "id",
-			RemoteTable:      "tags",
-			RemoteColumn:     "id",
-			JunctionTable:    "user_tags",
-			JunctionLocalFK:  "user_id",
-			JunctionRemoteFK: "tag_id",
-			GraphQLFieldName: "tags",
+			IsManyToMany:            true,
+			LocalColumns:            []string{"id"},
+			RemoteTable:             "tags",
+			RemoteColumns:           []string{"id"},
+			JunctionTable:           "user_tags",
+			JunctionLocalFKColumns:  []string{"user_id"},
+			JunctionRemoteFKColumns: []string{"tag_id"},
+			GraphQLFieldName:        "tags",
 		},
 		{
-			IsEdgeList:       true,
-			LocalColumn:      "id",
-			JunctionTable:    "user_tags",
-			JunctionLocalFK:  "user_id",
-			GraphQLFieldName: "userTags",
+			IsEdgeList:             true,
+			LocalColumns:           []string{"id"},
+			JunctionTable:          "user_tags",
+			JunctionLocalFKColumns: []string{"user_id"},
+			GraphQLFieldName:       "userTags",
 		},
 	}
 
@@ -580,9 +580,9 @@ func TestConnectionAggregateSchemaWiring(t *testing.T) {
 	users.Relationships = []introspection.Relationship{
 		{
 			IsOneToMany:      true,
-			LocalColumn:      "id",
+			LocalColumns:     []string{"id"},
 			RemoteTable:      "posts",
-			RemoteColumn:     "user_id",
+			RemoteColumns:    []string{"user_id"},
 			GraphQLFieldName: "posts",
 		},
 	}
@@ -629,9 +629,9 @@ func TestConnectionOrderByPolicyArgWiring(t *testing.T) {
 		Relationships: []introspection.Relationship{
 			{
 				IsOneToMany:      true,
-				LocalColumn:      "id",
+				LocalColumns:     []string{"id"},
 				RemoteTable:      "posts",
-				RemoteColumn:     "user_id",
+				RemoteColumns:    []string{"user_id"},
 				GraphQLFieldName: "posts",
 			},
 		},
@@ -717,9 +717,9 @@ func TestRelationshipCollectionFieldNotGeneratedWithoutRelatedPrimaryKey(t *test
 		Relationships: []introspection.Relationship{
 			{
 				IsOneToMany:      true,
-				LocalColumn:      "id",
+				LocalColumns:     []string{"id"},
 				RemoteTable:      "posts",
-				RemoteColumn:     "user_id",
+				RemoteColumns:    []string{"user_id"},
 				GraphQLFieldName: "posts",
 			},
 		},
@@ -1547,17 +1547,17 @@ func TestManyToOneResolver(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsManyToOne:      true,
-		LocalColumn:      "user_id",
+		LocalColumns:     []string{"user_id"},
 		RemoteTable:      "users",
-		RemoteColumn:     "id",
+		RemoteColumns:    []string{"id"},
 		GraphQLFieldName: "user",
 	}
 	field := &ast.Field{Name: &ast.Name{Value: "user"}}
 	plan, err := planner.PlanQuery(dbSchema, field, nil, planner.WithRelationship(planner.RelationshipContext{
-		RelatedTable: users,
-		RemoteColumn: "id",
-		Value:        7,
-		IsManyToOne:  true,
+		RelatedTable:  users,
+		RemoteColumns: []string{"id"},
+		Value:         7,
+		IsManyToOne:   true,
 	}))
 	require.NoError(t, err)
 
@@ -1592,27 +1592,27 @@ func TestCollectionFieldTypesAreNonNullConnections(t *testing.T) {
 		Relationships: []introspection.Relationship{
 			{
 				IsOneToMany:      true,
-				LocalColumn:      "id",
+				LocalColumns:     []string{"id"},
 				RemoteTable:      "posts",
-				RemoteColumn:     "user_id",
+				RemoteColumns:    []string{"user_id"},
 				GraphQLFieldName: "posts",
 			},
 			{
-				IsManyToMany:     true,
-				LocalColumn:      "id",
-				RemoteTable:      "roles",
-				RemoteColumn:     "id",
-				JunctionTable:    "user_roles",
-				JunctionLocalFK:  "user_id",
-				JunctionRemoteFK: "role_id",
-				GraphQLFieldName: "roles",
+				IsManyToMany:            true,
+				LocalColumns:            []string{"id"},
+				RemoteTable:             "roles",
+				RemoteColumns:           []string{"id"},
+				JunctionTable:           "user_roles",
+				JunctionLocalFKColumns:  []string{"user_id"},
+				JunctionRemoteFKColumns: []string{"role_id"},
+				GraphQLFieldName:        "roles",
 			},
 			{
-				IsEdgeList:       true,
-				LocalColumn:      "id",
-				JunctionTable:    "user_roles",
-				JunctionLocalFK:  "user_id",
-				GraphQLFieldName: "userRoles",
+				IsEdgeList:             true,
+				LocalColumns:           []string{"id"},
+				JunctionTable:          "user_roles",
+				JunctionLocalFKColumns: []string{"user_id"},
+				GraphQLFieldName:       "userRoles",
 			},
 		},
 	}
@@ -1754,9 +1754,9 @@ func TestManyToOneResolverBatch(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsManyToOne:      true,
-		LocalColumn:      "user_id",
+		LocalColumns:     []string{"user_id"},
 		RemoteTable:      "users",
-		RemoteColumn:     "id",
+		RemoteColumns:    []string{"id"},
 		GraphQLFieldName: "user",
 	}
 	childField := &ast.Field{Name: &ast.Name{Value: "user"}}
@@ -1802,9 +1802,9 @@ func TestTryBatchOneToManyConnection_NoBatchState(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsOneToMany:      true,
-		LocalColumn:      "id",
+		LocalColumns:     []string{"id"},
 		RemoteTable:      "posts",
-		RemoteColumn:     "user_id",
+		RemoteColumns:    []string{"user_id"},
 		GraphQLFieldName: "posts",
 	}
 	field := &ast.Field{
@@ -1828,6 +1828,62 @@ func TestTryBatchOneToManyConnection_NoBatchState(t *testing.T) {
 	}, users, rel, []interface{}{1})
 	require.NoError(t, err)
 	assert.False(t, ok)
+	assert.Nil(t, result)
+}
+
+func TestTryBatchOneToManyConnection_InvalidMapping(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users, posts}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	ctx := NewBatchingContext(context.Background())
+	state, ok := GetBatchState(ctx)
+	require.True(t, ok)
+	parentKey := "users|list|"
+	source := map[string]interface{}{"databaseId": 1, batchParentKeyField: parentKey}
+	state.setParentRows(parentKey, []map[string]interface{}{source})
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		RemoteTable:      "posts",
+		RemoteColumns:    []string{"user_id"},
+		GraphQLFieldName: "posts",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "posts"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+				}},
+			},
+		}},
+	}
+
+	result, ok, err := r.tryBatchOneToManyConnection(graphql.ResolveParams{
+		Source:  source,
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	}, users, rel, 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid one-to-many mapping")
+	assert.True(t, ok)
 	assert.Nil(t, result)
 }
 
@@ -1871,9 +1927,9 @@ func TestTryBatchOneToManyConnection_CachesResults(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsOneToMany:      true,
-		LocalColumn:      "id",
+		LocalColumns:     []string{"id"},
 		RemoteTable:      "posts",
-		RemoteColumn:     "user_id",
+		RemoteColumns:    []string{"user_id"},
 		GraphQLFieldName: "posts",
 	}
 	field := &ast.Field{
@@ -1892,7 +1948,7 @@ func TestTryBatchOneToManyConnection_CachesResults(t *testing.T) {
 
 	orderBy := &planner.OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	selection := planner.SelectedColumnsForConnection(posts, field, nil, orderBy)
-	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumn, selection, []interface{}{1, 2}, 1, orderBy, nil)
+	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumns[0], selection, []interface{}{1, 2}, 1, orderBy, nil)
 	require.NoError(t, err)
 	batchRows := sqlmock.NewRows([]string{"id", "user_id", "title", "__batch_parent_id"}).
 		AddRow(101, 1, "first", 1).
@@ -1977,9 +2033,9 @@ func TestTryBatchOneToManyConnection_FirstZero(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsOneToMany:      true,
-		LocalColumn:      "id",
+		LocalColumns:     []string{"id"},
 		RemoteTable:      "posts",
-		RemoteColumn:     "user_id",
+		RemoteColumns:    []string{"user_id"},
 		GraphQLFieldName: "posts",
 	}
 	field := &ast.Field{
@@ -1996,7 +2052,7 @@ func TestTryBatchOneToManyConnection_FirstZero(t *testing.T) {
 
 	orderBy := &planner.OrderBy{Columns: []string{"id"}, Directions: []string{"ASC"}}
 	selection := planner.SelectedColumnsForConnection(posts, field, nil, orderBy)
-	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumn, selection, []interface{}{1, 2}, 0, orderBy, nil)
+	batchPlan, err := planner.PlanOneToManyConnectionBatch(posts, rel.RemoteColumns[0], selection, []interface{}{1, 2}, 0, orderBy, nil)
 	require.NoError(t, err)
 	batchRows := sqlmock.NewRows([]string{"id", "__batch_parent_id"}).
 		AddRow(101, 1).
@@ -2065,9 +2121,9 @@ func TestOneToManyConnectionResolver_WithAfterSkipsBatching(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsOneToMany:      true,
-		LocalColumn:      "id",
+		LocalColumns:     []string{"id"},
 		RemoteTable:      "posts",
-		RemoteColumn:     "user_id",
+		RemoteColumns:    []string{"user_id"},
 		GraphQLFieldName: "posts",
 	}
 	field := &ast.Field{
@@ -2087,7 +2143,7 @@ func TestOneToManyConnectionResolver_WithAfterSkipsBatching(t *testing.T) {
 		"first": 1,
 		"after": after,
 	}
-	plan, err := planner.PlanOneToManyConnection(posts, rel.RemoteColumn, 1, field, args)
+	plan, err := planner.PlanOneToManyConnection(posts, rel.RemoteColumns[0], 1, field, args)
 	require.NoError(t, err)
 	rows := sqlmock.NewRows([]string{"id"}).AddRow(101)
 	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
@@ -2146,9 +2202,9 @@ func TestOneToManyConnectionResolver_WithLastSkipsBatching(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsOneToMany:      true,
-		LocalColumn:      "id",
+		LocalColumns:     []string{"id"},
 		RemoteTable:      "posts",
-		RemoteColumn:     "user_id",
+		RemoteColumns:    []string{"user_id"},
 		GraphQLFieldName: "posts",
 	}
 	field := &ast.Field{
@@ -2166,7 +2222,7 @@ func TestOneToManyConnectionResolver_WithLastSkipsBatching(t *testing.T) {
 	args := map[string]interface{}{
 		"last": 1,
 	}
-	plan, err := planner.PlanOneToManyConnection(posts, rel.RemoteColumn, 1, field, args)
+	plan, err := planner.PlanOneToManyConnection(posts, rel.RemoteColumns[0], 1, field, args)
 	require.NoError(t, err)
 	rows := sqlmock.NewRows([]string{"id"}).AddRow(101)
 	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
@@ -2190,15 +2246,41 @@ func TestOneToManyConnectionResolver_WithLastSkipsBatching(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestOneToManyConnectionResolver_InvalidMapping(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		RemoteTable:      "posts",
+		RemoteColumns:    []string{"user_id"},
+		GraphQLFieldName: "posts",
+	}
+
+	resolverFn := r.makeOneToManyConnectionResolver(users, rel)
+	_, err := resolverFn(graphql.ResolveParams{
+		Source:  map[string]interface{}{"databaseId": 1},
+		Context: context.Background(),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid one-to-many mapping")
+}
+
 func TestTryBatchManyToOne_NoBatchState(t *testing.T) {
 	users := introspection.Table{Name: "users"}
 	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{users}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
 
 	rel := introspection.Relationship{
 		IsManyToOne:      true,
-		LocalColumn:      "user_id",
+		LocalColumns:     []string{"user_id"},
 		RemoteTable:      "users",
-		RemoteColumn:     "id",
+		RemoteColumns:    []string{"id"},
 		GraphQLFieldName: "user",
 	}
 	field := &ast.Field{Name: &ast.Name{Value: "user"}}
@@ -2293,9 +2375,9 @@ func TestTryBatchManyToOne_CachesResults(t *testing.T) {
 
 	rel := introspection.Relationship{
 		IsManyToOne:      true,
-		LocalColumn:      "user_id",
+		LocalColumns:     []string{"user_id"},
 		RemoteTable:      "users",
-		RemoteColumn:     "id",
+		RemoteColumns:    []string{"id"},
 		GraphQLFieldName: "user",
 	}
 	childField := &ast.Field{

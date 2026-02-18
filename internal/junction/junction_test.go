@@ -361,15 +361,11 @@ func TestOrderFKs(t *testing.T) {
 		ColumnNames:       []string{"emp_no"},
 		ReferencedTable:   "employees",
 		ReferencedColumns: []string{"emp_no"},
-		ColumnName:        "emp_no",
-		ReferencedColumn:  "emp_no",
 	}
 	fk2 := FKInfo{
 		ColumnNames:       []string{"dept_no"},
 		ReferencedTable:   "departments",
 		ReferencedColumns: []string{"dept_no"},
-		ColumnName:        "dept_no",
-		ReferencedColumn:  "dept_no",
 	}
 
 	// Test both orderings result in same alphabetical order
@@ -451,14 +447,14 @@ func TestToIntrospectionMap(t *testing.T) {
 			Table: "user_roles",
 			Type:  PureJunction,
 			LeftFK: FKInfo{
-				ColumnName:       "role_id",
-				ReferencedTable:  "roles",
-				ReferencedColumn: "id",
+				ColumnNames:       []string{"role_id"},
+				ReferencedTable:   "roles",
+				ReferencedColumns: []string{"id"},
 			},
 			RightFK: FKInfo{
-				ColumnName:       "user_id",
-				ReferencedTable:  "users",
-				ReferencedColumn: "id",
+				ColumnNames:       []string{"user_id"},
+				ReferencedTable:   "users",
+				ReferencedColumns: []string{"id"},
 			},
 			AttributeColumns: nil,
 		},
@@ -466,14 +462,14 @@ func TestToIntrospectionMap(t *testing.T) {
 			Table: "project_members",
 			Type:  AttributeJunction,
 			LeftFK: FKInfo{
-				ColumnName:       "project_id",
-				ReferencedTable:  "projects",
-				ReferencedColumn: "id",
+				ColumnNames:       []string{"project_id"},
+				ReferencedTable:   "projects",
+				ReferencedColumns: []string{"id"},
 			},
 			RightFK: FKInfo{
-				ColumnName:       "user_id",
-				ReferencedTable:  "users",
-				ReferencedColumn: "id",
+				ColumnNames:       []string{"user_id"},
+				ReferencedTable:   "users",
+				ReferencedColumns: []string{"id"},
 			},
 			AttributeColumns: []string{"assigned_at", "role_level"},
 		},

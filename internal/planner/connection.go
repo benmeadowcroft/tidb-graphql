@@ -655,28 +655,26 @@ func BuildEdgeListAggregateBaseSQL(
 // It expands lexicographic seek into disjunction form:
 // (c1 op v1) OR (c1 = v1 AND c2 op v2) OR ...
 func BuildSeekCondition(columns []string, values []interface{}, directions []string) sq.Sqlizer {
-	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
-		return sq.Expr("1 = 0")
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		quoted[i] = sqlutil.QuoteIdentifier(col)
 	}
-
-	terms := make([]string, 0, len(columns))
-	args := make([]interface{}, 0, len(columns)*2)
-	for i := range columns {
-		var predicates []string
-		for j := 0; j < i; j++ {
-			predicates = append(predicates, fmt.Sprintf("%s = ?", sqlutil.QuoteIdentifier(columns[j])))
-			args = append(args, values[j])
-		}
-		op := directionOp(directions[i])
-		predicates = append(predicates, fmt.Sprintf("%s %s ?", sqlutil.QuoteIdentifier(columns[i]), op))
-		args = append(args, values[i])
-		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
-	}
-	return sq.Expr("("+strings.Join(terms, " OR ")+")", args...)
+	return buildSeekConditionFromQualified(quoted, values, directions)
 }
 
 // BuildSeekConditionQualified creates a cursor seek predicate with qualified columns.
 func BuildSeekConditionQualified(tableAlias string, columns []string, values []interface{}, directions []string) sq.Sqlizer {
+	qualified := make([]string, len(columns))
+	quotedAlias := sqlutil.QuoteIdentifier(tableAlias)
+	for i, col := range columns {
+		qualified[i] = fmt.Sprintf("%s.%s", quotedAlias, sqlutil.QuoteIdentifier(col))
+	}
+	return buildSeekConditionFromQualified(qualified, values, directions)
+}
+
+// buildSeekConditionFromQualified is the core seek predicate implementation.
+// columns must be pre-formatted SQL identifiers (optionally table-qualified).
+func buildSeekConditionFromQualified(columns []string, values []interface{}, directions []string) sq.Sqlizer {
 	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
 		return sq.Expr("1 = 0")
 	}
@@ -686,11 +684,11 @@ func BuildSeekConditionQualified(tableAlias string, columns []string, values []i
 	for i := range columns {
 		var predicates []string
 		for j := 0; j < i; j++ {
-			predicates = append(predicates, fmt.Sprintf("%s.%s = ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[j])))
+			predicates = append(predicates, fmt.Sprintf("%s = ?", columns[j]))
 			args = append(args, values[j])
 		}
 		op := directionOp(directions[i])
-		predicates = append(predicates, fmt.Sprintf("%s.%s %s ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[i]), op))
+		predicates = append(predicates, fmt.Sprintf("%s %s ?", columns[i], op))
 		args = append(args, values[i])
 		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
 	}

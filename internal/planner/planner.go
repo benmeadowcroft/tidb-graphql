@@ -194,23 +194,6 @@ func PlanManyToManyBatch(
 	orderBy *OrderBy,
 	where *WhereClause,
 ) (SQLQuery, error) {
-	if len(values) == 0 {
-		return SQLQuery{}, nil
-	}
-	if err := validateLimitOffset(limit, offset); err != nil {
-		return SQLQuery{}, err
-	}
-
-	orderClause, err := batchOrderClause(targetTable, orderBy)
-	if err != nil {
-		return SQLQuery{}, err
-	}
-
-	cols := columnNames(targetTable, columns)
-	columnList := strings.Join(cols, ", ")
-
-	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
-	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
 	if len(junctionLocalFKColumns) == 0 || len(junctionRemoteFKColumns) == 0 || len(targetPKColumns) == 0 {
 		return SQLQuery{}, fmt.Errorf("many-to-many batch requires key column mappings")
 	}
@@ -218,18 +201,8 @@ func PlanManyToManyBatch(
 		return SQLQuery{}, fmt.Errorf("many-to-many batch remote key mapping width mismatch")
 	}
 
-	partitionColumns := quotedColumns(junctionLocalFKColumns, quotedJunction)
-	partitionExpr := strings.Join(partitionColumns, ", ")
-	parentAliases := BatchParentAliases(len(partitionColumns))
-	innerParentCols := make([]string, len(partitionColumns))
-	outerParentCols := make([]string, len(partitionColumns))
-	for i := range partitionColumns {
-		innerParentCols[i] = fmt.Sprintf("%s AS %s", partitionColumns[i], parentAliases[i])
-		outerParentCols[i] = parentAliases[i]
-	}
-	outerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(outerParentCols, ", "))
-	innerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(innerParentCols, ", "))
-
+	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
+	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
 	joinPredicates := make([]string, len(junctionRemoteFKColumns))
 	for i := range junctionRemoteFKColumns {
 		joinPredicates[i] = fmt.Sprintf(
@@ -238,43 +211,15 @@ func PlanManyToManyBatch(
 			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
 		)
 	}
+	fromClause := fmt.Sprintf("%s INNER JOIN %s ON %s", quotedTarget, quotedJunction, strings.Join(joinPredicates, " AND "))
+	partitionColumns := quotedColumns(junctionLocalFKColumns, quotedJunction)
 
-	whereSQL := ""
-	var whereArgs []interface{}
-	if where != nil && where.Condition != nil {
-		condSQL, condArgs, err := where.Condition.ToSql()
-		if err != nil {
-			return SQLQuery{}, err
-		}
-		whereSQL = " AND " + condSQL
-		whereArgs = condArgs
-	}
-	parentWhereSQL, parentWhereArgs, err := buildTupleInCondition(partitionColumns, values)
+	orderClause, err := batchOrderClause(targetTable, orderBy)
 	if err != nil {
 		return SQLQuery{}, err
 	}
-	if parentWhereSQL == "" {
-		return SQLQuery{}, nil
-	}
-
-	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s WHERE %s%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
-		outerSelect,
-		innerSelect,
-		partitionExpr,
-		orderClause,
-		quotedTarget,
-		quotedJunction,
-		strings.Join(joinPredicates, " AND "),
-		parentWhereSQL,
-		whereSQL,
-		strings.Join(outerParentCols, ", "),
-	)
-
-	args := append([]interface{}{}, parentWhereArgs...)
-	args = append(args, whereArgs...)
-	args = append(args, offset, offset+limit)
-	return SQLQuery{SQL: query, Args: args}, nil
+	columnList := strings.Join(columnNames(targetTable, columns), ", ")
+	return buildBatchWindowQuery(fromClause, columnList, partitionColumns, orderClause, values, limit, offset, where)
 }
 
 // PlanEdgeListBatch builds a batched SQL query for edge list relationships with per-parent limits.
@@ -287,6 +232,31 @@ func PlanEdgeListBatch(
 	orderBy *OrderBy,
 	where *WhereClause,
 ) (SQLQuery, error) {
+	if len(junctionLocalFKColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("edge-list batch requires at least one local FK column")
+	}
+
+	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
+	partitionColumns := quotedColumns(junctionLocalFKColumns, "")
+	orderClause, err := batchOrderClause(junctionTable, orderBy)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	columnList := strings.Join(columnNames(junctionTable, columns), ", ")
+	return buildBatchWindowQuery(quotedTable, columnList, partitionColumns, orderClause, values, limit, offset, where)
+}
+
+// buildBatchWindowQuery emits the shared ROW_NUMBER() window pattern used by
+// PlanManyToManyBatch and PlanEdgeListBatch.
+func buildBatchWindowQuery(
+	fromClause string,
+	columnList string,
+	partitionColumns []string,
+	orderClause string,
+	values []ParentTuple,
+	limit, offset int,
+	where *WhereClause,
+) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
 	}
@@ -294,19 +264,6 @@ func PlanEdgeListBatch(
 		return SQLQuery{}, err
 	}
 
-	orderClause, err := batchOrderClause(junctionTable, orderBy)
-	if err != nil {
-		return SQLQuery{}, err
-	}
-
-	cols := columnNames(junctionTable, columns)
-	columnList := strings.Join(cols, ", ")
-	if len(junctionLocalFKColumns) == 0 {
-		return SQLQuery{}, fmt.Errorf("edge-list batch requires at least one local FK column")
-	}
-
-	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
-	partitionColumns := quotedColumns(junctionLocalFKColumns, "")
 	partitionExpr := strings.Join(partitionColumns, ", ")
 	parentAliases := BatchParentAliases(len(partitionColumns))
 	innerParentCols := make([]string, len(partitionColumns))
@@ -342,7 +299,7 @@ func PlanEdgeListBatch(
 		innerSelect,
 		partitionExpr,
 		orderClause,
-		quotedTable,
+		fromClause,
 		parentWhereSQL,
 		whereSQL,
 		strings.Join(outerParentCols, ", "),
@@ -1071,6 +1028,18 @@ func buildRelationshipSubquerySQL(
 	}
 }
 
+// isNullCondition converts an isNull boolean value into a squirrel condition.
+func isNullCondition(quotedColumn string, value interface{}) (sq.Sqlizer, error) {
+	boolVal, ok := value.(bool)
+	if !ok {
+		return nil, fmt.Errorf("isNull must be a boolean")
+	}
+	if boolVal {
+		return sq.Eq{quotedColumn: nil}, nil
+	}
+	return sq.NotEq{quotedColumn: nil}, nil
+}
+
 // buildColumnFilter builds filter conditions for a specific column.
 // When alias is non-empty, the column name is qualified as alias.column.
 func buildColumnFilter(col introspection.Column, alias string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
@@ -1122,15 +1091,11 @@ func buildColumnFilter(col introspection.Column, alias string, filterMap map[str
 		case "notLike":
 			conditions = append(conditions, sq.NotLike{quotedColumn: value})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		default:
 			return nil, fmt.Errorf("unknown filter operator: %s", op)
 		}
@@ -1228,15 +1193,11 @@ func buildSetColumnFilter(col introspection.Column, quotedColumn string, filterM
 			}
 			conditions = append(conditions, sq.NotEq{quotedColumn: csv})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		default:
 			return nil, fmt.Errorf("unknown set filter operator: %s", op)
 		}
@@ -1294,15 +1255,11 @@ func buildBytesColumnFilter(quotedColumn string, filterMap map[string]interface{
 			}
 			conditions = append(conditions, sq.NotEq{quotedColumn: decoded})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		case "lt", "lte", "gt", "gte", "like", "notLike":
 			return nil, fmt.Errorf("operator %s is not supported for bytes columns", op)
 		default:
@@ -1376,15 +1333,11 @@ func buildUUIDColumnFilter(col introspection.Column, quotedColumn string, filter
 			}
 			conditions = append(conditions, sq.NotEq{quotedColumn: parsed})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		case "lt", "lte", "gt", "gte", "like", "notLike":
 			return nil, fmt.Errorf("operator %s is not supported for UUID columns", op)
 		default:

@@ -48,3 +48,115 @@ func TestVectorColumnsAndIndexes(t *testing.T) {
 		t.Fatalf("did not expect title to have vector index")
 	}
 }
+
+func TestHasVectorIndexForColumn_UsesVectorCapabilityFlag(t *testing.T) {
+	table := Table{
+		Name: "docs",
+		Columns: []Column{
+			{Name: "id", DataType: "bigint", IsPrimaryKey: true},
+			{Name: "embedding", DataType: "vector", ColumnType: "vector(3)", VectorDimension: 3},
+		},
+		Indexes: []Index{
+			{
+				Name:                  "idx_embedding_vector",
+				Type:                  "BTREE",
+				Columns:               []string{"embedding"},
+				IsVectorSearchCapable: true,
+			},
+		},
+	}
+
+	if !HasVectorIndexForColumn(table, "embedding") {
+		t.Fatalf("expected embedding to have vector index via capability flag")
+	}
+}
+
+func TestHasVectorIndexForColumn_HNSWFallback(t *testing.T) {
+	table := Table{
+		Name: "docs",
+		Columns: []Column{
+			{Name: "id", DataType: "bigint", IsPrimaryKey: true},
+			{Name: "embedding", DataType: "vector", ColumnType: "vector(3)", VectorDimension: 3},
+		},
+		Indexes: []Index{
+			{
+				Name:    "idx_embedding_hnsw",
+				Type:    "HNSW",
+				Columns: []string{"embedding"},
+			},
+		},
+	}
+
+	if !HasVectorIndexForColumn(table, "embedding") {
+		t.Fatalf("expected embedding to have vector index via HNSW fallback")
+	}
+}
+
+func TestIsAutoEmbeddingVectorColumn(t *testing.T) {
+	tests := []struct {
+		name string
+		col  Column
+		want bool
+	}{
+		{
+			name: "generated vector with embed_text",
+			col: Column{
+				Name:                 "embedding",
+				DataType:             "vector",
+				ColumnType:           "vector(1024)",
+				VectorDimension:      1024,
+				GenerationExpression: `EMBED_TEXT("tidbcloud_free/amazon/titan-embed-text-v2", review_text, '{"dimensions":1024}')`,
+			},
+			want: true,
+		},
+		{
+			name: "case insensitive embed_text detection",
+			col: Column{
+				Name:                 "embedding",
+				DataType:             "vector",
+				ColumnType:           "vector(1024)",
+				VectorDimension:      1024,
+				GenerationExpression: `embed_text("model", review_text)`,
+			},
+			want: true,
+		},
+		{
+			name: "plain vector column",
+			col: Column{
+				Name:       "embedding",
+				DataType:   "vector",
+				ColumnType: "vector(8)",
+			},
+			want: false,
+		},
+		{
+			name: "non vector generated column",
+			col: Column{
+				Name:                 "search_text",
+				DataType:             "varchar",
+				ColumnType:           "varchar(255)",
+				GenerationExpression: `EMBED_TEXT("model", review_text)`,
+			},
+			want: false,
+		},
+		{
+			name: "generated vector without embed_text",
+			col: Column{
+				Name:                 "embedding",
+				DataType:             "vector",
+				ColumnType:           "vector(8)",
+				GenerationExpression: "some_other_function(review_text)",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsAutoEmbeddingVectorColumn(tt.col)
+			if got != tt.want {
+				t.Fatalf("IsAutoEmbeddingVectorColumn() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -417,9 +418,6 @@ func (r *Resolver) addVectorSearchQueries(fields graphql.Fields, table introspec
 		connType := r.buildVectorConnectionType(table, vectorCol, tableType)
 
 		args := graphql.FieldConfigArgument{
-			"vector": &graphql.ArgumentConfig{
-				Type: graphql.NewNonNull(r.vectorScalar()),
-			},
 			"metric": &graphql.ArgumentConfig{
 				Type: r.vectorDistanceMetricEnum(),
 			},
@@ -429,6 +427,18 @@ func (r *Resolver) addVectorSearchQueries(fields graphql.Fields, table introspec
 			"after": &graphql.ArgumentConfig{
 				Type: graphql.String,
 			},
+		}
+		if introspection.IsAutoEmbeddingVectorColumn(vectorCol) {
+			args["vector"] = &graphql.ArgumentConfig{
+				Type: r.vectorScalar(),
+			}
+			args["queryText"] = &graphql.ArgumentConfig{
+				Type: graphql.String,
+			}
+		} else {
+			args["vector"] = &graphql.ArgumentConfig{
+				Type: graphql.NewNonNull(r.vectorScalar()),
+			}
 		}
 		if whereInput := r.whereInput(table); whereInput != nil {
 			args["where"] = &graphql.ArgumentConfig{
@@ -4306,6 +4316,13 @@ func convertValue(val interface{}) interface{} {
 }
 
 func convertColumnValue(col introspection.Column, val interface{}) interface{} {
+	// TiFlash/vector-index execution can return ENUM values as ordinals (1-based)
+	// instead of their string literals. Coerce ordinals back to enum strings so
+	// GraphQL enum serialization remains stable across storage engines.
+	if strings.EqualFold(col.DataType, "enum") {
+		return coerceEnumColumnValue(col, val)
+	}
+
 	switch introspection.EffectiveGraphQLType(col) {
 	case sqltype.TypeBoolean:
 		return coerceBooleanColumnValue(val)
@@ -4321,6 +4338,99 @@ func convertColumnValue(col introspection.Column, val interface{}) interface{} {
 		return val
 	default:
 		return convertValue(val)
+	}
+}
+
+func coerceEnumColumnValue(col introspection.Column, val interface{}) interface{} {
+	if val == nil {
+		return nil
+	}
+
+	if b, ok := val.([]byte); ok {
+		s := string(b)
+		if mapped, ok := enumStringOrOrdinalValue(col, s); ok {
+			return mapped
+		}
+		return s
+	}
+
+	if s, ok := val.(string); ok {
+		if mapped, ok := enumStringOrOrdinalValue(col, s); ok {
+			return mapped
+		}
+		return s
+	}
+
+	if ord, ok := enumOrdinalValue(val); ok {
+		if mapped, ok := enumValueByOrdinal(col, ord); ok {
+			return mapped
+		}
+	}
+
+	return convertValue(val)
+}
+
+func enumStringOrOrdinalValue(col introspection.Column, raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", true
+	}
+	ord, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return raw, true
+	}
+	return enumValueByOrdinal(col, ord)
+}
+
+func enumValueByOrdinal(col introspection.Column, ord int64) (string, bool) {
+	if ord <= 0 {
+		return "", false
+	}
+	idx := int(ord - 1)
+	if idx < 0 || idx >= len(col.EnumValues) {
+		return "", false
+	}
+	return col.EnumValues[idx], true
+}
+
+func enumOrdinalValue(raw interface{}) (int64, bool) {
+	switch v := raw.(type) {
+	case int:
+		return int64(v), true
+	case int8:
+		return int64(v), true
+	case int16:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint:
+		return int64(v), true
+	case uint8:
+		return int64(v), true
+	case uint16:
+		return int64(v), true
+	case uint32:
+		return int64(v), true
+	case uint64:
+		if v > uint64(^uint64(0)>>1) {
+			return 0, false
+		}
+		return int64(v), true
+	case float32:
+		f := float64(v)
+		if math.Trunc(f) != f {
+			return 0, false
+		}
+		return int64(v), true
+	case float64:
+		if math.Trunc(v) != v {
+			return 0, false
+		}
+		return int64(v), true
+	default:
+		return 0, false
 	}
 }
 

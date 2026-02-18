@@ -32,8 +32,10 @@ type Column struct {
 	IsAutoRandom    bool
 	HasDefault      bool
 	ColumnDefault   string
-	EnumValues      []string
-	Comment         string
+	// GenerationExpression stores INFORMATION_SCHEMA.COLUMNS.GENERATION_EXPRESSION.
+	GenerationExpression string
+	EnumValues           []string
+	Comment              string
 	// OverrideType is an explicit GraphQL type override resolved during schema preparation.
 	OverrideType    sqltype.GraphQLType
 	HasOverrideType bool
@@ -47,6 +49,14 @@ type Index struct {
 	Unique  bool
 	Type    string
 	Columns []string
+	// IsVectorSearchCapable marks indexes confirmed as vector indexes via
+	// INFORMATION_SCHEMA.TIFLASH_INDEXES (INDEX_KIND='Vector').
+	//
+	// This exists because some TiDB deployments (including Cloud Zero) can report
+	// vector indexes as INDEX_TYPE='BTREE' in INFORMATION_SCHEMA.STATISTICS.
+	// In those environments, STATISTICS alone cannot reliably identify vector
+	// search capability.
+	IsVectorSearchCapable bool
 }
 
 // ForeignKey represents a foreign key constraint on a column
@@ -336,7 +346,8 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 			COLUMN_COMMENT,
 			IS_NULLABLE,
 			COLUMN_DEFAULT,
-			EXTRA
+			EXTRA,
+			GENERATION_EXPRESSION
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
@@ -359,7 +370,8 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		var extra string
 		var columnType string
 		var columnComment sql.NullString
-		if err := rows.Scan(&col.Name, &col.DataType, &columnType, &columnComment, &isNullable, &columnDefault, &extra); err != nil {
+		var generationExpression sql.NullString
+		if err := rows.Scan(&col.Name, &col.DataType, &columnType, &columnComment, &isNullable, &columnDefault, &extra, &generationExpression); err != nil {
 			recordSpanError(span, err)
 			return nil, err
 		}
@@ -372,6 +384,9 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 		if columnDefault.Valid {
 			col.ColumnDefault = columnDefault.String
 			col.HasDefault = true
+		}
+		if generationExpression.Valid {
+			col.GenerationExpression = strings.TrimSpace(generationExpression.String)
 		}
 		extraLower := strings.ToLower(extra)
 		col.IsAutoIncrement = strings.Contains(extraLower, "auto_increment")
@@ -621,17 +636,80 @@ func getIndexes(ctx context.Context, db Queryer, databaseName, tableName string)
 		}
 		index.Columns = append(index.Columns, columnName)
 	}
+	if err := rows.Err(); err != nil {
+		recordSpanError(span, err)
+		return nil, err
+	}
+
+	vectorIndexNames, err := getVectorSearchIndexNames(ctx, db, databaseName, tableName)
+	if err != nil {
+		// Best-effort enrichment only. Keep introspection working even when
+		// TIFLASH_INDEXES is unavailable or restricted.
+		slog.Default().Warn(
+			"failed to load vector index metadata from TIFLASH_INDEXES; falling back to STATISTICS index type detection",
+			slog.String("table", tableName),
+			slog.String("error", err.Error()),
+		)
+	} else {
+		// TiDB Cloud Zero can expose vector indexes in SHOW CREATE TABLE and
+		// TIFLASH_INDEXES while STATISTICS still reports INDEX_TYPE='BTREE'.
+		// We therefore treat TIFLASH_INDEXES(INDEX_KIND='Vector') as the source
+		// of truth for vector index kind, and keep STATISTICS for index-column
+		// mapping.
+		for name := range vectorIndexNames {
+			if idx, ok := indexByName[name]; ok {
+				idx.IsVectorSearchCapable = true
+			}
+		}
+	}
 
 	indexes := make([]Index, 0, len(indexByName))
 	for _, index := range indexByName {
 		indexes = append(indexes, *index)
 	}
 
+	return indexes, nil
+}
+
+func getVectorSearchIndexNames(ctx context.Context, db Queryer, databaseName, tableName string) (map[string]struct{}, error) {
+	ctx, span := startSpan(ctx, "introspection.get_vector_indexes",
+		attribute.String("db.name", databaseName),
+		attribute.String("db.table", tableName),
+	)
+	defer span.End()
+
+	query := `
+		SELECT DISTINCT INDEX_NAME
+		FROM INFORMATION_SCHEMA.TIFLASH_INDEXES
+		WHERE TIDB_DATABASE = ?
+			AND TIDB_TABLE = ?
+			AND UPPER(INDEX_KIND) = 'VECTOR'
+	`
+
+	rows, err := db.QueryContext(ctx, query, databaseName, tableName)
+	if err != nil {
+		recordSpanError(span, err)
+		return nil, err
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	result := make(map[string]struct{})
+	for rows.Next() {
+		var indexName string
+		if err := rows.Scan(&indexName); err != nil {
+			recordSpanError(span, err)
+			return nil, err
+		}
+		result[indexName] = struct{}{}
+	}
+
 	if err := rows.Err(); err != nil {
 		recordSpanError(span, err)
 		return nil, err
 	}
-	return indexes, nil
+	return result, nil
 }
 
 // buildRelationships creates bidirectional relationship metadata from foreign keys.
@@ -913,6 +991,19 @@ func IsVectorColumn(col Column) bool {
 	return EffectiveGraphQLType(col) == sqltype.TypeVector
 }
 
+// IsAutoEmbeddingVectorColumn reports whether a vector column is generated via
+// EMBED_TEXT(...), indicating TiDB auto-embedding behavior.
+func IsAutoEmbeddingVectorColumn(col Column) bool {
+	if !IsVectorColumn(col) {
+		return false
+	}
+	expr := strings.ToLower(strings.TrimSpace(col.GenerationExpression))
+	if expr == "" {
+		return false
+	}
+	return strings.Contains(expr, "embed_text(")
+}
+
 // VectorColumns returns vector-typed columns in table column order.
 func VectorColumns(table Table) []Column {
 	cols := make([]Column, 0)
@@ -941,6 +1032,11 @@ func HasVectorIndexForColumn(table Table, columnName string) bool {
 }
 
 func isVectorSearchIndex(idx Index) bool {
+	if idx.IsVectorSearchCapable {
+		return true
+	}
+	// Backward-compatible fallback for environments that expose vector search
+	// index kind via STATISTICS.INDEX_TYPE (e.g. HNSW).
 	indexType := strings.ToUpper(strings.TrimSpace(idx.Type))
 	return strings.Contains(indexType, "HNSW")
 }

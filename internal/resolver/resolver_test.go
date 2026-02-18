@@ -1382,6 +1382,20 @@ func TestConvertColumnValue_BooleanCoercion(t *testing.T) {
 	assert.Equal(t, false, convertColumnValue(col, "0"))
 }
 
+func TestConvertColumnValue_EnumCoercion(t *testing.T) {
+	col := introspection.Column{
+		Name:       "rating",
+		DataType:   "enum",
+		EnumValues: []string{"thumbs_up", "thumbs_down"},
+	}
+
+	assert.Equal(t, "thumbs_up", convertColumnValue(col, int64(1)))
+	assert.Equal(t, "thumbs_down", convertColumnValue(col, uint64(2)))
+	assert.Equal(t, "thumbs_up", convertColumnValue(col, []byte("1")))
+	assert.Equal(t, "thumbs_down", convertColumnValue(col, "thumbs_down"))
+	assert.Equal(t, int64(9), convertColumnValue(col, int64(9)))
+}
+
 func TestUUIDColumnResolver_NormalizesBinaryValue(t *testing.T) {
 	col := introspection.Column{
 		Name:             "id",

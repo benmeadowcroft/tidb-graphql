@@ -45,6 +45,18 @@ type VectorConnectionPlan struct {
 	CursorDirections []string
 }
 
+type vectorSearchInputMode string
+
+const (
+	vectorSearchInputModeVector vectorSearchInputMode = "vector"
+	vectorSearchInputModeText   vectorSearchInputMode = "queryText"
+)
+
+type vectorSearchInput struct {
+	mode        vectorSearchInputMode
+	distanceArg string
+}
+
 // PlanVectorSearchConnection builds SQL for a forward-only cursor-paginated
 // vector search query.
 func PlanVectorSearchConnection(
@@ -101,16 +113,9 @@ func PlanVectorSearchConnection(
 		return nil, err
 	}
 
-	rawVector, ok := args["vector"]
-	if !ok || rawVector == nil {
-		return nil, fmt.Errorf("vector is required")
-	}
-	vectorLiteral, vectorLen, err := normalizeVectorQueryValue(rawVector)
+	searchInput, err := parseVectorSearchInput(args, vectorColumn)
 	if err != nil {
-		return nil, fmt.Errorf("invalid vector: %w", err)
-	}
-	if vectorColumn.VectorDimension > 0 && vectorLen != vectorColumn.VectorDimension {
-		return nil, fmt.Errorf("vector length %d does not match %s dimension %d", vectorLen, vectorColumn.Name, vectorColumn.VectorDimension)
+		return nil, err
 	}
 
 	var whereClause *WhereClause
@@ -136,7 +141,7 @@ func PlanVectorSearchConnection(
 	}
 	selected := SelectedColumnsForConnection(table, field, options.fragments, pkOrderBy)
 
-	orderByKey := vectorOrderByKey(table, vectorColumn, metric, pkCols)
+	orderByKey := vectorOrderByKey(table, vectorColumn, metric, searchInput.mode, pkCols)
 	cursorDirections := append([]string{"ASC"}, ascDirections(len(pkCols))...)
 
 	var seekCondition sq.Sqlizer
@@ -163,7 +168,7 @@ func PlanVectorSearchConnection(
 		seekCondition = BuildSeekCondition(seekColumns, seekValues, cursorDirections)
 	}
 
-	query, queryArgs, err := buildVectorConnectionSQL(table, selected, vectorColumn, metric, vectorLiteral, whereClause, seekCondition, window.first)
+	query, queryArgs, err := buildVectorConnectionSQL(table, selected, vectorColumn, metric, searchInput, whereClause, seekCondition, window.first)
 	if err != nil {
 		return nil, err
 	}
@@ -277,20 +282,67 @@ func parseVectorDistanceMetricArg(args map[string]interface{}) (VectorDistanceMe
 	}
 }
 
+func parseVectorSearchInput(args map[string]interface{}, vectorColumn introspection.Column) (vectorSearchInput, error) {
+	rawVector, hasVector := args["vector"]
+	hasVector = hasVector && rawVector != nil
+
+	queryText, hasQueryText, err := parseOptionalStringArg(args, "queryText")
+	if err != nil {
+		return vectorSearchInput{}, err
+	}
+	if hasQueryText {
+		queryText = strings.TrimSpace(queryText)
+		if queryText == "" {
+			return vectorSearchInput{}, fmt.Errorf("queryText must be non-empty")
+		}
+		if !introspection.IsAutoEmbeddingVectorColumn(vectorColumn) {
+			return vectorSearchInput{}, fmt.Errorf("queryText is not supported for vector column %s", vectorColumn.Name)
+		}
+	}
+
+	if hasVector && hasQueryText {
+		return vectorSearchInput{}, fmt.Errorf("exactly one of vector or queryText must be provided")
+	}
+	if !hasVector && !hasQueryText {
+		return vectorSearchInput{}, fmt.Errorf("exactly one of vector or queryText must be provided")
+	}
+
+	if hasQueryText {
+		return vectorSearchInput{
+			mode:        vectorSearchInputModeText,
+			distanceArg: queryText,
+		}, nil
+	}
+
+	vectorLiteral, vectorLen, err := normalizeVectorQueryValue(rawVector)
+	if err != nil {
+		return vectorSearchInput{}, fmt.Errorf("invalid vector: %w", err)
+	}
+	if vectorColumn.VectorDimension > 0 && vectorLen != vectorColumn.VectorDimension {
+		return vectorSearchInput{}, fmt.Errorf("vector length %d does not match %s dimension %d", vectorLen, vectorColumn.Name, vectorColumn.VectorDimension)
+	}
+
+	return vectorSearchInput{
+		mode:        vectorSearchInputModeVector,
+		distanceArg: vectorLiteral,
+	}, nil
+}
+
 func buildVectorConnectionSQL(
 	table introspection.Table,
 	selected []introspection.Column,
 	vectorColumn introspection.Column,
 	metric VectorDistanceMetric,
-	vectorLiteral string,
+	searchInput vectorSearchInput,
 	whereClause *WhereClause,
 	seekCondition sq.Sqlizer,
 	first int,
 ) (string, []interface{}, error) {
+	distanceFunction := vectorMetricFunction(metric, searchInput.mode)
 	inner := sq.Select(columnNames(table, selected)...).
 		Column(
-			fmt.Sprintf("%s(%s, ?) AS %s", vectorMetricFunction(metric), sqlutil.QuoteIdentifier(vectorColumn.Name), sqlutil.QuoteIdentifier(vectorDistanceAlias)),
-			vectorLiteral,
+			fmt.Sprintf("%s(%s, ?) AS %s", distanceFunction, sqlutil.QuoteIdentifier(vectorColumn.Name), sqlutil.QuoteIdentifier(vectorDistanceAlias)),
+			searchInput.distanceArg,
 		).
 		From(sqlutil.QuoteIdentifier(table.Name))
 	if whereClause != nil && whereClause.Condition != nil {
@@ -407,7 +459,16 @@ func parseVectorNumber(raw interface{}) (float64, error) {
 	}
 }
 
-func vectorMetricFunction(metric VectorDistanceMetric) string {
+func vectorMetricFunction(metric VectorDistanceMetric, mode vectorSearchInputMode) string {
+	if mode == vectorSearchInputModeText {
+		switch metric {
+		case VectorDistanceMetricL2:
+			return "VEC_EMBED_L2_DISTANCE"
+		default:
+			return "VEC_EMBED_COSINE_DISTANCE"
+		}
+	}
+
 	switch metric {
 	case VectorDistanceMetricL2:
 		return "VEC_L2_DISTANCE"
@@ -416,12 +477,18 @@ func vectorMetricFunction(metric VectorDistanceMetric) string {
 	}
 }
 
-func vectorOrderByKey(table introspection.Table, vectorColumn introspection.Column, metric VectorDistanceMetric, pkCols []introspection.Column) string {
+func vectorOrderByKey(table introspection.Table, vectorColumn introspection.Column, metric VectorDistanceMetric, mode vectorSearchInputMode, pkCols []introspection.Column) string {
 	pkParts := make([]string, len(pkCols))
 	for i, pk := range pkCols {
 		pkParts[i] = introspection.GraphQLFieldName(pk)
 	}
-	return fmt.Sprintf("vector:%s:%s:%s", introspection.GraphQLTypeName(table), introspection.GraphQLFieldName(vectorColumn), strings.ToLower(string(metric))+"_"+strings.Join(pkParts, "_"))
+	return fmt.Sprintf(
+		"vector:%s:%s:%s:%s",
+		introspection.GraphQLTypeName(table),
+		introspection.GraphQLFieldName(vectorColumn),
+		string(mode),
+		strings.ToLower(string(metric))+"_"+strings.Join(pkParts, "_"),
+	)
 }
 
 func columnNamesFromColumns(cols []introspection.Column) []string {

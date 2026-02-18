@@ -2,6 +2,8 @@
 
 This tutorial shows how to use the `Vector` scalar and vector search root fields using the tutorial dataset.
 
+For TiDB Cloud Zero auto-embedding flow with `queryText`, see [Vector search on TiDB Cloud Zero (auto-embedding)](./vector-search-db-zero-auto-embedding.md).
+
 Goal: run semantic search queries over `product_reviews` and paginate results with cursors.
 
 ## Prerequisites

@@ -34,6 +34,29 @@ func vectorDocsTable() introspection.Table {
 	return table
 }
 
+func vectorAutoEmbeddingDocsTable() introspection.Table {
+	table := introspection.Table{
+		Name: "docs",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "bigint", IsPrimaryKey: true},
+			{
+				Name:                 "embedding",
+				DataType:             "vector",
+				ColumnType:           "vector(3)",
+				VectorDimension:      3,
+				GenerationExpression: `EMBED_TEXT("tidbcloud_free/amazon/titan-embed-text-v2", title, '{"dimensions":3}')`,
+			},
+			{Name: "title", DataType: "varchar"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Type: "BTREE", Columns: []string{"id"}},
+			{Name: "idx_embedding", Type: "HNSW", Columns: []string{"embedding"}},
+		},
+	}
+	renamePrimaryKeyID(&table)
+	return table
+}
+
 func vectorConnectionFieldAST() *ast.Field {
 	return &ast.Field{
 		Name: &ast.Name{Value: "searchDocsByEmbeddingVector"},
@@ -84,10 +107,15 @@ func TestBuildSchema_VectorSearchFieldGenerated(t *testing.T) {
 	field := root.Fields()["searchDocsByEmbeddingVector"]
 	require.NotNil(t, field)
 	assert.True(t, hasArg(field, "vector"))
+	assert.False(t, hasArg(field, "queryText"))
 	assert.True(t, hasArg(field, "metric"))
 	assert.True(t, hasArg(field, "first"))
 	assert.True(t, hasArg(field, "after"))
 	assert.True(t, hasArg(field, "where"))
+	vectorArg := getArg(field, "vector")
+	require.NotNil(t, vectorArg)
+	_, isNonNull := vectorArg.Type.(*graphql.NonNull)
+	assert.True(t, isNonNull)
 
 	connObj := unwrapObjectType(t, field.Type)
 	nodesField, ok := connObj.Fields()["nodes"]
@@ -101,6 +129,27 @@ func TestBuildSchema_VectorSearchFieldGenerated(t *testing.T) {
 	nodesObj, ok := nodesInnerNonNull.OfType.(*graphql.Object)
 	require.True(t, ok)
 	assert.Equal(t, introspection.GraphQLTypeName(docs), nodesObj.Name())
+}
+
+func TestBuildSchema_VectorSearchFieldGenerated_AutoEmbedding(t *testing.T) {
+	docs := vectorAutoEmbeddingDocsTable()
+	r := NewResolver(nil, &introspection.Schema{Tables: []introspection.Table{docs}}, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	r.SetVectorSearchConfig(VectorSearchConfig{RequireIndex: true, MaxTopK: 100})
+
+	schema, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
+
+	root := schema.QueryType()
+	require.NotNil(t, root)
+	field := root.Fields()["searchDocsByEmbeddingVector"]
+	require.NotNil(t, field)
+	assert.True(t, hasArg(field, "vector"))
+	assert.True(t, hasArg(field, "queryText"))
+
+	vectorArg := getArg(field, "vector")
+	require.NotNil(t, vectorArg)
+	_, isNonNull := vectorArg.Type.(*graphql.NonNull)
+	assert.False(t, isNonNull)
 }
 
 func TestVectorConnectionResolver_PaginatesWithAfterCursor(t *testing.T) {
@@ -179,6 +228,52 @@ func TestVectorConnectionResolver_PaginatesWithAfterCursor(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, edges2, 1)
 	assert.EqualValues(t, 3, edges2[0]["node"].(map[string]interface{})["databaseId"])
+
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestVectorConnectionResolver_TextMode(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	docs := vectorAutoEmbeddingDocsTable()
+	schema := &introspection.Schema{Tables: []introspection.Table{docs}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	r.SetVectorSearchConfig(VectorSearchConfig{RequireIndex: true, MaxTopK: 100, DefaultFirst: 2})
+
+	field := vectorConnectionFieldAST()
+	args := map[string]interface{}{
+		"queryText": "great battery life",
+		"metric":    "COSINE",
+		"first":     2,
+	}
+
+	plan, err := planner.PlanVectorSearchConnection(schema, docs, docs.Columns[1], field, args, 100, 2, planner.WithSchema(schema))
+	require.NoError(t, err)
+	require.Contains(t, plan.Root.SQL, "VEC_EMBED_COSINE_DISTANCE")
+
+	rows := sqlmock.NewRows([]string{"id", "title", "__vector_distance"}).
+		AddRow(1, "first", 0.1).
+		AddRow(2, "second", 0.2)
+	expectQuery(t, mock, plan.Root.SQL, plan.Root.Args, rows)
+
+	resolverFn := r.makeVectorConnectionResolver(docs, docs.Columns[1])
+	result, err := resolverFn(graphql.ResolveParams{
+		Args:    args,
+		Context: context.Background(),
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	conn, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	edges, ok := conn["edges"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, edges, 2)
+	assert.EqualValues(t, 1, edges[0]["rank"])
+	assert.EqualValues(t, 1, edges[0]["node"].(map[string]interface{})["databaseId"])
 
 	require.NoError(t, mock.ExpectationsWereMet())
 }

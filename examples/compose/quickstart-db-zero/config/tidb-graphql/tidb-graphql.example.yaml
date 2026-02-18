@@ -1,5 +1,6 @@
 database:
   mycnf_file: /run/secrets/tidb-zero.my.cnf
+  database: tidb_graphql_tutorial
 
 server:
   port: 8080

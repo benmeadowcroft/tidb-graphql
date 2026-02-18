@@ -9,6 +9,7 @@ services:
     image: mysql:8
     volumes:
       - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
+      - ../../../docs/tutorials/sample-data-vectors-auto-embedding.sql:/seed/sample-data-vectors-auto-embedding.sql:ro
       - ../../../.auth/tidb-zero.my.cnf:/run/secrets/tidb-zero.my.cnf:ro
     entrypoint: /bin/sh
     command:
@@ -18,6 +19,7 @@ services:
           sleep 1
         done
         mysql --defaults-extra-file=/run/secrets/tidb-zero.my.cnf < /seed/sample-data.sql
+        mysql --defaults-extra-file=/run/secrets/tidb-zero.my.cnf < /seed/sample-data-vectors-auto-embedding.sql
     restart: "no"
 
   tidb-graphql:

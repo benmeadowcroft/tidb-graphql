@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -26,15 +25,18 @@ func TestMetricsEndpoint(t *testing.T) {
 
 	testDB := tidbcloud.NewTestDB(t)
 
-	// Build the server binary
-	cmd, _ := startTestServer(
+	app, _, _ := startTestApp(
 		t,
-		"../../bin/tidb-graphql-metrics-test",
 		18081,
 		fmt.Sprintf("TIGQL_DATABASE_DATABASE=%s", testDB.DatabaseName),
 		"TIGQL_OBSERVABILITY_METRICS_ENABLED=true",
 		"TIGQL_OBSERVABILITY_LOGGING_FORMAT=text",
 	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = app.Shutdown(ctx)
+	})
 
 	// Test 1: Verify /metrics endpoint exists and returns Prometheus format
 	t.Run("metrics endpoint accessible", func(t *testing.T) {
@@ -57,9 +59,9 @@ func TestMetricsEndpoint(t *testing.T) {
 	// Test 2: Verify HTTP instrumentation metrics
 	t.Run("http instrumentation metrics", func(t *testing.T) {
 		// Make a request to generate HTTP metrics
-			resp, err := http.Get("http://localhost:18081/health")
-			require.NoError(t, err)
-			resp.Body.Close()
+		resp, err := http.Get("http://localhost:18081/health")
+		require.NoError(t, err)
+		resp.Body.Close()
 
 		// Wait a bit for metrics to be recorded
 		time.Sleep(100 * time.Millisecond)
@@ -132,27 +134,5 @@ func TestMetricsEndpoint(t *testing.T) {
 
 		assert.True(t, hasDatabaseMetrics, "Should contain database instrumentation metrics")
 	})
-
-	// Gracefully stop the server
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Logf("Failed to send interrupt signal: %v", err)
-	}
-
-	// Wait for graceful shutdown
-	doneChan := make(chan error, 1)
-	go func() {
-		doneChan <- cmd.Wait()
-	}()
-
-	select {
-	case <-doneChan:
-		// Server stopped successfully
-	case <-ctx.Done():
-		// Force kill if graceful shutdown takes too long
-		cmd.Process.Kill()
-	}
 
 }

@@ -344,7 +344,7 @@ func PlanManyToManyConnection(
 			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
 		)
 	}
-	localFKQuoted := quotedColumns(junctionLocalFKColumns, quotedJunction)
+	localFKQuoted := qualifiedColumnNames(quotedJunction, junctionLocalFKColumns)
 	localWhereSQL, localWhereArgs, err := buildTupleInCondition(localFKQuoted, []ParentTuple{{Values: fkValues}})
 	if err != nil {
 		return nil, err
@@ -411,7 +411,7 @@ func PlanEdgeListConnection(
 	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
 		return nil, fmt.Errorf("edge-list local FK mapping width mismatch")
 	}
-	whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(junctionLocalFKColumns, ""), []ParentTuple{{Values: fkValues}})
+	whereSQL, whereArgs, err := buildTupleInCondition(quotedColumnNames(junctionLocalFKColumns), []ParentTuple{{Values: fkValues}})
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +520,7 @@ func BuildManyToManyAggregateBaseSQL(
 		)
 	}
 	whereSQL, whereArgs, err := buildTupleInCondition(
-		quotedColumns(junctionLocalFKColumns, quotedJunction),
+		qualifiedColumnNames(quotedJunction, junctionLocalFKColumns),
 		[]ParentTuple{{Values: fkValues}},
 	)
 	if err != nil {
@@ -593,7 +593,7 @@ func BuildEdgeListAggregateBaseSQL(
 		return SQLQuery{}, fmt.Errorf("edge-list aggregate local key mapping width mismatch")
 	}
 	whereSQL, whereArgs, err := buildTupleInCondition(
-		quotedColumns(junctionLocalFKColumns, ""),
+		quotedColumnNames(junctionLocalFKColumns),
 		[]ParentTuple{{Values: fkValues}},
 	)
 	if err != nil {

@@ -161,7 +161,7 @@ func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspectio
 			Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumns[0]): flat}).
 			Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(remoteColumns[0]), aliases[0]))
 	} else {
-		whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(remoteColumns, ""), values)
+		whereSQL, whereArgs, err := buildTupleInCondition(quotedColumnNames(remoteColumns), values)
 		if err != nil {
 			return SQLQuery{}, err
 		}
@@ -212,7 +212,7 @@ func PlanManyToManyBatch(
 		)
 	}
 	fromClause := fmt.Sprintf("%s INNER JOIN %s ON %s", quotedTarget, quotedJunction, strings.Join(joinPredicates, " AND "))
-	partitionColumns := quotedColumns(junctionLocalFKColumns, quotedJunction)
+	partitionColumns := qualifiedColumnNames(quotedJunction, junctionLocalFKColumns)
 
 	orderClause, err := batchOrderClause(targetTable, orderBy)
 	if err != nil {
@@ -237,7 +237,7 @@ func PlanEdgeListBatch(
 	}
 
 	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
-	partitionColumns := quotedColumns(junctionLocalFKColumns, "")
+	partitionColumns := quotedColumnNames(junctionLocalFKColumns)
 	orderClause, err := batchOrderClause(junctionTable, orderBy)
 	if err != nil {
 		return SQLQuery{}, err
@@ -383,16 +383,22 @@ func PlanOneToManyBatch(
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
-func quotedColumns(columns []string, tableAlias string) []string {
+// quotedColumnNames returns the backtick-quoted column identifiers with no table prefix.
+func quotedColumnNames(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		if tableAlias == "" {
-			quoted[i] = sqlutil.QuoteIdentifier(col)
-			continue
-		}
-		quoted[i] = fmt.Sprintf("%s.%s", tableAlias, sqlutil.QuoteIdentifier(col))
+		quoted[i] = sqlutil.QuoteIdentifier(col)
 	}
 	return quoted
+}
+
+// qualifiedColumnNames returns column identifiers prefixed with a pre-quoted table alias.
+func qualifiedColumnNames(quotedAlias string, columns []string) []string {
+	qualified := make([]string, len(columns))
+	for i, col := range columns {
+		qualified[i] = fmt.Sprintf("%s.%s", quotedAlias, sqlutil.QuoteIdentifier(col))
+	}
+	return qualified
 }
 
 func buildTupleInCondition(quotedColumns []string, tuples []ParentTuple) (string, []interface{}, error) {
@@ -1403,30 +1409,40 @@ func findRelationshipByGraphQLName(table introspection.Table, graphQLName string
 	return nil
 }
 
-// ValidateIndexedColumns checks if at least one indexed column is used in the WHERE clause
-func ValidateIndexedColumns(table introspection.Table, usedColumns []string) error {
-	if len(usedColumns) == 0 {
-		return nil // No WHERE clause, no validation needed
-	}
-
-	// Collect all indexed columns
-	indexedColumns := make(map[string]bool)
+// indexedColumnSet returns the set of column names that participate in at least
+// one index on the table, as a sorted slice. Built once and reused by both
+// ValidateIndexedColumns and ValidateWhereClauseIndexes.
+func indexedColumnSet(table introspection.Table) []string {
+	seen := make(map[string]struct{})
 	for _, idx := range table.Indexes {
 		for _, col := range idx.Columns {
-			indexedColumns[col] = true
+			seen[col] = struct{}{}
 		}
 	}
+	cols := make([]string, 0, len(seen))
+	for col := range seen {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+	return cols
+}
 
-	// Check if any used column is indexed
+// ValidateIndexedColumns checks if at least one indexed column is used in the WHERE clause.
+func ValidateIndexedColumns(table introspection.Table, usedColumns []string) error {
+	if len(usedColumns) == 0 {
+		return nil
+	}
+	indexed := indexedColumnSet(table)
+	indexedSet := make(map[string]struct{}, len(indexed))
+	for _, col := range indexed {
+		indexedSet[col] = struct{}{}
+	}
 	for _, col := range usedColumns {
-		if indexedColumns[col] {
-			return nil // At least one indexed column found
+		if _, ok := indexedSet[col]; ok {
+			return nil
 		}
 	}
-
-	return fmt.Errorf(
-		"where clause must include at least one indexed column for performance",
-	)
+	return fmt.Errorf("where clause must include at least one indexed column for performance")
 }
 
 // ValidateWhereClauseIndexes validates indexed-column guardrails for all tables used by a WHERE clause.
@@ -1436,21 +1452,6 @@ func ValidateWhereClauseIndexes(schema *introspection.Schema, rootTable introspe
 	}
 	if len(whereClause.UsedColumnsByTable) == 0 {
 		return ValidateIndexedColumns(rootTable, whereClause.UsedColumns)
-	}
-
-	indexedColumns := func(table introspection.Table) []string {
-		columnSet := make(map[string]struct{})
-		for _, idx := range table.Indexes {
-			for _, col := range idx.Columns {
-				columnSet[col] = struct{}{}
-			}
-		}
-		cols := make([]string, 0, len(columnSet))
-		for col := range columnSet {
-			cols = append(cols, col)
-		}
-		sort.Strings(cols)
-		return cols
 	}
 
 	findTable := func(tableName string) (introspection.Table, bool) {
@@ -1474,7 +1475,7 @@ func ValidateWhereClauseIndexes(schema *introspection.Schema, rootTable introspe
 			return fmt.Errorf("where clause references unknown table %s for indexed validation", tableName)
 		}
 		if err := ValidateIndexedColumns(table, cols); err != nil {
-			indexed := indexedColumns(table)
+			indexed := indexedColumnSet(table)
 			if len(indexed) == 0 {
 				return fmt.Errorf("where clause for table %s must include at least one indexed column for performance (table has no indexes)", tableName)
 			}

@@ -105,7 +105,7 @@ func startTestApp(t *testing.T, port int, extraEnv ...string) (*serverapp.App, <
 	serverErrors, err := app.Start()
 	require.NoError(t, err)
 
-	waitForHealthy(t, port)
+	waitForHealthy(t, port, serverErrors)
 
 	cleanup := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
@@ -119,34 +119,50 @@ func startTestApp(t *testing.T, port int, extraEnv ...string) (*serverapp.App, <
 
 func waitForHealthyWithLogs(t *testing.T, port int, stdout, stderr *bytes.Buffer, env []string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", port))
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
-			}
-		}
+	if err := waitForHTTPStatus(port, "/health", http.StatusOK, 10*time.Second, 50*time.Millisecond, nil); err == nil {
+		return
 	}
 	t.Fatalf("Server did not become ready within 10 seconds.\n%s", formatServerDebugInfo(stdout, stderr, env))
 }
 
-func waitForHealthy(t *testing.T, port int) {
+func waitForHealthy(t *testing.T, port int, serverErrors <-chan error) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", port))
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
-			}
-		}
+	if err := waitForHTTPStatus(port, "/health", http.StatusOK, 10*time.Second, 50*time.Millisecond, serverErrors); err == nil {
+		return
 	}
 	t.Fatalf("Server did not become ready within 10 seconds on port %d", port)
+}
+
+func waitForHTTPStatus(port int, path string, expectedStatus int, timeout, interval time.Duration, serverErrors <-chan error) error {
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	url := fmt.Sprintf("http://localhost:%d%s", port, path)
+	deadline := time.Now().Add(timeout)
+
+	for {
+		if serverErrors != nil {
+			select {
+			case err := <-serverErrors:
+				if err == nil {
+					return fmt.Errorf("server stopped unexpectedly while waiting for %s", path)
+				}
+				return fmt.Errorf("server failed while waiting for %s: %w", path, err)
+			default:
+			}
+		}
+
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == expectedStatus {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for %s to return %d", path, expectedStatus)
+		}
+		time.Sleep(interval)
+	}
 }
 
 func buildTestConfigFromEnv(port int, env []string) *config.Config {

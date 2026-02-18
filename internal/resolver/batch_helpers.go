@@ -210,17 +210,6 @@ func orderByKey(orderBy *planner.OrderBy) string {
 	return strings.Join(orderBy.Columns, ",") + ":" + strings.Join(orderBy.Directions, ",")
 }
 
-func aggregateColumnsKey(columns []planner.AggregateColumn) string {
-	if len(columns) == 0 {
-		return ""
-	}
-	parts := make([]string, len(columns))
-	for i, col := range columns {
-		parts[i] = col.SQLClause
-	}
-	return strings.Join(parts, "|")
-}
-
 func firstGroupedRecord(grouped map[string][]map[string]interface{}, key interface{}) map[string]interface{} {
 	return firstGroupedRecordByTuple(grouped, []interface{}{key})
 }

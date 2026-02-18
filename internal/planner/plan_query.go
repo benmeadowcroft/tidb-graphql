@@ -39,6 +39,15 @@ type planOptions struct {
 // PlanOption customizes planning behavior for non-root contexts.
 type PlanOption func(*planOptions)
 
+// applyOptions applies all opts to a new planOptions and returns it.
+func applyOptions(opts []PlanOption) *planOptions {
+	o := &planOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
+}
+
 // WithRelationship plans a relationship field using the provided context.
 func WithRelationship(ctx RelationshipContext) PlanOption {
 	return func(o *planOptions) {
@@ -82,10 +91,7 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 		return nil, errors.New("schema and field are required")
 	}
 
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 
 	defaultLimit := DefaultListLimit
 	if options.defaultLimit > 0 {

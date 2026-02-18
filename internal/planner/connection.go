@@ -183,6 +183,24 @@ func parseConnectionArgs(
 	}, nil
 }
 
+// planFromArgs builds the fields of a ConnectionPlan that are common to all
+// four connection planners. Root, Count, and AggregateBase are left as zero
+// values for the caller to set.
+func planFromArgs(table introspection.Table, ca *connectionArgs) ConnectionPlan {
+	return ConnectionPlan{
+		Table:         table,
+		Columns:       ca.selected,
+		OrderBy:       ca.orderBy,
+		OrderByKey:    ca.orderByKey,
+		CursorColumns: ca.cursorCols,
+		First:         ca.limit,
+		Mode:          ca.mode,
+		HasCursor:     ca.hasAfter || ca.hasBefore,
+		HasAfter:      ca.hasAfter,
+		HasBefore:     ca.hasBefore,
+	}
+}
+
 // PlanConnection plans a root connection query.
 func PlanConnection(
 	schema *introspection.Schema,
@@ -191,10 +209,7 @@ func PlanConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 	if options.schema == nil {
 		options.schema = schema
 	}
@@ -222,21 +237,11 @@ func PlanConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          rootSQL,
-		Count:         countSQL,
-		AggregateBase: aggregateBase,
-		Table:         table,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(table, ca)
+	plan.Root = rootSQL
+	plan.Count = countSQL
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // PlanOneToManyConnection plans a connection for a one-to-many relationship.
@@ -248,10 +253,7 @@ func PlanOneToManyConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
 		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
 	}
@@ -293,21 +295,11 @@ func PlanOneToManyConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          SQLQuery{SQL: query, Args: sqlArgs},
-		Count:         countQuery,
-		AggregateBase: aggregateBase,
-		Table:         table,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(table, ca)
+	plan.Root = SQLQuery{SQL: query, Args: sqlArgs}
+	plan.Count = countQuery
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // PlanManyToManyConnection plans a connection for a many-to-many relationship.
@@ -322,10 +314,7 @@ func PlanManyToManyConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 
 	buildSeek := func(colNames []string, values []interface{}, directions []string) sq.Sqlizer {
 		return BuildSeekConditionQualified(targetTable.Name, colNames, values, directions)
@@ -394,21 +383,11 @@ func PlanManyToManyConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          SQLQuery{SQL: query, Args: sqlArgs},
-		Count:         countQuery,
-		AggregateBase: aggregateBase,
-		Table:         targetTable,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(targetTable, ca)
+	plan.Root = SQLQuery{SQL: query, Args: sqlArgs}
+	plan.Count = countQuery
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // PlanEdgeListConnection plans a connection for an edge-list relationship.
@@ -420,10 +399,7 @@ func PlanEdgeListConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
 		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
 	}
@@ -471,21 +447,11 @@ func PlanEdgeListConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          SQLQuery{SQL: query, Args: sqlArgs},
-		Count:         countQuery,
-		AggregateBase: aggregateBase,
-		Table:         junctionTable,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(junctionTable, ca)
+	plan.Root = SQLQuery{SQL: query, Args: sqlArgs}
+	plan.Count = countQuery
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // BuildOneToManyCountSQL builds the count query for a one-to-many connection.

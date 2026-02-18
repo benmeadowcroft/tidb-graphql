@@ -79,10 +79,7 @@ func PlanVectorSearchConnection(
 		defaultFirst = maxTopK
 	}
 
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 	if options.schema == nil {
 		options.schema = schema
 	}

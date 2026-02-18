@@ -183,6 +183,24 @@ func parseConnectionArgs(
 	}, nil
 }
 
+// planFromArgs builds the fields of a ConnectionPlan that are common to all
+// four connection planners. Root, Count, and AggregateBase are left as zero
+// values for the caller to set.
+func planFromArgs(table introspection.Table, ca *connectionArgs) ConnectionPlan {
+	return ConnectionPlan{
+		Table:         table,
+		Columns:       ca.selected,
+		OrderBy:       ca.orderBy,
+		OrderByKey:    ca.orderByKey,
+		CursorColumns: ca.cursorCols,
+		First:         ca.limit,
+		Mode:          ca.mode,
+		HasCursor:     ca.hasAfter || ca.hasBefore,
+		HasAfter:      ca.hasAfter,
+		HasBefore:     ca.hasBefore,
+	}
+}
+
 // PlanConnection plans a root connection query.
 func PlanConnection(
 	schema *introspection.Schema,
@@ -191,10 +209,7 @@ func PlanConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 	if options.schema == nil {
 		options.schema = schema
 	}
@@ -222,21 +237,11 @@ func PlanConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          rootSQL,
-		Count:         countSQL,
-		AggregateBase: aggregateBase,
-		Table:         table,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(table, ca)
+	plan.Root = rootSQL
+	plan.Count = countSQL
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // PlanOneToManyConnection plans a connection for a one-to-many relationship.
@@ -248,10 +253,7 @@ func PlanOneToManyConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
 		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
 	}
@@ -293,21 +295,11 @@ func PlanOneToManyConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          SQLQuery{SQL: query, Args: sqlArgs},
-		Count:         countQuery,
-		AggregateBase: aggregateBase,
-		Table:         table,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(table, ca)
+	plan.Root = SQLQuery{SQL: query, Args: sqlArgs}
+	plan.Count = countQuery
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // PlanManyToManyConnection plans a connection for a many-to-many relationship.
@@ -322,10 +314,7 @@ func PlanManyToManyConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 
 	buildSeek := func(colNames []string, values []interface{}, directions []string) sq.Sqlizer {
 		return BuildSeekConditionQualified(targetTable.Name, colNames, values, directions)
@@ -355,7 +344,7 @@ func PlanManyToManyConnection(
 			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
 		)
 	}
-	localFKQuoted := quotedColumns(junctionLocalFKColumns, quotedJunction)
+	localFKQuoted := qualifiedColumnNames(quotedJunction, junctionLocalFKColumns)
 	localWhereSQL, localWhereArgs, err := buildTupleInCondition(localFKQuoted, []ParentTuple{{Values: fkValues}})
 	if err != nil {
 		return nil, err
@@ -394,21 +383,11 @@ func PlanManyToManyConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          SQLQuery{SQL: query, Args: sqlArgs},
-		Count:         countQuery,
-		AggregateBase: aggregateBase,
-		Table:         targetTable,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(targetTable, ca)
+	plan.Root = SQLQuery{SQL: query, Args: sqlArgs}
+	plan.Count = countQuery
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // PlanEdgeListConnection plans a connection for an edge-list relationship.
@@ -420,10 +399,7 @@ func PlanEdgeListConnection(
 	args map[string]interface{},
 	opts ...PlanOption,
 ) (*ConnectionPlan, error) {
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 	buildWhere := func(tbl introspection.Table, whereMap map[string]interface{}) (*WhereClause, error) {
 		return BuildWhereClauseWithSchema(options.schema, tbl, whereMap)
 	}
@@ -435,7 +411,7 @@ func PlanEdgeListConnection(
 	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
 		return nil, fmt.Errorf("edge-list local FK mapping width mismatch")
 	}
-	whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(junctionLocalFKColumns, ""), []ParentTuple{{Values: fkValues}})
+	whereSQL, whereArgs, err := buildTupleInCondition(quotedColumnNames(junctionLocalFKColumns), []ParentTuple{{Values: fkValues}})
 	if err != nil {
 		return nil, err
 	}
@@ -471,21 +447,11 @@ func PlanEdgeListConnection(
 		return nil, err
 	}
 
-	return &ConnectionPlan{
-		Root:          SQLQuery{SQL: query, Args: sqlArgs},
-		Count:         countQuery,
-		AggregateBase: aggregateBase,
-		Table:         junctionTable,
-		Columns:       ca.selected,
-		OrderBy:       ca.orderBy,
-		OrderByKey:    ca.orderByKey,
-		CursorColumns: ca.cursorCols,
-		First:         ca.limit,
-		Mode:          ca.mode,
-		HasCursor:     ca.hasAfter || ca.hasBefore,
-		HasAfter:      ca.hasAfter,
-		HasBefore:     ca.hasBefore,
-	}, nil
+	plan := planFromArgs(junctionTable, ca)
+	plan.Root = SQLQuery{SQL: query, Args: sqlArgs}
+	plan.Count = countQuery
+	plan.AggregateBase = aggregateBase
+	return &plan, nil
 }
 
 // BuildOneToManyCountSQL builds the count query for a one-to-many connection.
@@ -554,7 +520,7 @@ func BuildManyToManyAggregateBaseSQL(
 		)
 	}
 	whereSQL, whereArgs, err := buildTupleInCondition(
-		quotedColumns(junctionLocalFKColumns, quotedJunction),
+		qualifiedColumnNames(quotedJunction, junctionLocalFKColumns),
 		[]ParentTuple{{Values: fkValues}},
 	)
 	if err != nil {
@@ -627,7 +593,7 @@ func BuildEdgeListAggregateBaseSQL(
 		return SQLQuery{}, fmt.Errorf("edge-list aggregate local key mapping width mismatch")
 	}
 	whereSQL, whereArgs, err := buildTupleInCondition(
-		quotedColumns(junctionLocalFKColumns, ""),
+		quotedColumnNames(junctionLocalFKColumns),
 		[]ParentTuple{{Values: fkValues}},
 	)
 	if err != nil {
@@ -655,28 +621,26 @@ func BuildEdgeListAggregateBaseSQL(
 // It expands lexicographic seek into disjunction form:
 // (c1 op v1) OR (c1 = v1 AND c2 op v2) OR ...
 func BuildSeekCondition(columns []string, values []interface{}, directions []string) sq.Sqlizer {
-	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
-		return sq.Expr("1 = 0")
+	quoted := make([]string, len(columns))
+	for i, col := range columns {
+		quoted[i] = sqlutil.QuoteIdentifier(col)
 	}
-
-	terms := make([]string, 0, len(columns))
-	args := make([]interface{}, 0, len(columns)*2)
-	for i := range columns {
-		var predicates []string
-		for j := 0; j < i; j++ {
-			predicates = append(predicates, fmt.Sprintf("%s = ?", sqlutil.QuoteIdentifier(columns[j])))
-			args = append(args, values[j])
-		}
-		op := directionOp(directions[i])
-		predicates = append(predicates, fmt.Sprintf("%s %s ?", sqlutil.QuoteIdentifier(columns[i]), op))
-		args = append(args, values[i])
-		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
-	}
-	return sq.Expr("("+strings.Join(terms, " OR ")+")", args...)
+	return buildSeekConditionFromQualified(quoted, values, directions)
 }
 
 // BuildSeekConditionQualified creates a cursor seek predicate with qualified columns.
 func BuildSeekConditionQualified(tableAlias string, columns []string, values []interface{}, directions []string) sq.Sqlizer {
+	qualified := make([]string, len(columns))
+	quotedAlias := sqlutil.QuoteIdentifier(tableAlias)
+	for i, col := range columns {
+		qualified[i] = fmt.Sprintf("%s.%s", quotedAlias, sqlutil.QuoteIdentifier(col))
+	}
+	return buildSeekConditionFromQualified(qualified, values, directions)
+}
+
+// buildSeekConditionFromQualified is the core seek predicate implementation.
+// columns must be pre-formatted SQL identifiers (optionally table-qualified).
+func buildSeekConditionFromQualified(columns []string, values []interface{}, directions []string) sq.Sqlizer {
 	if len(columns) == 0 || len(values) != len(columns) || len(directions) != len(columns) {
 		return sq.Expr("1 = 0")
 	}
@@ -686,11 +650,11 @@ func BuildSeekConditionQualified(tableAlias string, columns []string, values []i
 	for i := range columns {
 		var predicates []string
 		for j := 0; j < i; j++ {
-			predicates = append(predicates, fmt.Sprintf("%s.%s = ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[j])))
+			predicates = append(predicates, fmt.Sprintf("%s = ?", columns[j]))
 			args = append(args, values[j])
 		}
 		op := directionOp(directions[i])
-		predicates = append(predicates, fmt.Sprintf("%s.%s %s ?", sqlutil.QuoteIdentifier(tableAlias), sqlutil.QuoteIdentifier(columns[i]), op))
+		predicates = append(predicates, fmt.Sprintf("%s %s ?", columns[i], op))
 		args = append(args, values[i])
 		terms = append(terms, "("+strings.Join(predicates, " AND ")+")")
 	}

@@ -1003,6 +1003,9 @@ func (c *Config) Validate() *ValidationResult {
 	// Validate explicit type mappings
 	c.TypeMappings.validate(result)
 
+	// Validate schema filters
+	validateSchemaFilters(result, c.SchemaFilters)
+
 	return result
 }
 
@@ -1010,6 +1013,15 @@ func (t *TypeMappingsConfig) validate(result *ValidationResult) {
 	validatePatternMap(result, "type_mappings.uuid_columns", t.UUIDColumns)
 	validatePatternMap(result, "type_mappings.tinyint1_boolean_columns", t.TinyInt1BooleanColumns)
 	validatePatternMap(result, "type_mappings.tinyint1_int_columns", t.TinyInt1IntColumns)
+}
+
+func validateSchemaFilters(result *ValidationResult, filters schemafilter.Config) {
+	validateGlobList(result, "schema_filters.allow_tables", filters.AllowTables)
+	validateGlobList(result, "schema_filters.deny_tables", filters.DenyTables)
+	validateGlobList(result, "schema_filters.deny_mutation_tables", filters.DenyMutationTables)
+	validatePatternMap(result, "schema_filters.allow_columns", filters.AllowColumns)
+	validatePatternMap(result, "schema_filters.deny_columns", filters.DenyColumns)
+	validatePatternMap(result, "schema_filters.deny_mutation_columns", filters.DenyMutationColumns)
 }
 
 func validatePatternMap(result *ValidationResult, field string, patternMap map[string][]string) {

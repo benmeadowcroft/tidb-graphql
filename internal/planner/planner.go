@@ -161,7 +161,7 @@ func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspectio
 			Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumns[0]): flat}).
 			Column(fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(remoteColumns[0]), aliases[0]))
 	} else {
-		whereSQL, whereArgs, err := buildTupleInCondition(quotedColumns(remoteColumns, ""), values)
+		whereSQL, whereArgs, err := buildTupleInCondition(quotedColumnNames(remoteColumns), values)
 		if err != nil {
 			return SQLQuery{}, err
 		}
@@ -194,23 +194,6 @@ func PlanManyToManyBatch(
 	orderBy *OrderBy,
 	where *WhereClause,
 ) (SQLQuery, error) {
-	if len(values) == 0 {
-		return SQLQuery{}, nil
-	}
-	if err := validateLimitOffset(limit, offset); err != nil {
-		return SQLQuery{}, err
-	}
-
-	orderClause, err := batchOrderClause(targetTable, orderBy)
-	if err != nil {
-		return SQLQuery{}, err
-	}
-
-	cols := columnNames(targetTable, columns)
-	columnList := strings.Join(cols, ", ")
-
-	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
-	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
 	if len(junctionLocalFKColumns) == 0 || len(junctionRemoteFKColumns) == 0 || len(targetPKColumns) == 0 {
 		return SQLQuery{}, fmt.Errorf("many-to-many batch requires key column mappings")
 	}
@@ -218,18 +201,8 @@ func PlanManyToManyBatch(
 		return SQLQuery{}, fmt.Errorf("many-to-many batch remote key mapping width mismatch")
 	}
 
-	partitionColumns := quotedColumns(junctionLocalFKColumns, quotedJunction)
-	partitionExpr := strings.Join(partitionColumns, ", ")
-	parentAliases := BatchParentAliases(len(partitionColumns))
-	innerParentCols := make([]string, len(partitionColumns))
-	outerParentCols := make([]string, len(partitionColumns))
-	for i := range partitionColumns {
-		innerParentCols[i] = fmt.Sprintf("%s AS %s", partitionColumns[i], parentAliases[i])
-		outerParentCols[i] = parentAliases[i]
-	}
-	outerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(outerParentCols, ", "))
-	innerSelect := fmt.Sprintf("%s, %s", columnList, strings.Join(innerParentCols, ", "))
-
+	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
+	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
 	joinPredicates := make([]string, len(junctionRemoteFKColumns))
 	for i := range junctionRemoteFKColumns {
 		joinPredicates[i] = fmt.Sprintf(
@@ -238,43 +211,15 @@ func PlanManyToManyBatch(
 			quotedTarget, sqlutil.QuoteIdentifier(targetPKColumns[i]),
 		)
 	}
+	fromClause := fmt.Sprintf("%s INNER JOIN %s ON %s", quotedTarget, quotedJunction, strings.Join(joinPredicates, " AND "))
+	partitionColumns := qualifiedColumnNames(quotedJunction, junctionLocalFKColumns)
 
-	whereSQL := ""
-	var whereArgs []interface{}
-	if where != nil && where.Condition != nil {
-		condSQL, condArgs, err := where.Condition.ToSql()
-		if err != nil {
-			return SQLQuery{}, err
-		}
-		whereSQL = " AND " + condSQL
-		whereArgs = condArgs
-	}
-	parentWhereSQL, parentWhereArgs, err := buildTupleInCondition(partitionColumns, values)
+	orderClause, err := batchOrderClause(targetTable, orderBy)
 	if err != nil {
 		return SQLQuery{}, err
 	}
-	if parentWhereSQL == "" {
-		return SQLQuery{}, nil
-	}
-
-	query := fmt.Sprintf(
-		"SELECT %s FROM (SELECT %s, ROW_NUMBER() OVER (PARTITION BY %s ORDER BY %s) AS __rn FROM %s INNER JOIN %s ON %s WHERE %s%s) AS __batch WHERE __rn > ? AND __rn <= ? ORDER BY %s, __rn",
-		outerSelect,
-		innerSelect,
-		partitionExpr,
-		orderClause,
-		quotedTarget,
-		quotedJunction,
-		strings.Join(joinPredicates, " AND "),
-		parentWhereSQL,
-		whereSQL,
-		strings.Join(outerParentCols, ", "),
-	)
-
-	args := append([]interface{}{}, parentWhereArgs...)
-	args = append(args, whereArgs...)
-	args = append(args, offset, offset+limit)
-	return SQLQuery{SQL: query, Args: args}, nil
+	columnList := strings.Join(columnNames(targetTable, columns), ", ")
+	return buildBatchWindowQuery(fromClause, columnList, partitionColumns, orderClause, values, limit, offset, where)
 }
 
 // PlanEdgeListBatch builds a batched SQL query for edge list relationships with per-parent limits.
@@ -287,6 +232,31 @@ func PlanEdgeListBatch(
 	orderBy *OrderBy,
 	where *WhereClause,
 ) (SQLQuery, error) {
+	if len(junctionLocalFKColumns) == 0 {
+		return SQLQuery{}, fmt.Errorf("edge-list batch requires at least one local FK column")
+	}
+
+	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
+	partitionColumns := quotedColumnNames(junctionLocalFKColumns)
+	orderClause, err := batchOrderClause(junctionTable, orderBy)
+	if err != nil {
+		return SQLQuery{}, err
+	}
+	columnList := strings.Join(columnNames(junctionTable, columns), ", ")
+	return buildBatchWindowQuery(quotedTable, columnList, partitionColumns, orderClause, values, limit, offset, where)
+}
+
+// buildBatchWindowQuery emits the shared ROW_NUMBER() window pattern used by
+// PlanManyToManyBatch and PlanEdgeListBatch.
+func buildBatchWindowQuery(
+	fromClause string,
+	columnList string,
+	partitionColumns []string,
+	orderClause string,
+	values []ParentTuple,
+	limit, offset int,
+	where *WhereClause,
+) (SQLQuery, error) {
 	if len(values) == 0 {
 		return SQLQuery{}, nil
 	}
@@ -294,19 +264,6 @@ func PlanEdgeListBatch(
 		return SQLQuery{}, err
 	}
 
-	orderClause, err := batchOrderClause(junctionTable, orderBy)
-	if err != nil {
-		return SQLQuery{}, err
-	}
-
-	cols := columnNames(junctionTable, columns)
-	columnList := strings.Join(cols, ", ")
-	if len(junctionLocalFKColumns) == 0 {
-		return SQLQuery{}, fmt.Errorf("edge-list batch requires at least one local FK column")
-	}
-
-	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
-	partitionColumns := quotedColumns(junctionLocalFKColumns, "")
 	partitionExpr := strings.Join(partitionColumns, ", ")
 	parentAliases := BatchParentAliases(len(partitionColumns))
 	innerParentCols := make([]string, len(partitionColumns))
@@ -342,7 +299,7 @@ func PlanEdgeListBatch(
 		innerSelect,
 		partitionExpr,
 		orderClause,
-		quotedTable,
+		fromClause,
 		parentWhereSQL,
 		whereSQL,
 		strings.Join(outerParentCols, ", "),
@@ -426,16 +383,22 @@ func PlanOneToManyBatch(
 	return SQLQuery{SQL: query, Args: args}, nil
 }
 
-func quotedColumns(columns []string, tableAlias string) []string {
+// quotedColumnNames returns the backtick-quoted column identifiers with no table prefix.
+func quotedColumnNames(columns []string) []string {
 	quoted := make([]string, len(columns))
 	for i, col := range columns {
-		if tableAlias == "" {
-			quoted[i] = sqlutil.QuoteIdentifier(col)
-			continue
-		}
-		quoted[i] = fmt.Sprintf("%s.%s", tableAlias, sqlutil.QuoteIdentifier(col))
+		quoted[i] = sqlutil.QuoteIdentifier(col)
 	}
 	return quoted
+}
+
+// qualifiedColumnNames returns column identifiers prefixed with a pre-quoted table alias.
+func qualifiedColumnNames(quotedAlias string, columns []string) []string {
+	qualified := make([]string, len(columns))
+	for i, col := range columns {
+		qualified[i] = fmt.Sprintf("%s.%s", quotedAlias, sqlutil.QuoteIdentifier(col))
+	}
+	return qualified
 }
 
 func buildTupleInCondition(quotedColumns []string, tuples []ParentTuple) (string, []interface{}, error) {
@@ -1071,6 +1034,18 @@ func buildRelationshipSubquerySQL(
 	}
 }
 
+// isNullCondition converts an isNull boolean value into a squirrel condition.
+func isNullCondition(quotedColumn string, value interface{}) (sq.Sqlizer, error) {
+	boolVal, ok := value.(bool)
+	if !ok {
+		return nil, fmt.Errorf("isNull must be a boolean")
+	}
+	if boolVal {
+		return sq.Eq{quotedColumn: nil}, nil
+	}
+	return sq.NotEq{quotedColumn: nil}, nil
+}
+
 // buildColumnFilter builds filter conditions for a specific column.
 // When alias is non-empty, the column name is qualified as alias.column.
 func buildColumnFilter(col introspection.Column, alias string, filterMap map[string]interface{}) ([]sq.Sqlizer, error) {
@@ -1122,15 +1097,11 @@ func buildColumnFilter(col introspection.Column, alias string, filterMap map[str
 		case "notLike":
 			conditions = append(conditions, sq.NotLike{quotedColumn: value})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		default:
 			return nil, fmt.Errorf("unknown filter operator: %s", op)
 		}
@@ -1228,15 +1199,11 @@ func buildSetColumnFilter(col introspection.Column, quotedColumn string, filterM
 			}
 			conditions = append(conditions, sq.NotEq{quotedColumn: csv})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		default:
 			return nil, fmt.Errorf("unknown set filter operator: %s", op)
 		}
@@ -1294,15 +1261,11 @@ func buildBytesColumnFilter(quotedColumn string, filterMap map[string]interface{
 			}
 			conditions = append(conditions, sq.NotEq{quotedColumn: decoded})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		case "lt", "lte", "gt", "gte", "like", "notLike":
 			return nil, fmt.Errorf("operator %s is not supported for bytes columns", op)
 		default:
@@ -1376,15 +1339,11 @@ func buildUUIDColumnFilter(col introspection.Column, quotedColumn string, filter
 			}
 			conditions = append(conditions, sq.NotEq{quotedColumn: parsed})
 		case "isNull":
-			boolVal, ok := value.(bool)
-			if !ok {
-				return nil, fmt.Errorf("isNull must be a boolean")
+			cond, err := isNullCondition(quotedColumn, value)
+			if err != nil {
+				return nil, err
 			}
-			if boolVal {
-				conditions = append(conditions, sq.Eq{quotedColumn: nil})
-			} else {
-				conditions = append(conditions, sq.NotEq{quotedColumn: nil})
-			}
+			conditions = append(conditions, cond)
 		case "lt", "lte", "gt", "gte", "like", "notLike":
 			return nil, fmt.Errorf("operator %s is not supported for UUID columns", op)
 		default:
@@ -1450,30 +1409,40 @@ func findRelationshipByGraphQLName(table introspection.Table, graphQLName string
 	return nil
 }
 
-// ValidateIndexedColumns checks if at least one indexed column is used in the WHERE clause
-func ValidateIndexedColumns(table introspection.Table, usedColumns []string) error {
-	if len(usedColumns) == 0 {
-		return nil // No WHERE clause, no validation needed
-	}
-
-	// Collect all indexed columns
-	indexedColumns := make(map[string]bool)
+// indexedColumnSet returns the set of column names that participate in at least
+// one index on the table, as a sorted slice. Built once and reused by both
+// ValidateIndexedColumns and ValidateWhereClauseIndexes.
+func indexedColumnSet(table introspection.Table) []string {
+	seen := make(map[string]struct{})
 	for _, idx := range table.Indexes {
 		for _, col := range idx.Columns {
-			indexedColumns[col] = true
+			seen[col] = struct{}{}
 		}
 	}
+	cols := make([]string, 0, len(seen))
+	for col := range seen {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+	return cols
+}
 
-	// Check if any used column is indexed
+// ValidateIndexedColumns checks if at least one indexed column is used in the WHERE clause.
+func ValidateIndexedColumns(table introspection.Table, usedColumns []string) error {
+	if len(usedColumns) == 0 {
+		return nil
+	}
+	indexed := indexedColumnSet(table)
+	indexedSet := make(map[string]struct{}, len(indexed))
+	for _, col := range indexed {
+		indexedSet[col] = struct{}{}
+	}
 	for _, col := range usedColumns {
-		if indexedColumns[col] {
-			return nil // At least one indexed column found
+		if _, ok := indexedSet[col]; ok {
+			return nil
 		}
 	}
-
-	return fmt.Errorf(
-		"where clause must include at least one indexed column for performance",
-	)
+	return fmt.Errorf("where clause must include at least one indexed column for performance")
 }
 
 // ValidateWhereClauseIndexes validates indexed-column guardrails for all tables used by a WHERE clause.
@@ -1483,21 +1452,6 @@ func ValidateWhereClauseIndexes(schema *introspection.Schema, rootTable introspe
 	}
 	if len(whereClause.UsedColumnsByTable) == 0 {
 		return ValidateIndexedColumns(rootTable, whereClause.UsedColumns)
-	}
-
-	indexedColumns := func(table introspection.Table) []string {
-		columnSet := make(map[string]struct{})
-		for _, idx := range table.Indexes {
-			for _, col := range idx.Columns {
-				columnSet[col] = struct{}{}
-			}
-		}
-		cols := make([]string, 0, len(columnSet))
-		for col := range columnSet {
-			cols = append(cols, col)
-		}
-		sort.Strings(cols)
-		return cols
 	}
 
 	findTable := func(tableName string) (introspection.Table, bool) {
@@ -1521,7 +1475,7 @@ func ValidateWhereClauseIndexes(schema *introspection.Schema, rootTable introspe
 			return fmt.Errorf("where clause references unknown table %s for indexed validation", tableName)
 		}
 		if err := ValidateIndexedColumns(table, cols); err != nil {
-			indexed := indexedColumns(table)
+			indexed := indexedColumnSet(table)
 			if len(indexed) == 0 {
 				return fmt.Errorf("where clause for table %s must include at least one indexed column for performance (table has no indexes)", tableName)
 			}

@@ -43,9 +43,6 @@ type FKInfo struct {
 	ColumnNames       []string // FK columns in junction table (ordered)
 	ReferencedTable   string   // Target table (e.g., "employees")
 	ReferencedColumns []string // Target columns (ordered)
-	// Deprecated compatibility fields for single-column paths.
-	ColumnName       string
-	ReferencedColumn string
 }
 
 // Info contains classification metadata for a junction table.
@@ -87,18 +84,14 @@ func (m Map) ToIntrospectionMap() introspection.JunctionMap {
 			LeftFK: introspection.JunctionFKInfo{
 				ConstraintName:    info.LeftFK.ConstraintName,
 				ColumnNames:       append([]string(nil), info.LeftFK.ColumnNames...),
-				ReferencedColumns: append([]string(nil), info.LeftFK.ReferencedColumns...),
-				ColumnName:        info.LeftFK.ColumnName,
 				ReferencedTable:   info.LeftFK.ReferencedTable,
-				ReferencedColumn:  info.LeftFK.ReferencedColumn,
+				ReferencedColumns: append([]string(nil), info.LeftFK.ReferencedColumns...),
 			},
 			RightFK: introspection.JunctionFKInfo{
 				ConstraintName:    info.RightFK.ConstraintName,
 				ColumnNames:       append([]string(nil), info.RightFK.ColumnNames...),
-				ReferencedColumns: append([]string(nil), info.RightFK.ReferencedColumns...),
-				ColumnName:        info.RightFK.ColumnName,
 				ReferencedTable:   info.RightFK.ReferencedTable,
-				ReferencedColumn:  info.RightFK.ReferencedColumn,
+				ReferencedColumns: append([]string(nil), info.RightFK.ReferencedColumns...),
 			},
 		}
 	}
@@ -248,23 +241,12 @@ func findAttributeColumns(table introspection.Table, fkCols map[string]bool) []s
 }
 
 func toFKInfo(fk introspection.ForeignKeyConstraint) FKInfo {
-	columnNames := append([]string(nil), fk.ColumnNames...)
-	referencedColumns := append([]string(nil), fk.ReferencedColumns...)
 	return FKInfo{
 		ConstraintName:    fk.ConstraintName,
-		ColumnNames:       columnNames,
+		ColumnNames:       append([]string(nil), fk.ColumnNames...),
 		ReferencedTable:   fk.ReferencedTable,
-		ReferencedColumns: referencedColumns,
-		ColumnName:        first(columnNames),
-		ReferencedColumn:  first(referencedColumns),
+		ReferencedColumns: append([]string(nil), fk.ReferencedColumns...),
 	}
-}
-
-func first(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
 }
 
 // orderFKs returns FKs ordered alphabetically by referenced table name.

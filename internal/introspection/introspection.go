@@ -75,22 +75,15 @@ type Relationship struct {
 	IsManyToMany bool // Direct M2M through pure junction (junction hidden)
 	IsEdgeList   bool // M2M through attribute junction (edge type visible)
 	// LocalColumns/RemoteColumns are ordered positional mappings between local and remote keys.
-	// Single-column compatibility fields are retained and populated from index 0.
 	LocalColumns  []string // For many-to-one: FK columns; for one-to-many: referenced key columns on local table
 	RemoteTable   string   // The related table name (for M2M: the other entity table, not junction)
 	RemoteColumns []string // For many-to-one: referenced columns; for one-to-many: FK columns in remote table
-	// Deprecated compatibility fields for single-column code paths.
-	LocalColumn  string
-	RemoteColumn string
 	// Junction key mappings are positional: JunctionLocalFKColumns[i] joins to LocalColumns[i],
 	// JunctionRemoteFKColumns[i] joins to RemoteColumns[i].
 	JunctionTable           string   // For M2M relationships: the intermediate junction table name
 	JunctionLocalFKColumns  []string // For M2M/Edge: FK columns in junction pointing to this table
 	JunctionRemoteFKColumns []string // For M2M/Edge: FK columns in junction pointing to remote table
-	// Deprecated compatibility fields for single-column code paths.
-	JunctionLocalFK  string
-	JunctionRemoteFK string
-	GraphQLFieldName string // e.g., "volume" or "books" or "departmentEmployees"
+	GraphQLFieldName        string   // e.g., "volume" or "books" or "departmentEmployees"
 }
 
 // JunctionType indicates how a junction table should be handled.
@@ -111,9 +104,6 @@ type JunctionFKInfo struct {
 	ColumnNames       []string // FK columns in junction table (ordered)
 	ReferencedTable   string   // Target table
 	ReferencedColumns []string // Target columns (ordered)
-	// Deprecated compatibility fields for single-column paths.
-	ColumnName       string
-	ReferencedColumn string
 }
 
 // JunctionConfig contains configuration for a single junction table.
@@ -805,8 +795,6 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:     localColumns,
 				RemoteTable:      fk.ReferencedTable,
 				RemoteColumns:    remoteColumns,
-				LocalColumn:      firstColumnOrEmpty(localColumns),
-				RemoteColumn:     firstColumnOrEmpty(remoteColumns),
 				GraphQLFieldName: fieldName,
 			}
 			table.Relationships = append(table.Relationships, rel)
@@ -847,8 +835,6 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 						LocalColumns:     append([]string(nil), fk.ReferencedColumns...),
 						RemoteTable:      otherTable.Name,
 						RemoteColumns:    append([]string(nil), fk.ColumnNames...),
-						LocalColumn:      fk.ReferencedColumns[0], // compatibility
-						RemoteColumn:     fk.ColumnNames[0],       // compatibility
 						GraphQLFieldName: namer.OneToManyFieldName(otherTable.Name, fk.ColumnNames[0], isOnlyFK),
 					}
 					table.Relationships = append(table.Relationships, rel)
@@ -897,13 +883,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), leftPKNames...),
 				RemoteTable:             rightTable.Name,
 				RemoteColumns:           append([]string(nil), rightPKNames...),
-				LocalColumn:             firstColumnOrEmpty(leftPKNames),
-				RemoteColumn:            firstColumnOrEmpty(rightPKNames),
 				JunctionTable:           jc.Table,
 				JunctionLocalFKColumns:  append([]string(nil), leftJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), rightJunctionCols...),
-				JunctionLocalFK:         firstColumnOrEmpty(leftJunctionCols),
-				JunctionRemoteFK:        firstColumnOrEmpty(rightJunctionCols),
 				GraphQLFieldName:        leftFieldName,
 			})
 			// Add M2M from right to left
@@ -912,13 +894,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), rightPKNames...),
 				RemoteTable:             leftTable.Name,
 				RemoteColumns:           append([]string(nil), leftPKNames...),
-				LocalColumn:             firstColumnOrEmpty(rightPKNames),
-				RemoteColumn:            firstColumnOrEmpty(leftPKNames),
 				JunctionTable:           jc.Table,
 				JunctionLocalFKColumns:  append([]string(nil), rightJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), leftJunctionCols...),
-				JunctionLocalFK:         firstColumnOrEmpty(rightJunctionCols),
-				JunctionRemoteFK:        firstColumnOrEmpty(leftJunctionCols),
 				GraphQLFieldName:        rightFieldName,
 			})
 
@@ -937,13 +915,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), leftPKNames...),
 				RemoteTable:             jc.Table, // Points to junction table for edge type
 				RemoteColumns:           append([]string(nil), leftJunctionCols...),
-				LocalColumn:             firstColumnOrEmpty(leftPKNames),
-				RemoteColumn:            firstColumnOrEmpty(leftJunctionCols),
 				JunctionTable:           jc.Table,
 				JunctionLocalFKColumns:  append([]string(nil), leftJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), rightJunctionCols...),
-				JunctionLocalFK:         firstColumnOrEmpty(leftJunctionCols),
-				JunctionRemoteFK:        firstColumnOrEmpty(rightJunctionCols),
 				GraphQLFieldName:        edgeFieldName,
 			})
 			// Add edge list from right to junction
@@ -952,13 +926,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), rightPKNames...),
 				RemoteTable:             jc.Table, // Points to junction table for edge type
 				RemoteColumns:           append([]string(nil), rightJunctionCols...),
-				LocalColumn:             firstColumnOrEmpty(rightPKNames),
-				RemoteColumn:            firstColumnOrEmpty(rightJunctionCols),
 				JunctionTable:           jc.Table,
 				JunctionLocalFKColumns:  append([]string(nil), rightJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), leftJunctionCols...),
-				JunctionLocalFK:         firstColumnOrEmpty(rightJunctionCols),
-				JunctionRemoteFK:        firstColumnOrEmpty(leftJunctionCols),
 				GraphQLFieldName:        edgeFieldName,
 			})
 		}

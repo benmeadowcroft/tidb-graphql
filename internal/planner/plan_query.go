@@ -21,7 +21,6 @@ type Plan struct {
 // RelationshipContext provides relationship-specific planning inputs.
 type RelationshipContext struct {
 	RelatedTable  introspection.Table
-	RemoteColumn  string
 	RemoteColumns []string
 	Value         interface{}
 	Values        []interface{}
@@ -39,6 +38,15 @@ type planOptions struct {
 
 // PlanOption customizes planning behavior for non-root contexts.
 type PlanOption func(*planOptions)
+
+// applyOptions applies all opts to a new planOptions and returns it.
+func applyOptions(opts []PlanOption) *planOptions {
+	o := &planOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
+}
 
 // WithRelationship plans a relationship field using the provided context.
 func WithRelationship(ctx RelationshipContext) PlanOption {
@@ -83,10 +91,7 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 		return nil, errors.New("schema and field are required")
 	}
 
-	options := &planOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+	options := applyOptions(opts)
 
 	defaultLimit := DefaultListLimit
 	if options.defaultLimit > 0 {
@@ -107,9 +112,6 @@ func PlanQuery(dbSchema *introspection.Schema, field *ast.Field, args map[string
 	if options.relationship != nil {
 		ctx := options.relationship
 		remoteCols := ctx.RemoteColumns
-		if len(remoteCols) == 0 && ctx.RemoteColumn != "" {
-			remoteCols = []string{ctx.RemoteColumn}
-		}
 		if ctx.RelatedTable.Name == "" || len(remoteCols) == 0 {
 			return nil, errors.New("relationship context is incomplete")
 		}

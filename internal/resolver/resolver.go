@@ -2139,8 +2139,12 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 		if !ok {
 			return nil, fmt.Errorf("invalid source type")
 		}
+		localColumn, remoteColumn, err := oneToManyMappingColumns(rel)
+		if err != nil {
+			return nil, err
+		}
 
-		pkFieldName := graphQLFieldNameForColumn(parentTable, rel.LocalColumn)
+		pkFieldName := graphQLFieldNameForColumn(parentTable, localColumn)
 		pkValue := source[pkFieldName]
 		if pkValue == nil {
 			return r.buildConnectionResult(p.Context, nil, nil, false, false), nil
@@ -2171,7 +2175,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			opts = append(opts, planner.WithLimits(*r.limits))
 		}
 
-		plan, err := planner.PlanOneToManyConnection(relatedTable, rel.RemoteColumn, pkValue, field, p.Args, opts...)
+		plan, err := planner.PlanOneToManyConnection(relatedTable, remoteColumn, pkValue, field, p.Args, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to plan connection: %w", err)
 		}
@@ -2957,6 +2961,15 @@ func sortedOrderByFieldNames(options map[string]string) []string {
 	return names
 }
 
+func oneToManyMappingColumns(rel introspection.Relationship) (localColumn string, remoteColumn string, err error) {
+	localColumns := rel.EffectiveLocalColumns()
+	remoteColumns := rel.EffectiveRemoteColumns()
+	if len(localColumns) != 1 || len(remoteColumns) != 1 {
+		return "", "", fmt.Errorf("invalid one-to-many mapping for %s", rel.GraphQLFieldName)
+	}
+	return localColumns[0], remoteColumns[0], nil
+}
+
 func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, pkValue interface{}) (map[string]interface{}, bool, error) {
 	metrics := graphQLMetricsFromContext(p.Context)
 
@@ -3000,6 +3013,10 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	field := firstFieldAST(p.Info.FieldASTs)
 	if field == nil {
 		return nil, true, fmt.Errorf("missing field AST")
+	}
+	localColumn, remoteColumn, err := oneToManyMappingColumns(rel)
+	if err != nil {
+		return nil, true, err
 	}
 
 	first, err := planner.ParseFirstWithDefault(p.Args, r.defaultLimit)
@@ -3047,7 +3064,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		"%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.RemoteTable,
-		rel.RemoteColumn,
+		remoteColumn,
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
@@ -3071,7 +3088,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		metrics.RecordBatchCacheMiss(p.Context, relationOneToMany)
 	}
 
-	parentField := graphQLFieldNameForColumn(table, rel.LocalColumn)
+	parentField := graphQLFieldNameForColumn(table, localColumn)
 	parentValues := uniqueParentValues(parentRows, parentField)
 	if len(parentValues) == 0 {
 		state.setConnectionRows(relKey, map[string]map[string]interface{}{})
@@ -3088,90 +3105,44 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentValues), len(chunks)), relationOneToMany)
 	}
 
+	bp := batchConnectionPlan{
+		table:         relatedTable,
+		selection:     selection,
+		orderBy:       orderBy,
+		orderByKey:    orderByKey,
+		cursorCols:    cursorCols,
+		first:         first,
+		parentAliases: []string{planner.BatchParentAlias},
+		relation:      relationOneToMany,
+	}
 	groupedConnections := make(map[string]map[string]interface{})
 	for _, chunk := range chunks {
-		if metrics != nil {
-			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationOneToMany)
-		}
-		planned, err := planner.PlanOneToManyConnectionBatch(
-			relatedTable,
-			rel.RemoteColumn,
-			selection,
-			chunk,
-			first,
-			orderBy,
-			whereClause,
-		)
-		if err != nil {
-			if errors.Is(err, planner.ErrNoPrimaryKey) {
-				if metrics != nil {
-					metrics.RecordBatchSkipped(p.Context, relationOneToMany, "no_primary_key")
+		partial, err := runBatchConnectionChunks(
+			p.Context, r, bp, len(chunk), metrics,
+			func() (planner.SQLQuery, error) {
+				return planner.PlanOneToManyConnectionBatch(relatedTable, remoteColumn, selection, chunk, first, orderBy, whereClause)
+			},
+			func(results []map[string]interface{}) map[string][]map[string]interface{} {
+				return groupByAlias(results, planner.BatchParentAlias)
+			},
+			func(parentID string) (planner.SQLQuery, planner.SQLQuery, error) {
+				parentValue := parentValueByKey[parentID]
+				count, err := planner.BuildOneToManyCountSQL(relatedTable, remoteColumn, parentValue, whereClause)
+				if err != nil {
+					return planner.SQLQuery{}, planner.SQLQuery{}, err
 				}
-				return nil, false, nil
-			}
-			return nil, true, err
+				agg, err := planner.BuildOneToManyAggregateBaseSQL(relatedTable, remoteColumn, parentValue, whereClause)
+				return count, agg, err
+			},
+		)
+		if errors.Is(err, errBatchSkip) {
+			return nil, false, nil
 		}
-		if planned.SQL == "" {
-			continue
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, true, normalizeQueryError(err)
-		}
-		results, err := scanRowsWithExtras(rows, selection, []string{planner.BatchParentAlias})
-		rows.Close()
 		if err != nil {
 			return nil, true, err
 		}
-		if metrics != nil {
-			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationOneToMany)
-		}
-
-		grouped := groupByAlias(results, planner.BatchParentAlias)
-		for parentID, rows := range grouped {
-			parentValue := parentValueByKey[parentID]
-			// Connection plans fetch first+1 rows to compute hasNextPage per parent.
-			hasNext := len(rows) > first
-			if hasNext {
-				rows = rows[:first]
-			}
-
-			countQuery, err := planner.BuildOneToManyCountSQL(
-				relatedTable,
-				rel.RemoteColumn,
-				parentValue,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
-			aggregateBase, err := planner.BuildOneToManyAggregateBaseSQL(
-				relatedTable,
-				rel.RemoteColumn,
-				parentValue,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
-
-			plan := &planner.ConnectionPlan{
-				Count:         countQuery,
-				AggregateBase: aggregateBase,
-				Table:         relatedTable,
-				Columns:       selection,
-				OrderBy:       orderBy,
-				OrderByKey:    orderByKey,
-				CursorColumns: cursorCols,
-				First:         first,
-				Mode:          planner.PaginationModeForward,
-				HasCursor:     false,
-				HasAfter:      false,
-				HasBefore:     false,
-			}
-
-			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext, false)
+		for k, v := range partial {
+			groupedConnections[k] = v
 		}
 	}
 
@@ -3338,99 +3309,45 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentTuples), len(chunks)), relationManyToMany)
 	}
 
-	groupedConnections := make(map[string]map[string]interface{})
 	parentAliases := planner.BatchParentAliases(len(junctionLocalColumns))
+	bp := batchConnectionPlan{
+		table:         relatedTable,
+		selection:     selection,
+		orderBy:       orderBy,
+		orderByKey:    orderByKey,
+		cursorCols:    cursorCols,
+		first:         first,
+		parentAliases: parentAliases,
+		relation:      relationManyToMany,
+	}
+	groupedConnections := make(map[string]map[string]interface{})
 	for _, chunk := range chunks {
-		if metrics != nil {
-			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationManyToMany)
-		}
-		planned, err := planner.PlanManyToManyConnectionBatch(
-			relatedTable,
-			rel.JunctionTable,
-			junctionLocalColumns,
-			junctionRemoteColumns,
-			remoteColumns,
-			selection,
-			chunk,
-			first,
-			orderBy,
-			whereClause,
-		)
-		if err != nil {
-			if errors.Is(err, planner.ErrNoPrimaryKey) {
-				if metrics != nil {
-					metrics.RecordBatchSkipped(p.Context, relationManyToMany, "no_primary_key")
+		partial, err := runBatchConnectionChunks(
+			p.Context, r, bp, len(chunk), metrics,
+			func() (planner.SQLQuery, error) {
+				return planner.PlanManyToManyConnectionBatch(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, selection, chunk, first, orderBy, whereClause)
+			},
+			func(results []map[string]interface{}) map[string][]map[string]interface{} {
+				return groupByAliases(results, parentAliases)
+			},
+			func(parentID string) (planner.SQLQuery, planner.SQLQuery, error) {
+				tuple := parentValueByKey[parentID]
+				count, err := planner.BuildManyToManyCountSQL(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
+				if err != nil {
+					return planner.SQLQuery{}, planner.SQLQuery{}, err
 				}
-				return nil, false, nil
-			}
-			return nil, true, err
+				agg, err := planner.BuildManyToManyAggregateBaseSQL(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
+				return count, agg, err
+			},
+		)
+		if errors.Is(err, errBatchSkip) {
+			return nil, false, nil
 		}
-		if planned.SQL == "" {
-			continue
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, true, normalizeQueryError(err)
-		}
-		results, err := scanRowsWithExtras(rows, selection, parentAliases)
-		rows.Close()
 		if err != nil {
 			return nil, true, err
 		}
-		if metrics != nil {
-			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationManyToMany)
-		}
-
-		grouped := groupByAliases(results, parentAliases)
-		for parentID, rows := range grouped {
-			parentTuple := parentValueByKey[parentID]
-			hasNext := len(rows) > first
-			if hasNext {
-				rows = rows[:first]
-			}
-
-			countQuery, err := planner.BuildManyToManyCountSQL(
-				relatedTable,
-				rel.JunctionTable,
-				junctionLocalColumns,
-				junctionRemoteColumns,
-				remoteColumns,
-				parentTuple.Values,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
-			aggregateBase, err := planner.BuildManyToManyAggregateBaseSQL(
-				relatedTable,
-				rel.JunctionTable,
-				junctionLocalColumns,
-				junctionRemoteColumns,
-				remoteColumns,
-				parentTuple.Values,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
-
-			plan := &planner.ConnectionPlan{
-				Count:         countQuery,
-				AggregateBase: aggregateBase,
-				Table:         relatedTable,
-				Columns:       selection,
-				OrderBy:       orderBy,
-				OrderByKey:    orderByKey,
-				CursorColumns: cursorCols,
-				First:         first,
-				Mode:          planner.PaginationModeForward,
-				HasCursor:     false,
-				HasAfter:      false,
-				HasBefore:     false,
-			}
-
-			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext, false)
+		for k, v := range partial {
+			groupedConnections[k] = v
 		}
 	}
 
@@ -3591,90 +3508,45 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentTuples), len(chunks)), relationEdgeList)
 	}
 
-	groupedConnections := make(map[string]map[string]interface{})
 	parentAliases := planner.BatchParentAliases(len(junctionLocalColumns))
+	bp := batchConnectionPlan{
+		table:         junctionTable,
+		selection:     selection,
+		orderBy:       orderBy,
+		orderByKey:    orderByKey,
+		cursorCols:    cursorCols,
+		first:         first,
+		parentAliases: parentAliases,
+		relation:      relationEdgeList,
+	}
+	groupedConnections := make(map[string]map[string]interface{})
 	for _, chunk := range chunks {
-		if metrics != nil {
-			metrics.RecordBatchParentCount(p.Context, int64(len(chunk)), relationEdgeList)
-		}
-		planned, err := planner.PlanEdgeListConnectionBatch(
-			junctionTable,
-			junctionLocalColumns,
-			selection,
-			chunk,
-			first,
-			orderBy,
-			whereClause,
-		)
-		if err != nil {
-			if errors.Is(err, planner.ErrNoPrimaryKey) {
-				if metrics != nil {
-					metrics.RecordBatchSkipped(p.Context, relationEdgeList, "no_primary_key")
+		partial, err := runBatchConnectionChunks(
+			p.Context, r, bp, len(chunk), metrics,
+			func() (planner.SQLQuery, error) {
+				return planner.PlanEdgeListConnectionBatch(junctionTable, junctionLocalColumns, selection, chunk, first, orderBy, whereClause)
+			},
+			func(results []map[string]interface{}) map[string][]map[string]interface{} {
+				return groupByAliases(results, parentAliases)
+			},
+			func(parentID string) (planner.SQLQuery, planner.SQLQuery, error) {
+				tuple := parentValueByKey[parentID]
+				count, err := planner.BuildEdgeListCountSQL(junctionTable, junctionLocalColumns, tuple.Values, whereClause)
+				if err != nil {
+					return planner.SQLQuery{}, planner.SQLQuery{}, err
 				}
-				return nil, false, nil
-			}
-			return nil, true, err
+				agg, err := planner.BuildEdgeListAggregateBaseSQL(junctionTable, junctionLocalColumns, tuple.Values, whereClause)
+				return count, agg, err
+			},
+		)
+		if errors.Is(err, errBatchSkip) {
+			return nil, false, nil
 		}
-		if planned.SQL == "" {
-			continue
-		}
-
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
-		if err != nil {
-			return nil, true, normalizeQueryError(err)
-		}
-		results, err := scanRowsWithExtras(rows, selection, parentAliases)
-		rows.Close()
 		if err != nil {
 			return nil, true, err
 		}
-		if metrics != nil {
-			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationEdgeList)
-		}
-
-		grouped := groupByAliases(results, parentAliases)
-		for parentID, rows := range grouped {
-			parentTuple := parentValueByKey[parentID]
-			hasNext := len(rows) > first
-			if hasNext {
-				rows = rows[:first]
-			}
-
-			countQuery, err := planner.BuildEdgeListCountSQL(
-				junctionTable,
-				junctionLocalColumns,
-				parentTuple.Values,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
-			aggregateBase, err := planner.BuildEdgeListAggregateBaseSQL(
-				junctionTable,
-				junctionLocalColumns,
-				parentTuple.Values,
-				whereClause,
-			)
-			if err != nil {
-				return nil, true, err
-			}
-
-			plan := &planner.ConnectionPlan{
-				Count:         countQuery,
-				AggregateBase: aggregateBase,
-				Table:         junctionTable,
-				Columns:       selection,
-				OrderBy:       orderBy,
-				OrderByKey:    orderByKey,
-				CursorColumns: cursorCols,
-				First:         first,
-				Mode:          planner.PaginationModeForward,
-				HasCursor:     false,
-				HasAfter:      false,
-				HasBefore:     false,
-			}
-
-			groupedConnections[parentID] = r.buildConnectionResult(p.Context, rows, plan, hasNext, false)
+		for k, v := range partial {
+			groupedConnections[k] = v
 		}
 	}
 

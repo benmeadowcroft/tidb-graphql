@@ -58,7 +58,7 @@ type AggregateColumn struct {
 // PlanAggregateFromBaseSQL builds aggregate SQL over a pre-scoped base query.
 // The base query should define the dataset to aggregate over (filters/joins/etc).
 func PlanAggregateFromBaseSQL(base SQLQuery, selection AggregateSelection) SQLQuery {
-	selectClauses := buildAggregateSelectClauses(selection)
+	selectClauses := SQLClauses(BuildAggregateColumns(selection))
 	query := fmt.Sprintf(
 		"SELECT %s FROM (%s) AS __agg",
 		strings.Join(selectClauses, ", "),
@@ -148,7 +148,7 @@ func PlanRelationshipAggregateBatch(
 		return SQLQuery{}, nil
 	}
 
-	selectClauses := buildAggregateSelectClauses(selection)
+	selectClauses := SQLClauses(BuildAggregateColumns(selection))
 
 	// Add grouping column to select
 	groupCol := sqlutil.QuoteIdentifier(remoteColumn)
@@ -255,12 +255,6 @@ func SQLClauses(columns []AggregateColumn) []string {
 		clauses[i] = col.SQLClause
 	}
 	return clauses
-}
-
-// buildAggregateSelectClauses builds the SELECT clauses for aggregate functions.
-// Deprecated: Use BuildAggregateColumns and SQLClauses instead for type-safe ordering.
-func buildAggregateSelectClauses(selection AggregateSelection) []string {
-	return SQLClauses(BuildAggregateColumns(selection))
 }
 
 // ParseAggregateSelection extracts aggregate column selections from GraphQL AST.

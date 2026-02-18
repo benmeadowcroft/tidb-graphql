@@ -194,7 +194,7 @@ func TestBuildAggregateSelectClauses(t *testing.T) {
 			MinColumns:           []string{"col3"},
 			MaxColumns:           []string{"col4"},
 		}
-		clauses := buildAggregateSelectClauses(selection)
+		clauses := SQLClauses(BuildAggregateColumns(selection))
 		assert.Len(t, clauses, 6)
 		assert.Contains(t, clauses[0], "COUNT(*)")
 		assert.Contains(t, clauses[1], "COUNT(DISTINCT")
@@ -207,7 +207,7 @@ func TestBuildAggregateSelectClauses(t *testing.T) {
 	t.Run("empty selection still includes count", func(t *testing.T) {
 		// COUNT(*) is always included to match PlanAggregate SQL generation
 		selection := AggregateSelection{}
-		clauses := buildAggregateSelectClauses(selection)
+		clauses := SQLClauses(BuildAggregateColumns(selection))
 		assert.Len(t, clauses, 1)
 		assert.Contains(t, clauses[0], "COUNT(*)")
 	})

@@ -49,14 +49,14 @@ func TestTryBatchManyToManyConnection_Chunking(t *testing.T) {
 	state.setParentRows(parentKey, parentRows)
 
 	rel := introspection.Relationship{
-		IsManyToMany:     true,
-		LocalColumn:      "id",
-		RemoteTable:      "tags",
-		RemoteColumn:     "id",
-		JunctionTable:    "user_tags",
-		JunctionLocalFK:  "user_id",
-		JunctionRemoteFK: "tag_id",
-		GraphQLFieldName: "tags",
+		IsManyToMany:            true,
+		LocalColumns:            []string{"id"},
+		RemoteTable:             "tags",
+		RemoteColumns:           []string{"id"},
+		JunctionTable:           "user_tags",
+		JunctionLocalFKColumns:  []string{"user_id"},
+		JunctionRemoteFKColumns: []string{"tag_id"},
+		GraphQLFieldName:        "tags",
 	}
 
 	field := &ast.Field{
@@ -129,11 +129,11 @@ func TestTryBatchEdgeListConnection_Chunking(t *testing.T) {
 	state.setParentRows(parentKey, parentRows)
 
 	rel := introspection.Relationship{
-		IsEdgeList:       true,
-		LocalColumn:      "id",
-		JunctionTable:    "user_tags",
-		JunctionLocalFK:  "user_id",
-		GraphQLFieldName: "userTags",
+		IsEdgeList:             true,
+		LocalColumns:           []string{"id"},
+		JunctionTable:          "user_tags",
+		JunctionLocalFKColumns: []string{"user_id"},
+		GraphQLFieldName:       "userTags",
 	}
 
 	field := &ast.Field{

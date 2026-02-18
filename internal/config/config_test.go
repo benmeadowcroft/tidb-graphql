@@ -233,6 +233,44 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Contains(t, result.Error(), "type_mappings.tinyint1_int_columns")
 	})
 
+	t.Run("valid schema filter patterns", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.SchemaFilters.AllowTables = []string{"*"}
+		cfg.SchemaFilters.DenyTables = []string{"*_intern"}
+		cfg.SchemaFilters.AllowColumns = map[string][]string{
+			"*":      {"*"},
+			"orders": {"id", "status"},
+		}
+		cfg.SchemaFilters.DenyColumns = map[string][]string{
+			"users": {"password_*"},
+		}
+		cfg.SchemaFilters.DenyMutationTables = []string{"audit_*"}
+		cfg.SchemaFilters.DenyMutationColumns = map[string][]string{
+			"users": {"is_admin"},
+		}
+
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+	})
+
+	t.Run("invalid schema filter table glob pattern", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.SchemaFilters.AllowTables = []string{"[bad"}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "schema_filters.allow_tables")
+	})
+
+	t.Run("invalid schema filter column glob pattern", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.SchemaFilters.AllowColumns = map[string][]string{
+			"orders": {"[bad"},
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "schema_filters.allow_columns")
+	})
+
 	t.Run("valid TLS modes", func(t *testing.T) {
 		for _, mode := range []string{"", "off", "skip-verify", "verify-ca", "verify-full"} {
 			cfg := validConfig()

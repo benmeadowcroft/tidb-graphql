@@ -70,9 +70,9 @@ func TestPlanQuery_ListFieldProjectionIncludesRelationshipKey(t *testing.T) {
 				Relationships: []introspection.Relationship{
 					{
 						IsManyToOne:      true,
-						LocalColumn:      "account_id",
+						LocalColumns:     []string{"account_id"},
 						RemoteTable:      "accounts",
-						RemoteColumn:     "id",
+						RemoteColumns:    []string{"id"},
 						GraphQLFieldName: "account",
 					},
 				},
@@ -344,10 +344,10 @@ func TestPlanQuery_RelationshipManyToOne(t *testing.T) {
 
 	field := &ast.Field{Name: &ast.Name{Value: "account"}}
 	plan, err := PlanQuery(dbSchema, field, nil, WithRelationship(RelationshipContext{
-		RelatedTable: dbSchema.Tables[0],
-		RemoteColumn: "id",
-		Value:        42,
-		IsManyToOne:  true,
+		RelatedTable:  dbSchema.Tables[0],
+		RemoteColumns: []string{"id"},
+		Value:         42,
+		IsManyToOne:   true,
 	}))
 	require.NoError(t, err)
 	require.NotNil(t, plan)
@@ -375,10 +375,10 @@ func TestPlanQuery_RelationshipOneToMany(t *testing.T) {
 		"limit":  12,
 		"offset": 4,
 	}, WithRelationship(RelationshipContext{
-		RelatedTable: dbSchema.Tables[0],
-		RemoteColumn: "user_id",
-		Value:        7,
-		IsOneToMany:  true,
+		RelatedTable:  dbSchema.Tables[0],
+		RemoteColumns: []string{"user_id"},
+		Value:         7,
+		IsOneToMany:   true,
 	}))
 	require.Error(t, err)
 	assert.Nil(t, plan)

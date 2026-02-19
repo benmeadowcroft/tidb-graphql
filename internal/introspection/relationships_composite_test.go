@@ -1,6 +1,7 @@
 package introspection
 
 import (
+	"context"
 	"testing"
 
 	"tidb-graphql/internal/naming"
@@ -54,7 +55,7 @@ func TestRebuildRelationshipsWithJunctions_CompositeMappings(t *testing.T) {
 		},
 	}
 
-	if err := RebuildRelationshipsWithJunctions(schema, naming.Default(), junctions); err != nil {
+	if err := RebuildRelationshipsWithJunctions(context.Background(), schema, naming.Default(), junctions); err != nil {
 		t.Fatalf("failed to rebuild relationships: %v", err)
 	}
 

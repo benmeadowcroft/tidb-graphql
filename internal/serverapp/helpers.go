@@ -228,12 +228,15 @@ func connectDB(cfg *config.Config, logger *logging.Logger) (*sql.DB, interface{ 
 	return db, nil, nil
 }
 
-func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string, databaseSource string, dsnPresent bool) error {
+func configureDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string, databaseSource string, dsnPresent bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	db.SetMaxOpenConns(cfg.Database.Pool.MaxOpen)
 	db.SetMaxIdleConns(cfg.Database.Pool.MaxIdle)
 	db.SetConnMaxLifetime(cfg.Database.Pool.MaxLifetime)
 
-	if err := waitForDatabase(cfg, logger, db, effectiveDatabase); err != nil {
+	if err := waitForDatabase(ctx, cfg, logger, db, effectiveDatabase); err != nil {
 		return err
 	}
 
@@ -248,16 +251,19 @@ func configureDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB, e
 	return nil
 }
 
-func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string) error {
+func waitForDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	timeout := cfg.Database.ConnectionTimeout
 	interval := cfg.Database.ConnectionRetryInterval
 
 	// Helper to attempt connection
 	tryConnect := func() error {
 		if cfg.Server.Auth.DBRoleEnabled {
-			return verifyRoleDatabaseAccess(cfg, db, effectiveDatabase)
+			return verifyRoleDatabaseAccess(ctx, cfg, db, effectiveDatabase)
 		}
-		return db.Ping()
+		return db.PingContext(ctx)
 	}
 
 	// If timeout is 0, try once and fail immediately (backward-compatible)
@@ -269,6 +275,9 @@ func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB, eff
 	attempt := 0
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		attempt++
 		err := tryConnect()
 
@@ -295,14 +304,16 @@ func waitForDatabase(cfg *config.Config, logger *logging.Logger, db *sql.DB, eff
 	}
 }
 
-func verifyRoleDatabaseAccess(cfg *config.Config, db *sql.DB, effectiveDatabase string) error {
-	ctx := context.Background()
+func verifyRoleDatabaseAccess(ctx context.Context, cfg *config.Config, db *sql.DB, effectiveDatabase string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to acquire connection: %w", err)
 	}
 	defer func() {
-		_, _ = conn.ExecContext(context.Background(), "SET ROLE DEFAULT")
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "SET ROLE DEFAULT")
 		_ = conn.Close()
 	}()
 
@@ -341,8 +352,11 @@ func buildPlanLimits(cfg *config.Config) *planner.PlanLimits {
 	return nil
 }
 
-func discoverRoles(db *sql.DB, logger *logging.Logger) ([]string, error) {
-	availableRoles, err := introspection.DiscoverRoles(context.Background(), db)
+func discoverRoles(ctx context.Context, db *sql.DB, logger *logging.Logger) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	availableRoles, err := introspection.DiscoverRoles(ctx, db)
 	if err != nil {
 		logger.Error("failed to discover database roles", slog.String("error", err.Error()))
 		return nil, err
@@ -408,8 +422,11 @@ func matchesAnyRolePattern(role string, patterns []string) bool {
 	return false
 }
 
-func validateDBRolePrivileges(db *sql.DB, targetDatabase string, logger *logging.Logger) error {
-	result, err := introspection.ValidateRoleBasedAuthPrivileges(context.Background(), db, targetDatabase)
+func validateDBRolePrivileges(ctx context.Context, db *sql.DB, targetDatabase string, logger *logging.Logger) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := introspection.ValidateRoleBasedAuthPrivileges(ctx, db, targetDatabase)
 	if err != nil {
 		logger.Error("failed to validate database user privileges", slog.String("error", err.Error()))
 		return err
@@ -445,7 +462,7 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string,
 	return queryExecutor
 }
 
-func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, limits *planner.PlanLimits, metrics *observability.SchemaRefreshMetrics, executor dbexec.QueryExecutor, effectiveDatabase string, availableRoles []string) (*schemarefresh.Manager, context.CancelFunc, error) {
+func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, limits *planner.PlanLimits, metrics *observability.SchemaRefreshMetrics, executor dbexec.QueryExecutor, effectiveDatabase string, availableRoles []string) (*schemarefresh.Manager, context.CancelFunc, error) {
 	var roleFromCtx func(context.Context) (string, bool)
 	if cfg.Server.Auth.DBRoleEnabled {
 		roleFromCtx = func(ctx context.Context) (string, bool) {
@@ -453,7 +470,7 @@ func startSchemaManager(cfg *config.Config, logger *logging.Logger, db *sql.DB, 
 			return role.Role, ok && role.Validated
 		}
 	}
-	manager, err := schemarefresh.NewManager(schemarefresh.Config{
+	manager, err := schemarefresh.NewManager(ctx, schemarefresh.Config{
 		DB:                     db,
 		DatabaseName:           effectiveDatabase,
 		Limits:                 limits,
@@ -580,7 +597,7 @@ func buildRouter(cfg *config.Config, logger *logging.Logger, db *sql.DB, graphql
 
 func wrapHTTPHandler(cfg *config.Config, logger *logging.Logger, handler http.Handler) http.Handler {
 	if cfg.Observability.MetricsEnabled || cfg.Observability.TracingEnabled {
-		handler = otelhttp.NewHandler(handler, "tidb-graphql-server",
+		handler = otelhttp.NewHandler(handler, "tidb-graphql-http",
 			otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 		)
 		logger.Info("HTTP instrumentation enabled")

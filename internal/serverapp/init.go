@@ -2,8 +2,22 @@ package serverapp
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const (
+	startupSpanInit         = "tidb.startup.init"
+	startupSpanDBConnect    = "tidb.startup.db_connect"
+	startupSpanDBVerify     = "tidb.startup.db_verify"
+	startupSpanRoleDiscover = "tidb.startup.role_discover"
+	startupSpanRoleValidate = "tidb.startup.role_validate"
 )
 
 // Init initializes all runtime resources. It is idempotent.
@@ -52,6 +66,13 @@ func (a *App) Init(ctx context.Context) error {
 			return tracerProvider.Shutdown(shutdownCtx, a.logger.Logger)
 		})
 	}
+	startupCtx, startupSpan := startStartupSpan(ctx, startupSpanInit)
+	defer func() {
+		if !success {
+			startupSpan.SetAttributes(attribute.Bool("startup.success", false))
+		}
+		startupSpan.End()
+	}()
 
 	a.logger.Info("connecting to TiDB",
 		slog.String("host", a.cfg.Database.Host),
@@ -61,9 +82,17 @@ func (a *App) Init(ctx context.Context) error {
 		slog.Bool("dsn_present", a.dsnPresent),
 	)
 
-	db, dbStatsReg, err := connectDB(a.cfg, a.logger)
-	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
+	var db *sql.DB
+	var dbStatsReg interface{ Unregister() error }
+	if err := runStartupPhase(startupCtx, startupSpanDBConnect, func(context.Context) error {
+		var connectErr error
+		db, dbStatsReg, connectErr = connectDB(a.cfg, a.logger)
+		if connectErr != nil {
+			return fmt.Errorf("failed to connect to database: %w", connectErr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	cleanup.push("database", func(_ context.Context) error {
 		if dbStatsReg != nil {
@@ -74,17 +103,28 @@ func (a *App) Init(ctx context.Context) error {
 		return db.Close()
 	})
 
-	if err := configureDatabase(a.cfg, a.logger, db, a.effectiveDatabase, a.databaseSource, a.dsnPresent); err != nil {
-		return fmt.Errorf("failed to verify database connection: %w", err)
+	if err := runStartupPhase(startupCtx, startupSpanDBVerify, func(phaseCtx context.Context) error {
+		if verifyErr := configureDatabase(phaseCtx, a.cfg, a.logger, db, a.effectiveDatabase, a.databaseSource, a.dsnPresent); verifyErr != nil {
+			return fmt.Errorf("failed to verify database connection: %w", verifyErr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	limits := buildPlanLimits(a.cfg)
 
 	var availableRoles []string
 	if a.cfg.Server.Auth.DBRoleEnabled {
-		availableRoles, err = discoverRoles(db, a.logger)
-		if err != nil {
-			return fmt.Errorf("failed to discover database roles: %w", err)
+		if err := runStartupPhase(startupCtx, startupSpanRoleDiscover, func(phaseCtx context.Context) error {
+			var discoverErr error
+			availableRoles, discoverErr = discoverRoles(phaseCtx, db, a.logger)
+			if discoverErr != nil {
+				return fmt.Errorf("failed to discover database roles: %w", discoverErr)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		availableRoles, err = resolveRoleSchemaTargets(
 			availableRoles,
@@ -100,13 +140,18 @@ func (a *App) Init(ctx context.Context) error {
 			slog.Any("roles", availableRoles),
 		)
 
-		if err := validateDBRolePrivileges(db, a.effectiveDatabase, a.logger); err != nil {
-			return fmt.Errorf("failed to validate database role privileges: %w", err)
+		if err := runStartupPhase(startupCtx, startupSpanRoleValidate, func(phaseCtx context.Context) error {
+			if validateErr := validateDBRolePrivileges(phaseCtx, db, a.effectiveDatabase, a.logger); validateErr != nil {
+				return fmt.Errorf("failed to validate database role privileges: %w", validateErr)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
 
 	queryExecutor := buildQueryExecutor(a.cfg, db, availableRoles, a.effectiveDatabase)
-	manager, schemaCancel, err := startSchemaManager(a.cfg, a.logger, db, limits, schemaRefreshMetrics, queryExecutor, a.effectiveDatabase, availableRoles)
+	manager, schemaCancel, err := startSchemaManager(startupCtx, a.cfg, a.logger, db, limits, schemaRefreshMetrics, queryExecutor, a.effectiveDatabase, availableRoles)
 	if err != nil {
 		return fmt.Errorf("failed to initialize schema refresh manager: %w", err)
 	}
@@ -166,6 +211,30 @@ func (a *App) Init(ctx context.Context) error {
 	a.initialized = true
 	a.stateMu.Unlock()
 
+	startupSpan.SetAttributes(attribute.Bool("startup.success", true))
 	success = true
+	return nil
+}
+
+func startStartupSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tracer := otel.Tracer("tidb-graphql/startup")
+	ctx, span := tracer.Start(ctx, name)
+	return ctx, span
+}
+
+func runStartupPhase(ctx context.Context, name string, run func(context.Context) error) error {
+	phaseCtx, span := startStartupSpan(ctx, name)
+	defer span.End()
+
+	if err := run(phaseCtx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.Bool("startup.success", false))
+		return err
+	}
+	span.SetAttributes(attribute.Bool("startup.success", true))
 	return nil
 }

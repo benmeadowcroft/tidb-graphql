@@ -296,7 +296,7 @@ func buildRoleGraphQLHandler(t *testing.T, testDB *tidbcloud.RoleTestDB, issuerU
 		ValidateRole: true,
 	})
 
-	manager, err := schemarefresh.NewManager(schemarefresh.Config{
+	manager, err := schemarefresh.NewManager(context.Background(), schemarefresh.Config{
 		DB:                testDB.RuntimeDB,
 		DatabaseName:      testDB.DatabaseName,
 		Executor:          executor,

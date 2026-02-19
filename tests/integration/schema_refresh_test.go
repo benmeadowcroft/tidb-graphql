@@ -26,7 +26,7 @@ func TestSchemaRefresh_ReintrospectAfterDDL(t *testing.T) {
 	testDB.LoadSchema(t, "../fixtures/schema_refresh_v1.sql")
 
 	logger := logging.NewLogger(logging.Config{Level: "info", Format: "text"})
-	manager, err := schemarefresh.NewManager(schemarefresh.Config{
+	manager, err := schemarefresh.NewManager(context.Background(), schemarefresh.Config{
 		DB:           testDB.DB,
 		DatabaseName: testDB.DatabaseName,
 		Logger:       logger,

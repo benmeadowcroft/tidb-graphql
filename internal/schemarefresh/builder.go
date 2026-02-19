@@ -52,7 +52,7 @@ func BuildSchema(ctx context.Context, cfg BuildSchemaConfig) (*BuildSchemaResult
 		return nil, fmt.Errorf("failed to introspect database: %w", err)
 	}
 
-	schemafilter.Apply(dbSchema, cfg.Filters)
+	schemafilter.Apply(ctx, dbSchema, cfg.Filters)
 
 	if err := introspection.ApplyTinyInt1TypeOverrides(dbSchema, cfg.TinyInt1BooleanColumns, cfg.TinyInt1IntColumns); err != nil {
 		return nil, fmt.Errorf("failed to apply tinyint(1) type mappings: %w", err)
@@ -66,7 +66,7 @@ func BuildSchema(ctx context.Context, cfg BuildSchemaConfig) (*BuildSchemaResult
 	dbSchema.Junctions = junctions.ToIntrospectionMap()
 
 	namer := naming.New(cfg.Naming, nil)
-	if err := introspection.RebuildRelationshipsWithJunctions(dbSchema, namer, dbSchema.Junctions); err != nil {
+	if err := introspection.RebuildRelationshipsWithJunctions(ctx, dbSchema, namer, dbSchema.Junctions); err != nil {
 		return nil, fmt.Errorf("failed to rebuild relationships: %w", err)
 	}
 	schemanaming.Apply(dbSchema, namer)

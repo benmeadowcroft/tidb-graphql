@@ -8,7 +8,8 @@ GRANT SELECT ON tidb_graphql_tutorial.product_categories TO app_viewer;
 GRANT SELECT ON tidb_graphql_tutorial.orders TO app_viewer;
 GRANT SELECT ON tidb_graphql_tutorial.order_items TO app_viewer;
 
-GRANT SELECT ON tidb_graphql_tutorial.* TO app_admin;
+GRANT SELECT, INSERT, UPDATE, DELETE ON tidb_graphql_tutorial.* TO app_admin;
+
 GRANT SELECT ON tidb_graphql_tutorial.* TO app_introspect;
 GRANT SELECT ON mysql.role_edges TO app_introspect;
 

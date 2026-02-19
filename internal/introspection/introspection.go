@@ -238,23 +238,23 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 }
 
 // RebuildRelationships clears and rebuilds relationship metadata for a schema.
-func RebuildRelationships(schema *Schema) error {
-	return RebuildRelationshipsWithNamer(schema, naming.Default())
+func RebuildRelationships(ctx context.Context, schema *Schema) error {
+	return RebuildRelationshipsWithNamer(ctx, schema, naming.Default())
 }
 
 // RebuildRelationshipsWithNamer clears and rebuilds relationship metadata using a custom namer.
-func RebuildRelationshipsWithNamer(schema *Schema, namer *naming.Namer) error {
+func RebuildRelationshipsWithNamer(ctx context.Context, schema *Schema, namer *naming.Namer) error {
 	if schema == nil {
 		return nil
 	}
 	for i := range schema.Tables {
 		schema.Tables[i].Relationships = nil
 	}
-	return buildRelationships(context.Background(), schema, namer, nil)
+	return buildRelationships(ctx, schema, namer, nil)
 }
 
 // RebuildRelationshipsWithJunctions clears and rebuilds relationship metadata with junction awareness.
-func RebuildRelationshipsWithJunctions(schema *Schema, namer *naming.Namer, junctions JunctionMap) error {
+func RebuildRelationshipsWithJunctions(ctx context.Context, schema *Schema, namer *naming.Namer, junctions JunctionMap) error {
 	if schema == nil {
 		return nil
 	}
@@ -262,7 +262,7 @@ func RebuildRelationshipsWithJunctions(schema *Schema, namer *naming.Namer, junc
 	for i := range schema.Tables {
 		schema.Tables[i].Relationships = nil
 	}
-	return buildRelationships(context.Background(), schema, namer, junctions)
+	return buildRelationships(ctx, schema, namer, junctions)
 }
 
 type tableInfo struct {

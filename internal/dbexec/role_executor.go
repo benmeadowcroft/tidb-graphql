@@ -92,7 +92,7 @@ func (e *RoleExecutor) prepareRoleConn(ctx context.Context) (*sql.Conn, func(), 
 	}
 
 	cleanup := func() {
-		_, _ = conn.ExecContext(context.Background(), "SET ROLE DEFAULT")
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "SET ROLE DEFAULT")
 		_ = conn.Close()
 	}
 

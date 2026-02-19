@@ -23,6 +23,8 @@ go.work
 .env
 .env.test
 *.env.*
+!.env.example
+!**/.env.example
 
 # IDE files
 .vscode/

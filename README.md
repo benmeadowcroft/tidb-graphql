@@ -86,6 +86,7 @@ Use one of these compose scenarios:
 | `quickstart-db-zero` | You want the same quickstart flow but with a remote TiDB Zero database. | [quickstart-db-zero README](examples/compose/quickstart-db-zero/README.md) |
 | `remote-db` | You already have a running TiDB and only need GraphQL. | [remote-db README](examples/compose/remote-db/README.md) |
 | `oidc-roles` | You want local OIDC/JWKS + role-based database auth testing. | [oidc-roles README](examples/compose/oidc-roles/README.md) |
+| `otel` | You want to test OpenTelemetry integration. | [otel README](examples/compose/otel/README.md) |
 
 See [Compose scenarios](examples/compose/README.md) for details.
 

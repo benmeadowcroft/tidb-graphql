@@ -24,7 +24,6 @@ server:
 observability:
   environment: development
   service_name: tidb-graphql
-  service_version: 0.5.0
 
   # Metrics configuration
   metrics_enabled: true

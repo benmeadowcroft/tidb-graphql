@@ -597,7 +597,10 @@ func buildRouter(cfg *config.Config, logger *logging.Logger, db *sql.DB, graphql
 
 func wrapHTTPHandler(cfg *config.Config, logger *logging.Logger, handler http.Handler) http.Handler {
 	if cfg.Observability.MetricsEnabled || cfg.Observability.TracingEnabled {
-		handler = otelhttp.NewHandler(handler, "tidb-graphql-http",
+		handler = otelhttp.NewHandler(handler, "http.server",
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return httpRootSpanName(r)
+			}),
 			otelhttp.WithMessageEvents(otelhttp.ReadEvents, otelhttp.WriteEvents),
 		)
 		logger.Info("HTTP instrumentation enabled")
@@ -624,6 +627,28 @@ func wrapHTTPHandler(cfg *config.Config, logger *logging.Logger, handler http.Ha
 	}
 
 	return handler
+}
+
+func httpRootSpanName(r *http.Request) string {
+	if r == nil {
+		return "HTTP /*"
+	}
+
+	method := strings.TrimSpace(r.Method)
+	if method == "" {
+		method = "HTTP"
+	}
+
+	return method + " " + normalizeHTTPSpanRoute(r.URL.Path)
+}
+
+func normalizeHTTPSpanRoute(rawPath string) string {
+	switch rawPath {
+	case "/", "/graphql", "/health", "/metrics", "/admin/reload-schema":
+		return rawPath
+	default:
+		return "/*"
+	}
 }
 
 func buildServer(cfg *config.Config, logger *logging.Logger, handler http.Handler, serverAddr string) (*http.Server, tlscert.Manager, error) {

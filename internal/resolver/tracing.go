@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -34,4 +35,24 @@ func finishResolverSpan(span trace.Span, err error, outcome string) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 	}
+}
+
+func setMutationResultAttributes(span trace.Span, typename, class, code string) {
+	if span == nil {
+		return
+	}
+	if strings.TrimSpace(typename) == "" {
+		typename = "unknown"
+	}
+	if strings.TrimSpace(class) == "" {
+		class = "unknown"
+	}
+	if strings.TrimSpace(code) == "" {
+		code = "unknown"
+	}
+	span.SetAttributes(
+		attribute.String("graphql.mutation.result.typename", typename),
+		attribute.String("graphql.mutation.result.class", class),
+		attribute.String("graphql.mutation.result.code", code),
+	)
 }

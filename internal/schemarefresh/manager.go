@@ -116,9 +116,9 @@ const (
 	fingerprintModeTiDBStructural  = "tidb_structural"
 	fingerprintModeTiDBLightweight = "tidb_lightweight"
 	fingerprintModeUnknown         = "unknown"
-	refreshSpanStartup             = "tidb.refresh.startup"
-	refreshSpanPoll                = "tidb.refresh.poll"
-	refreshSpanManual              = "tidb.refresh.manual"
+	refreshSpanStartup             = "schema.refresh.startup"
+	refreshSpanPoll                = "schema.refresh.poll"
+	refreshSpanManual              = "schema.refresh.manual"
 )
 
 // NewManager builds the initial schema snapshot and returns a manager.

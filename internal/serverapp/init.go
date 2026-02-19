@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	startupSpanInit         = "tidb.startup.init"
-	startupSpanDBConnect    = "tidb.startup.db_connect"
-	startupSpanDBVerify     = "tidb.startup.db_verify"
-	startupSpanRoleDiscover = "tidb.startup.role_discover"
-	startupSpanRoleValidate = "tidb.startup.role_validate"
+	startupSpanInit         = "startup.init"
+	startupSpanDBConnect    = "startup.db_connect"
+	startupSpanDBVerify     = "startup.db_verify"
+	startupSpanRoleDiscover = "startup.role_discover"
+	startupSpanRoleValidate = "startup.role_validate"
 )
 
 // Init initializes all runtime resources. It is idempotent.

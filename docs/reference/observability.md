@@ -50,6 +50,11 @@ Sampling is controlled with `observability.trace_sample_ratio`:
 - `0.0`: sample no traces
 - `(0.0, 1.0)`: parent-aware ratio sampling
 
+Span naming conventions:
+- HTTP root spans use `METHOD route` (for example `POST /graphql`, `GET /health`).
+- Startup root span: `startup.init` with child spans such as `startup.db_connect`.
+- Schema refresh root spans: `schema.refresh.startup`, `schema.refresh.poll`, `schema.refresh.manual`.
+
 ## SQL commenter
 
 `observability.sqlcommenter_enabled` injects trace context into SQL comments so you can correlate database queries with traces. It requires tracing to be enabled.

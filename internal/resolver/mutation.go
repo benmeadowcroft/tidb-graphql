@@ -642,6 +642,58 @@ func (r *Resolver) primaryKeyArgs() graphql.FieldConfigArgument {
 	}
 }
 
+const (
+	mutationResultClassSuccess        = "success"
+	mutationResultClassTypedFailure   = "typed_failure"
+	mutationResultClassExecutionError = "execution_error"
+
+	mutationResultCodeSuccess             = "success"
+	mutationResultCodeInvalidInput        = "invalid_input"
+	mutationResultCodeUniqueViolation     = "unique_violation"
+	mutationResultCodeForeignKeyViolation = "foreign_key_violation"
+	mutationResultCodeNotNullViolation    = "not_null_violation"
+	mutationResultCodeAccessDenied        = "access_denied"
+	mutationResultCodeNotFound            = "not_found"
+	mutationResultCodeInternal            = "internal"
+	mutationResultCodeUnknown             = "unknown"
+
+	mutationResolverOutcomeTypedFailure = "typed_failure"
+)
+
+type mutationResultTelemetry struct {
+	typename string
+	class    string
+	code     string
+	outcome  string
+}
+
+func mutationSuccessTelemetry(typename string) mutationResultTelemetry {
+	return mutationResultTelemetry{
+		typename: typename,
+		class:    mutationResultClassSuccess,
+		code:     mutationResultCodeSuccess,
+		outcome:  "success",
+	}
+}
+
+func mutationTypedFailureTelemetry(typename, code string) mutationResultTelemetry {
+	return mutationResultTelemetry{
+		typename: typename,
+		class:    mutationResultClassTypedFailure,
+		code:     code,
+		outcome:  mutationResolverOutcomeTypedFailure,
+	}
+}
+
+func mutationExecutionErrorTelemetry() mutationResultTelemetry {
+	return mutationResultTelemetry{
+		typename: "InternalError",
+		class:    mutationResultClassExecutionError,
+		code:     mutationResultCodeUnknown,
+		outcome:  "error",
+	}
+}
+
 func mutationErrorPayload(typename, message string, extra map[string]interface{}) map[string]interface{} {
 	payload := map[string]interface{}{
 		"__typename": typename,
@@ -654,21 +706,28 @@ func mutationErrorPayload(typename, message string, extra map[string]interface{}
 }
 
 func mutationErrToPayload(err error) map[string]interface{} {
+	payload, _ := mutationErrToPayloadAndTelemetry(err)
+	return payload
+}
+
+func mutationErrToPayloadAndTelemetry(err error) (map[string]interface{}, mutationResultTelemetry) {
 	var me *mutationError
 	if !errors.As(err, &me) {
-		return mutationErrorPayload("InternalError", "internal server error", nil)
+		return mutationErrorPayload("InternalError", "internal server error", nil), mutationExecutionErrorTelemetry()
 	}
 	switch me.code {
 	case "invalid_input":
-		return mutationErrorPayload("InputValidationError", me.message, nil)
+		return mutationErrorPayload("InputValidationError", me.message, nil), mutationTypedFailureTelemetry("InputValidationError", mutationResultCodeInvalidInput)
 	case "unique_violation":
-		return mutationErrorPayload("ConflictError", me.message, nil)
-	case "foreign_key_violation", "not_null_violation":
-		return mutationErrorPayload("ConstraintError", me.message, nil)
+		return mutationErrorPayload("ConflictError", me.message, nil), mutationTypedFailureTelemetry("ConflictError", mutationResultCodeUniqueViolation)
+	case "foreign_key_violation":
+		return mutationErrorPayload("ConstraintError", me.message, nil), mutationTypedFailureTelemetry("ConstraintError", mutationResultCodeForeignKeyViolation)
+	case "not_null_violation":
+		return mutationErrorPayload("ConstraintError", me.message, nil), mutationTypedFailureTelemetry("ConstraintError", mutationResultCodeNotNullViolation)
 	case "access_denied":
-		return mutationErrorPayload("PermissionError", me.message, nil)
+		return mutationErrorPayload("PermissionError", me.message, nil), mutationTypedFailureTelemetry("PermissionError", mutationResultCodeAccessDenied)
 	default:
-		return mutationErrorPayload("InternalError", "internal server error", nil)
+		return mutationErrorPayload("InternalError", "internal server error", nil), mutationTypedFailureTelemetry("InternalError", mutationResultCodeInternal)
 	}
 }
 
@@ -687,15 +746,28 @@ func withMutationContextUnion(fn func(p graphql.ResolveParams, mc *MutationConte
 	}
 }
 
-func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[string]bool, _ *graphql.Object) graphql.FieldResolveFn {
+func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[string]bool, successType *graphql.Object) graphql.FieldResolveFn {
 	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (result interface{}, err error) {
+		resultTelemetry := mutationSuccessTelemetry("Create" + r.singularTypeName(table) + "Success")
+		if successType != nil && successType.Name() != "" {
+			resultTelemetry = mutationSuccessTelemetry(successType.Name())
+		}
 		ctx, span := startResolverSpan(p.Context, "graphql.mutation.create",
 			attribute.String("db.table", table.Name),
 			attribute.String("graphql.field.name", p.Info.FieldName),
 		)
 		p.Context = ctx
 		defer func() {
-			finishResolverSpan(span, err, "")
+			finishErr := err
+			if err != nil {
+				_, errTelemetry := mutationErrToPayloadAndTelemetry(err)
+				resultTelemetry = errTelemetry
+				if resultTelemetry.class == mutationResultClassTypedFailure {
+					finishErr = nil
+				}
+			}
+			setMutationResultAttributes(span, resultTelemetry.typename, resultTelemetry.class, resultTelemetry.code)
+			finishResolverSpan(span, finishErr, resultTelemetry.outcome)
 			span.End()
 		}()
 
@@ -744,15 +816,28 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 	})
 }
 
-func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[string]bool, pkCols []introspection.Column, _ *graphql.Object) graphql.FieldResolveFn {
+func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[string]bool, pkCols []introspection.Column, successType *graphql.Object) graphql.FieldResolveFn {
 	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (result interface{}, err error) {
+		resultTelemetry := mutationSuccessTelemetry("Update" + r.singularTypeName(table) + "Success")
+		if successType != nil && successType.Name() != "" {
+			resultTelemetry = mutationSuccessTelemetry(successType.Name())
+		}
 		ctx, span := startResolverSpan(p.Context, "graphql.mutation.update",
 			attribute.String("db.table", table.Name),
 			attribute.String("graphql.field.name", p.Info.FieldName),
 		)
 		p.Context = ctx
 		defer func() {
-			finishResolverSpan(span, err, "")
+			finishErr := err
+			if err != nil {
+				_, errTelemetry := mutationErrToPayloadAndTelemetry(err)
+				resultTelemetry = errTelemetry
+				if resultTelemetry.class == mutationResultClassTypedFailure {
+					finishErr = nil
+				}
+			}
+			setMutationResultAttributes(span, resultTelemetry.typename, resultTelemetry.class, resultTelemetry.code)
+			finishResolverSpan(span, finishErr, resultTelemetry.outcome)
 			span.End()
 		}()
 
@@ -826,15 +911,28 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 	})
 }
 
-func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []introspection.Column, _ *graphql.Object) graphql.FieldResolveFn {
+func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []introspection.Column, successType *graphql.Object) graphql.FieldResolveFn {
 	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (result interface{}, err error) {
+		resultTelemetry := mutationSuccessTelemetry("Delete" + r.singularTypeName(table) + "Success")
+		if successType != nil && successType.Name() != "" {
+			resultTelemetry = mutationSuccessTelemetry(successType.Name())
+		}
 		ctx, span := startResolverSpan(p.Context, "graphql.mutation.delete",
 			attribute.String("db.table", table.Name),
 			attribute.String("graphql.field.name", p.Info.FieldName),
 		)
 		p.Context = ctx
 		defer func() {
-			finishResolverSpan(span, err, "")
+			finishErr := err
+			if err != nil {
+				_, errTelemetry := mutationErrToPayloadAndTelemetry(err)
+				resultTelemetry = errTelemetry
+				if resultTelemetry.class == mutationResultClassTypedFailure {
+					finishErr = nil
+				}
+			}
+			setMutationResultAttributes(span, resultTelemetry.typename, resultTelemetry.class, resultTelemetry.code)
+			finishResolverSpan(span, finishErr, resultTelemetry.outcome)
 			span.End()
 		}()
 
@@ -858,6 +956,7 @@ func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []intros
 			return nil, err
 		}
 		if rowsAffected == 0 {
+			resultTelemetry = mutationTypedFailureTelemetry("NotFoundError", mutationResultCodeNotFound)
 			return mutationErrorPayload("NotFoundError", "row not found", nil), nil
 		}
 

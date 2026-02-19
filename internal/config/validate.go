@@ -527,6 +527,39 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 		}
 	}
 
+	adminTokenConfigured := strings.TrimSpace(s.Admin.AuthToken) != "" || strings.TrimSpace(s.Admin.AuthTokenFile) != ""
+	if s.Admin.SchemaReloadEnabled {
+		if !s.Auth.OIDCEnabled && !adminTokenConfigured {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   "server.admin.auth_token",
+				Message: "admin schema reload requires auth token when OIDC is disabled",
+				Hint:    "set server.admin.auth_token or server.admin.auth_token_file, or enable server.auth.oidc_enabled",
+			})
+		}
+	} else if adminTokenConfigured {
+		result.Warnings = append(result.Warnings, ValidationWarning{
+			Field:   "server.admin.schema_reload_enabled",
+			Message: "admin auth token is configured but schema reload endpoint is disabled",
+			Hint:    "set server.admin.schema_reload_enabled=true to enable the endpoint",
+		})
+	}
+
+	if s.Auth.OIDCEnabled && adminTokenConfigured {
+		result.Warnings = append(result.Warnings, ValidationWarning{
+			Field:   "server.admin.auth_token",
+			Message: "admin auth token is ignored when OIDC is enabled",
+			Hint:    "remove server.admin.auth_token/server.admin.auth_token_file or disable OIDC",
+		})
+	}
+
+	if strings.TrimSpace(s.Admin.AuthToken) != "" && strings.TrimSpace(s.Admin.AuthTokenFile) != "" {
+		result.Warnings = append(result.Warnings, ValidationWarning{
+			Field:   "server.admin.auth_token",
+			Message: "both admin auth_token and auth_token_file are set; inline token takes precedence",
+			Hint:    "remove one of the values to avoid ambiguity",
+		})
+	}
+
 	// TLS validation
 	validTLSModes := map[string]bool{"": true, "off": true, "auto": true, "file": true}
 	if !validTLSModes[s.TLSMode] {

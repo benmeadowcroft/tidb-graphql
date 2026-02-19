@@ -64,7 +64,15 @@ If you omit the token, requests should be rejected.
 
 ## 5) Protect admin endpoints too
 
-When OIDC is enabled, `/admin/reload-schema` is protected automatically.
+Enable admin schema reload explicitly:
+
+```yaml
+server:
+  admin:
+    schema_reload_enabled: true
+```
+
+When OIDC is enabled and the admin endpoint is enabled, `/admin/reload-schema` is protected automatically.
 
 ---
 # Related Docs

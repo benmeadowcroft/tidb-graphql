@@ -78,6 +78,12 @@ server:
     role_schema_exclude: []          # Role glob patterns to exclude from role-specific schemas
     role_schema_max_roles: 64        # Hard cap on number of role-specific schemas built
 
+  # Admin endpoint controls
+  admin:
+    schema_reload_enabled: false    # Expose /admin/reload-schema (disabled by default)
+    auth_token: ""                  # Required in X-Admin-Token when schema_reload_enabled=true and OIDC is disabled
+    auth_token_file: ""             # Path to file containing auth token (use @- for stdin)
+
   # Rate limiting (disabled by default)
   rate_limit_enabled: false    # Enable global rate limiting for all endpoints
   rate_limit_rps: 0            # Requests per second (set > 0 when enabled)

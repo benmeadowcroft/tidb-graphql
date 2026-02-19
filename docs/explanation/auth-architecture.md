@@ -8,7 +8,7 @@ Authentication and authorization in TiDB GraphQL are intentionally thin. The ser
 2) **Role activation** extracts the configured claim (`server.auth.db_role_claim_name`) and, when enabled, applies `SET ROLE` for the request.
 3) **Resolvers** execute SQL under that role. TiDB enforces table/column access.
 
-This keeps policy centralized in the database while still letting the API enforce authentication consistently for GraphQL and admin endpoints.
+This keeps policy centralized in the database while still letting the API enforce authentication for GraphQL and admin endpoints (OIDC or shared admin token, depending on configuration).
 
 ## Role discovery and validation
 

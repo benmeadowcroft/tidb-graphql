@@ -558,6 +558,11 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 }
 
 func buildAdminHandler(cfg *config.Config, logger *logging.Logger, manager *schemarefresh.Manager, securityMetrics *observability.SecurityMetrics) (http.Handler, error) {
+	if !cfg.Server.Admin.SchemaReloadEnabled {
+		logger.Info("admin schema reload endpoint disabled")
+		return nil, nil
+	}
+
 	var adminHandler http.Handler = http.HandlerFunc(schemaReloadHandler(manager, securityMetrics))
 	if cfg.Server.Auth.OIDCEnabled {
 		adminAuthMiddleware, err := middleware.OIDCAuthMiddleware(oidcAuthConfig(cfg), logger, securityMetrics)
@@ -565,11 +570,19 @@ func buildAdminHandler(cfg *config.Config, logger *logging.Logger, manager *sche
 			return nil, err
 		}
 		adminHandler = adminAuthMiddleware(adminHandler)
-		logger.Info("admin endpoints require authentication")
-	} else {
-		logger.Warn("admin endpoints are not authenticated - consider enabling OIDC authentication")
+		logger.Info("admin schema reload endpoint enabled with OIDC authentication")
+		return middleware.LoggingMiddleware(logger)(adminHandler), nil
 	}
-	return adminHandler, nil
+
+	adminAuthMiddleware, err := middleware.AdminTokenAuthMiddleware(middleware.AdminTokenAuthConfig{
+		Token: cfg.Server.Admin.AuthToken,
+	})
+	if err != nil {
+		return nil, err
+	}
+	adminHandler = adminAuthMiddleware(adminHandler)
+	logger.Info("admin schema reload endpoint enabled with shared token authentication")
+	return middleware.LoggingMiddleware(logger)(adminHandler), nil
 }
 
 func buildRouter(cfg *config.Config, logger *logging.Logger, db *sql.DB, graphqlHandler http.Handler, adminHandler http.Handler, meterProvider *observability.MeterProvider) *http.ServeMux {
@@ -584,7 +597,9 @@ func buildRouter(cfg *config.Config, logger *logging.Logger, db *sql.DB, graphql
 	})
 
 	mux.HandleFunc("/health", healthHandler(db, cfg.Server.HealthCheckTimeout))
-	mux.Handle("/admin/reload-schema", adminHandler)
+	if cfg.Server.Admin.SchemaReloadEnabled && adminHandler != nil {
+		mux.Handle("/admin/reload-schema", adminHandler)
+	}
 
 	if cfg.Observability.MetricsEnabled && meterProvider != nil {
 		mux.Handle("/metrics", promhttp.Handler())

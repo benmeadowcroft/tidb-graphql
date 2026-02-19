@@ -140,6 +140,13 @@ type SearchConfig struct {
 	VectorMaxTopK      int  `mapstructure:"vector_max_top_k"`
 }
 
+// AdminConfig controls administrative endpoint exposure and authentication.
+type AdminConfig struct {
+	SchemaReloadEnabled bool   `mapstructure:"schema_reload_enabled"`
+	AuthToken           string `mapstructure:"auth_token"`
+	AuthTokenFile       string `mapstructure:"auth_token_file"`
+}
+
 // ServerConfig holds HTTP server parameters.
 type ServerConfig struct {
 	Port                     int           `mapstructure:"port"`
@@ -152,6 +159,7 @@ type ServerConfig struct {
 	GraphiQLEnabled          bool          `mapstructure:"graphiql_enabled"`
 	Search                   SearchConfig  `mapstructure:"search"`
 	Auth                     AuthConfig    `mapstructure:"auth"`
+	Admin                    AdminConfig   `mapstructure:"admin"`
 	RateLimitEnabled         bool          `mapstructure:"rate_limit_enabled"`
 	RateLimitRPS             float64       `mapstructure:"rate_limit_rps"`
 	RateLimitBurst           int           `mapstructure:"rate_limit_burst"`

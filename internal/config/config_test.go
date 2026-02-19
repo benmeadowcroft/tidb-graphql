@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -552,6 +553,89 @@ func TestConfig_Validate(t *testing.T) {
 		assert.True(t, result.HasErrors())
 		assert.Contains(t, result.Error(), "oidc_issuer_url")
 		assert.Contains(t, result.Error(), "oidc_audience")
+	})
+
+	t.Run("admin schema reload enabled without OIDC requires token", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Admin.SchemaReloadEnabled = true
+		cfg.Server.Auth.OIDCEnabled = false
+		cfg.Server.Admin.AuthToken = ""
+		cfg.Server.Admin.AuthTokenFile = ""
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "server.admin.auth_token")
+	})
+
+	t.Run("admin schema reload enabled without OIDC and with token is valid", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Admin.SchemaReloadEnabled = true
+		cfg.Server.Auth.OIDCEnabled = false
+		cfg.Server.Admin.AuthToken = "secret-token"
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+	})
+
+	t.Run("admin schema reload enabled with OIDC does not require token", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Admin.SchemaReloadEnabled = true
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.OIDCIssuerURL = "https://issuer.test"
+		cfg.Server.Auth.OIDCAudience = "aud"
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+	})
+
+	t.Run("disabled admin schema reload with token warns", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Admin.SchemaReloadEnabled = false
+		cfg.Server.Admin.AuthToken = "secret-token"
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+		found := false
+		for _, warning := range result.Warnings {
+			if warning.Field == "server.admin.schema_reload_enabled" {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "expected warning for disabled admin endpoint with configured token")
+	})
+
+	t.Run("admin auth token and token file both set warns", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Admin.SchemaReloadEnabled = true
+		cfg.Server.Auth.OIDCEnabled = false
+		cfg.Server.Admin.AuthToken = "secret-token"
+		cfg.Server.Admin.AuthTokenFile = "/tmp/admin-token"
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+		found := false
+		for _, warning := range result.Warnings {
+			if warning.Field == "server.admin.auth_token" && strings.Contains(warning.Message, "both admin auth_token and auth_token_file are set") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "expected warning for both admin auth token and token file")
+	})
+
+	t.Run("OIDC enabled with admin token warns token is ignored", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Admin.SchemaReloadEnabled = true
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.OIDCIssuerURL = "https://issuer.test"
+		cfg.Server.Auth.OIDCAudience = "aud"
+		cfg.Server.Admin.AuthToken = "secret-token"
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+		found := false
+		for _, warning := range result.Warnings {
+			if warning.Field == "server.admin.auth_token" && strings.Contains(warning.Message, "ignored when OIDC is enabled") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "expected warning that admin token is ignored when OIDC is enabled")
 	})
 
 	t.Run("negative GraphQL limits invalid", func(t *testing.T) {

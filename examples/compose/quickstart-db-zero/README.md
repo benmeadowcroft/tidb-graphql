@@ -33,6 +33,29 @@ You should see a vector search root field for reviews (for example `searchProduc
 - `vector` (explicit vector mode)
 - `queryText` (auto-embedding text mode)
 
+## Admin reload endpoint demo (`X-Admin-Token`)
+
+This scenario enables `/admin/reload-schema` and requires `X-Admin-Token`.
+
+Without token (expected `401`):
+
+```bash
+curl -i -X POST http://localhost:8080/admin/reload-schema
+```
+
+With token (expected `200`):
+
+```bash
+curl -i -X POST http://localhost:8080/admin/reload-schema \
+  -H "X-Admin-Token: quickstart-db-zero-admin-token"
+```
+
+Optional: change the demo token before startup in:
+
+```bash
+examples/compose/quickstart-db-zero/config/tidb-graphql/tidb-graphql.example.yaml
+```
+
 ## Useful flags
 
 - `scripts/tidb-zero-prepare --status`

@@ -54,6 +54,8 @@ server:
   schema_refresh_min_interval: 30s
   schema_refresh_max_interval: 5m
   graphiql_enabled: false
+  admin:
+    schema_reload_enabled: false
 
 observability:
   service_name: tidb-graphql

@@ -51,6 +51,11 @@ func AuthFromContext(ctx context.Context) (AuthContext, bool) {
 	return auth, ok
 }
 
+// WithAuthContext attaches validated authentication details to the request context.
+func WithAuthContext(ctx context.Context, auth AuthContext) context.Context {
+	return context.WithValue(ctx, authContextKey{}, auth)
+}
+
 // OIDCAuthMiddleware validates Bearer tokens when enabled.
 // Optional securityMetrics parameter enables security monitoring; pass nil to disable.
 func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetrics ...*observability.SecurityMetrics) (func(http.Handler) http.Handler, error) {
@@ -215,7 +220,7 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 				}
 			}
 
-			ctx := context.WithValue(r.Context(), authContextKey{}, AuthContext{
+			ctx := WithAuthContext(r.Context(), AuthContext{
 				Subject:  subject,
 				Issuer:   cfg.IssuerURL,
 				Audience: aud,

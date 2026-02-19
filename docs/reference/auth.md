@@ -1,6 +1,6 @@
 # Auth reference
 
-This server supports OIDC/JWKS authentication and optional database role activation.
+This server supports OIDC/JWKS authentication, optional database role activation, and token-protected admin endpoints.
 
 ## OIDC/JWKS
 
@@ -14,10 +14,11 @@ Key settings:
 
 When enabled:
 - `/graphql` requires a Bearer token.
-- `/admin/reload-schema` requires a Bearer token.
 
 There is no `oidc_allow_insecure_http` option; issuer URLs must be HTTPS.
 `server.auth.oidc_issuer_url` and `server.auth.oidc_audience` are required when OIDC is enabled.
+
+For `/admin/reload-schema`, OIDC is used only when `server.admin.schema_reload_enabled` is true.
 
 ## Database role authorization
 
@@ -40,3 +41,16 @@ based on include/exclude filters. Unknown role schemas are rejected (fail-closed
 Claim rules:
 - The claim value must be a string.
 - Missing or invalid roles are rejected (fail-closed).
+
+## Admin endpoint auth
+
+Key settings:
+
+- `server.admin.schema_reload_enabled` (bool; default `false`)
+- `server.admin.auth_token` (string; shared secret for `X-Admin-Token` when OIDC is disabled)
+- `server.admin.auth_token_file` (string; file path containing admin token)
+
+Behavior:
+- When disabled, `/admin/reload-schema` is not exposed.
+- When enabled and OIDC is enabled, `/admin/reload-schema` requires a Bearer token.
+- When enabled and OIDC is disabled, `/admin/reload-schema` requires `X-Admin-Token`.

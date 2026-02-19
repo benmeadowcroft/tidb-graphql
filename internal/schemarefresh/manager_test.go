@@ -10,12 +10,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
+	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/logging"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type structuralFingerprintFixture struct {
@@ -405,4 +411,167 @@ func TestHandlerForContext_DefaultWhenRoleSchemasDisabled(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status mismatch: got %d want %d", rec.Code, http.StatusAccepted)
 	}
+}
+
+type refreshMetricsRecorder struct {
+	ctx          context.Context
+	calls        int
+	lastTrigger  string
+	lastSuccess  bool
+	lastDuration time.Duration
+	lastMode     string
+}
+
+func (r *refreshMetricsRecorder) RecordRefresh(ctx context.Context, duration time.Duration, success bool, trigger string, fingerprintMode string) {
+	r.ctx = ctx
+	r.calls++
+	r.lastTrigger = trigger
+	r.lastSuccess = success
+	r.lastDuration = duration
+	r.lastMode = fingerprintMode
+}
+
+func TestRefreshNowContext_ForwardsContextToMetrics(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("TABLE_TYPE IN \\('BASE TABLE', 'VIEW'\\)").
+		WithArgs("testdb").
+		WillReturnError(fmt.Errorf("structural fingerprint failed"))
+	mock.ExpectQuery("CREATE_TIME").
+		WithArgs("testdb").
+		WillReturnError(fmt.Errorf("lightweight fingerprint failed"))
+
+	metricsRecorder := &refreshMetricsRecorder{}
+	manager := &Manager{
+		db:           db,
+		databaseName: "testdb",
+		logger:       testLogger(),
+		metrics:      metricsRecorder,
+	}
+
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "manual-refresh")
+	if err := manager.RefreshNowContext(ctx); err == nil {
+		t.Fatalf("expected RefreshNowContext to fail when fingerprint queries fail")
+	}
+
+	if metricsRecorder.calls != 1 {
+		t.Fatalf("expected exactly one metrics call, got %d", metricsRecorder.calls)
+	}
+	if got := metricsRecorder.ctx.Value(ctxKey{}); got != "manual-refresh" {
+		t.Fatalf("expected forwarded context value %q, got %v", "manual-refresh", got)
+	}
+	if metricsRecorder.lastTrigger != "manual" {
+		t.Fatalf("expected trigger manual, got %q", metricsRecorder.lastTrigger)
+	}
+	if metricsRecorder.lastSuccess {
+		t.Fatalf("expected failed refresh metrics recording")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestBuildSnapshotSet_EmitsSnapshotSpanPerRole(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	emptyTables := sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"})
+	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
+		WithArgs("testdb").
+		WillReturnRows(emptyTables)
+
+	mock.ExpectExec(regexp.QuoteMeta("SET ROLE NONE")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("SET ROLE `viewer`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
+		WithArgs("testdb").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"}))
+	mock.ExpectExec(regexp.QuoteMeta("SET ROLE DEFAULT")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	tp.RegisterSpanProcessor(recorder)
+	originalTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		otel.SetTracerProvider(originalTP)
+	})
+
+	manager := &Manager{
+		db:           db,
+		databaseName: "testdb",
+		logger:       testLogger(),
+		roleSchemas:  []string{"viewer"},
+		executor:     dbexec.NewStandardExecutor(db),
+	}
+
+	_, err = manager.buildSnapshotSet(context.Background(), fingerprintDetails{
+		Value: "fingerprint",
+		Mode:  fingerprintModeTiDBStructural,
+	})
+	if err != nil {
+		t.Fatalf("buildSnapshotSet failed: %v", err)
+	}
+
+	snapshotSpans := make([]sdktrace.ReadOnlySpan, 0)
+	for _, span := range recorder.Ended() {
+		if span.Name() == "schema.build_snapshot" {
+			snapshotSpans = append(snapshotSpans, span)
+		}
+	}
+	if len(snapshotSpans) != 2 {
+		t.Fatalf("expected 2 schema.build_snapshot spans, got %d", len(snapshotSpans))
+	}
+
+	roles := map[string]bool{}
+	for _, span := range snapshotSpans {
+		attrs := span.Attributes()
+		role := readSpanStringAttr(attrs, "schema.role")
+		success := readSpanBoolAttr(attrs, "schema.build.success")
+		mode := readSpanStringAttr(attrs, "schema.fingerprint_mode")
+		roles[role] = true
+		if !success {
+			t.Fatalf("expected schema.build.success=true for role %s", role)
+		}
+		if mode != fingerprintModeTiDBStructural {
+			t.Fatalf("expected schema.fingerprint_mode=%s, got %s", fingerprintModeTiDBStructural, mode)
+		}
+	}
+	if !roles["default"] || !roles["viewer"] {
+		t.Fatalf("expected spans for roles default and viewer, got %#v", roles)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func readSpanStringAttr(attrs []attribute.KeyValue, key string) string {
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			return attr.Value.AsString()
+		}
+	}
+	return ""
+}
+
+func readSpanBoolAttr(attrs []attribute.KeyValue, key string) bool {
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			return attr.Value.AsBool()
+		}
+	}
+	return false
 }

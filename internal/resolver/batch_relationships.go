@@ -9,6 +9,7 @@ import (
 	"tidb-graphql/internal/planner"
 
 	"github.com/graphql-go/graphql"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func oneToManyMappingColumns(rel introspection.Relationship) (localColumn string, remoteColumn string, err error) {
@@ -615,7 +616,18 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	return r.buildConnectionResult(p.Context, nil, nil, false, false), true, nil
 }
 
-func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, fkValues []interface{}) (map[string]interface{}, bool, error) {
+func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspection.Table, rel introspection.Relationship, fkValues []interface{}) (result map[string]interface{}, ok bool, err error) {
+	outcome := ""
+	ctx, span := startResolverSpan(p.Context, "graphql.batch.many_to_one",
+		attribute.String("db.table", table.Name),
+		attribute.String("relation_type", relationManyToOne),
+	)
+	defer func() {
+		finishResolverSpan(span, err, outcome)
+		span.End()
+	}()
+	p.Context = ctx
+
 	metrics := graphQLMetricsFromContext(p.Context)
 
 	state, ok := getBatchState(p.Context)
@@ -623,6 +635,8 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		if metrics != nil {
 			metrics.RecordBatchSkipped(p.Context, relationManyToOne, "no_batch_state")
 		}
+		span.SetAttributes(attribute.String("graphql.batch.skip_reason", "no_batch_state"))
+		outcome = "skipped"
 		return nil, false, nil
 	}
 
@@ -631,6 +645,8 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		if metrics != nil {
 			metrics.RecordBatchSkipped(p.Context, relationManyToOne, "missing_parent_key")
 		}
+		span.SetAttributes(attribute.String("graphql.batch.skip_reason", "missing_parent_key"))
+		outcome = "skipped"
 		return nil, false, nil
 	}
 
@@ -639,6 +655,8 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		if metrics != nil {
 			metrics.RecordBatchSkipped(p.Context, relationManyToOne, "missing_parent_rows")
 		}
+		span.SetAttributes(attribute.String("graphql.batch.skip_reason", "missing_parent_rows"))
+		outcome = "skipped"
 		return nil, false, nil
 	}
 
@@ -676,12 +694,16 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		parentFields[i] = graphQLFieldNameForColumn(table, colName)
 	}
 	parentTuples := uniqueParentTuples(parentRows, parentFields)
+	span.SetAttributes(attribute.Int("graphql.batch.parent_count", len(parentTuples)))
 	if len(parentTuples) == 0 {
 		state.setChildRows(relKey, map[string][]map[string]interface{}{})
+		span.SetAttributes(attribute.String("graphql.batch.skip_reason", "no_parent_tuples"))
+		outcome = "skipped"
 		return nil, true, nil
 	}
 
 	chunks := chunkParentTuples(parentTuples, batchMaxInClause)
+	span.SetAttributes(attribute.Int("graphql.batch.chunk_count", len(chunks)))
 	if metrics != nil {
 		metrics.RecordBatchQueriesSaved(p.Context, listBatchQueriesSaved(len(parentTuples), len(chunks)), relationManyToOne)
 	}

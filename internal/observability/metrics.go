@@ -17,8 +17,6 @@ type GraphQLMetrics struct {
 	requestCounter    metric.Int64Counter
 	errorCounter      metric.Int64Counter
 	activeRequests    metric.Int64UpDownCounter
-	queryDepth        metric.Int64Histogram
-	resultsCount      metric.Int64Histogram
 	batchParentCount  metric.Int64Histogram
 	batchResultRows   metric.Int64Histogram
 	batchCacheHits    metric.Int64Counter
@@ -62,22 +60,6 @@ func InitGraphQLMetrics() (*GraphQLMetrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create active requests counter: %w", err)
-	}
-
-	queryDepth, err := meter.Int64Histogram(
-		"graphql.query.depth",
-		metric.WithDescription("Depth of GraphQL queries"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create query depth histogram: %w", err)
-	}
-
-	resultsCount, err := meter.Int64Histogram(
-		"graphql.results.count",
-		metric.WithDescription("Number of results returned by GraphQL queries"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create results count histogram: %w", err)
 	}
 
 	batchParentCount, err := meter.Int64Histogram(
@@ -133,8 +115,6 @@ func InitGraphQLMetrics() (*GraphQLMetrics, error) {
 		requestCounter:    requestCounter,
 		errorCounter:      errorCounter,
 		activeRequests:    activeRequests,
-		queryDepth:        queryDepth,
-		resultsCount:      resultsCount,
 		batchParentCount:  batchParentCount,
 		batchResultRows:   batchResultRows,
 		batchCacheHits:    batchCacheHits,
@@ -163,20 +143,6 @@ func (m *GraphQLMetrics) RecordRequest(ctx context.Context, duration time.Durati
 			attribute.String("operation_type", operationType),
 		))
 	}
-}
-
-// RecordQueryDepth records the depth of a GraphQL query
-func (m *GraphQLMetrics) RecordQueryDepth(ctx context.Context, depth int64, operationType string) {
-	m.queryDepth.Record(ctx, depth, metric.WithAttributes(
-		attribute.String("operation_type", operationType),
-	))
-}
-
-// RecordResultsCount records the number of results returned
-func (m *GraphQLMetrics) RecordResultsCount(ctx context.Context, count int64, operationType string) {
-	m.resultsCount.Record(ctx, count, metric.WithAttributes(
-		attribute.String("operation_type", operationType),
-	))
 }
 
 func (m *GraphQLMetrics) RecordBatchParentCount(ctx context.Context, count int64, relationType string) {

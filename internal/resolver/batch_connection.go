@@ -7,6 +7,8 @@ import (
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/observability"
 	"tidb-graphql/internal/planner"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // batchConnectionPlan carries the per-relationship metadata that is constant
@@ -47,8 +49,19 @@ func runBatchConnectionChunks(
 	chunkFn func() (planner.SQLQuery, error),
 	groupFn func(results []map[string]interface{}) map[string][]map[string]interface{},
 	perParentFn func(parentID string) (planner.SQLQuery, planner.SQLQuery, error),
-) (map[string]map[string]interface{}, error) {
-	groupedConnections := make(map[string]map[string]interface{})
+) (groupedConnections map[string]map[string]interface{}, err error) {
+	outcome := ""
+	ctx, span := startResolverSpan(ctx, "graphql.batch.connection",
+		attribute.String("db.table", bp.table.Name),
+		attribute.String("relation_type", bp.relation),
+		attribute.Int("graphql.batch.parent_count", chunkCount),
+	)
+	defer func() {
+		finishResolverSpan(span, err, outcome)
+		span.End()
+	}()
+
+	groupedConnections = make(map[string]map[string]interface{})
 
 	if metrics != nil {
 		metrics.RecordBatchParentCount(ctx, int64(chunkCount), bp.relation)
@@ -59,6 +72,8 @@ func runBatchConnectionChunks(
 			if metrics != nil {
 				metrics.RecordBatchSkipped(ctx, bp.relation, "no_primary_key")
 			}
+			span.SetAttributes(attribute.String("graphql.batch.skip_reason", "no_primary_key"))
+			outcome = "skipped"
 			return nil, errBatchSkip
 		}
 		return nil, err
@@ -76,6 +91,7 @@ func runBatchConnectionChunks(
 	if err != nil {
 		return nil, err
 	}
+	span.SetAttributes(attribute.Int("graphql.batch.result_rows", len(results)))
 	if metrics != nil {
 		metrics.RecordBatchResultRows(ctx, int64(len(results)), bp.relation)
 	}

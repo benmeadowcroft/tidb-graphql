@@ -190,6 +190,7 @@ type ObservabilityConfig struct {
 	Environment         string        `mapstructure:"environment"`
 	MetricsEnabled      bool          `mapstructure:"metrics_enabled"`
 	TracingEnabled      bool          `mapstructure:"tracing_enabled"`
+	TraceSampleRatio    float64       `mapstructure:"trace_sample_ratio"`
 	SQLCommenterEnabled bool          `mapstructure:"sqlcommenter_enabled"` // Inject trace context into SQL queries
 	Logging             LoggingConfig `mapstructure:"logging"`
 

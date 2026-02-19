@@ -592,6 +592,13 @@ func (o *ObservabilityConfig) validate(result *ValidationResult) {
 		})
 	}
 
+	if o.TraceSampleRatio < 0 || o.TraceSampleRatio > 1 {
+		result.Errors = append(result.Errors, ValidationError{
+			Field:   "observability.trace_sample_ratio",
+			Message: fmt.Sprintf("trace_sample_ratio must be between 0.0 and 1.0, got %v", o.TraceSampleRatio),
+		})
+	}
+
 	// OTLP protocol validation
 	o.OTLP.validate("observability.otlp", result)
 

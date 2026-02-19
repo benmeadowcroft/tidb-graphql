@@ -287,6 +287,7 @@ func defineFlags() {
 		pflag.String("observability.environment", "", "Environment name (dev, staging, prod)")
 		pflag.Bool("observability.metrics_enabled", false, "Enable metrics collection")
 		pflag.Bool("observability.tracing_enabled", false, "Enable distributed tracing")
+		pflag.Float64("observability.trace_sample_ratio", 0, "Trace sampling ratio from 0.0 to 1.0")
 		pflag.Bool("observability.sqlcommenter_enabled", false, "Inject trace context into SQL queries")
 
 		// Logging flags (under observability)
@@ -412,6 +413,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("observability.environment", "development")
 	v.SetDefault("observability.metrics_enabled", true)
 	v.SetDefault("observability.tracing_enabled", false)
+	v.SetDefault("observability.trace_sample_ratio", 1.0)
 	v.SetDefault("observability.sqlcommenter_enabled", true) // Enable by default when tracing is on
 
 	// Logging defaults (under observability)

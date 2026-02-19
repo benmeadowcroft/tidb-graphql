@@ -26,6 +26,7 @@ Examples:
 - `server.graphql_max_depth` → `TIGQL_SERVER_GRAPHQL_MAX_DEPTH`
 - `server.auth.oidc_enabled` → `TIGQL_SERVER_AUTH_OIDC_ENABLED`
 - `observability.otlp.endpoint` → `TIGQL_OBSERVABILITY_OTLP_ENDPOINT`
+- `observability.trace_sample_ratio` → `TIGQL_OBSERVABILITY_TRACE_SAMPLE_RATIO`
 
 See `docs/how-to/config-precedence.md` for precedence rules.
 
@@ -257,6 +258,7 @@ TLS/HTTPS:
 - `observability.environment` (string, default: `development`)
 - `observability.metrics_enabled` (bool, default: `true`)
 - `observability.tracing_enabled` (bool, default: `false`)
+- `observability.trace_sample_ratio` (float, default: `1.0`; valid range: `0.0` to `1.0`)
 - `observability.sqlcommenter_enabled` (bool, default: `true`; requires tracing)
 
 Logging:

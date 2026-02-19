@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
+	"go.opentelemetry.io/otel/attribute"
 
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
@@ -687,7 +688,16 @@ func withMutationContextUnion(fn func(p graphql.ResolveParams, mc *MutationConte
 }
 
 func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[string]bool, _ *graphql.Object) graphql.FieldResolveFn {
-	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
+	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (result interface{}, err error) {
+		ctx, span := startResolverSpan(p.Context, "graphql.mutation.create",
+			attribute.String("db.table", table.Name),
+			attribute.String("graphql.field.name", p.Info.FieldName),
+		)
+		p.Context = ctx
+		defer func() {
+			finishResolverSpan(span, err, "")
+			span.End()
+		}()
 
 		inputArg, ok := p.Args["input"].(map[string]interface{})
 		if !ok {
@@ -707,7 +717,7 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 			return nil, err
 		}
 
-		result, err := mc.Tx().ExecContext(p.Context, query.SQL, query.Args...)
+		execResult, err := mc.Tx().ExecContext(p.Context, query.SQL, query.Args...)
 		if err != nil {
 			return nil, normalizeMutationError(err)
 		}
@@ -716,7 +726,7 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 		if len(pkCols) == 0 {
 			return nil, nil
 		}
-		pkValues, err := resolveInsertPKValues(table, pkCols, inputArg, result)
+		pkValues, err := resolveInsertPKValues(table, pkCols, inputArg, execResult)
 		if err != nil {
 			return nil, err
 		}
@@ -735,7 +745,17 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 }
 
 func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[string]bool, pkCols []introspection.Column, _ *graphql.Object) graphql.FieldResolveFn {
-	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
+	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (result interface{}, err error) {
+		ctx, span := startResolverSpan(p.Context, "graphql.mutation.update",
+			attribute.String("db.table", table.Name),
+			attribute.String("graphql.field.name", p.Info.FieldName),
+		)
+		p.Context = ctx
+		defer func() {
+			finishResolverSpan(span, err, "")
+			span.End()
+		}()
+
 		entityFieldName := r.mutationEntityFieldName(table)
 
 		pkValues, err := pkValuesFromArgs(table, pkCols, p.Args)
@@ -781,12 +801,12 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 			return nil, err
 		}
 
-		result, err := mc.Tx().ExecContext(p.Context, planned.SQL, planned.Args...)
+		execResult, err := mc.Tx().ExecContext(p.Context, planned.SQL, planned.Args...)
 		if err != nil {
 			return nil, normalizeMutationError(err)
 		}
 
-		rowsAffected, err := result.RowsAffected()
+		rowsAffected, err := execResult.RowsAffected()
 		if err != nil {
 			return nil, err
 		}
@@ -807,7 +827,16 @@ func (r *Resolver) makeUpdateResolver(table introspection.Table, updatable map[s
 }
 
 func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []introspection.Column, _ *graphql.Object) graphql.FieldResolveFn {
-	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (interface{}, error) {
+	return withMutationContextUnion(func(p graphql.ResolveParams, mc *MutationContext) (result interface{}, err error) {
+		ctx, span := startResolverSpan(p.Context, "graphql.mutation.delete",
+			attribute.String("db.table", table.Name),
+			attribute.String("graphql.field.name", p.Info.FieldName),
+		)
+		p.Context = ctx
+		defer func() {
+			finishResolverSpan(span, err, "")
+			span.End()
+		}()
 
 		pkValues, err := pkValuesFromArgs(table, pkCols, p.Args)
 		if err != nil {
@@ -819,12 +848,12 @@ func (r *Resolver) makeDeleteResolver(table introspection.Table, pkCols []intros
 			return nil, err
 		}
 
-		result, err := mc.Tx().ExecContext(p.Context, planned.SQL, planned.Args...)
+		execResult, err := mc.Tx().ExecContext(p.Context, planned.SQL, planned.Args...)
 		if err != nil {
 			return nil, normalizeMutationError(err)
 		}
 
-		rowsAffected, err := result.RowsAffected()
+		rowsAffected, err := execResult.RowsAffected()
 		if err != nil {
 			return nil, err
 		}

@@ -141,9 +141,10 @@ func initTracing(cfg *config.Config, logger *logging.Logger) (*observability.Tra
 	)
 
 	tracerProvider, err := observability.InitTracerProvider(observability.Config{
-		ServiceName:    cfg.Observability.ServiceName,
-		ServiceVersion: cfg.Observability.ServiceVersion,
-		Environment:    cfg.Observability.Environment,
+		ServiceName:      cfg.Observability.ServiceName,
+		ServiceVersion:   cfg.Observability.ServiceVersion,
+		Environment:      cfg.Observability.Environment,
+		TraceSampleRatio: cfg.Observability.TraceSampleRatio,
 		OTLPConfig: observability.OTLPExporterConfig{
 			Endpoint:          tracesConfig.Endpoint,
 			Protocol:          tracesConfig.Protocol,

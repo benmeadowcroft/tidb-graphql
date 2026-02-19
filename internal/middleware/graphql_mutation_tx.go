@@ -9,8 +9,6 @@ import (
 	"tidb-graphql/internal/resolver"
 
 	"github.com/graphql-go/graphql/language/ast"
-	"github.com/graphql-go/graphql/language/parser"
-	"github.com/graphql-go/graphql/language/source"
 )
 
 // MutationTransactionMiddleware wraps GraphQL mutations in a single transaction.
@@ -38,7 +36,6 @@ func MutationTransactionMiddleware(executor dbexec.QueryExecutor) func(http.Hand
 				next.ServeHTTP(w, r)
 				return
 			}
-
 
 			tx, err := executor.BeginTx(r.Context())
 			if err != nil {
@@ -82,37 +79,12 @@ func resolveOperationType(query, operationName string) (string, error) {
 		return "", nil
 	}
 
-	doc, err := parser.Parse(parser.ParseParams{
-		Source: source.NewSource(&source.Source{
-			Body: []byte(query),
-			Name: "graphql",
-		}),
-	})
+	metadata, err := extractQueryMetadata(query, operationName)
 	if err != nil {
 		return "", err
 	}
-
-	var first *ast.OperationDefinition
-	ops := 0
-	for _, def := range doc.Definitions {
-		op, ok := def.(*ast.OperationDefinition)
-		if !ok {
-			continue
-		}
-		ops++
-		if first == nil {
-			first = op
-		}
-		if operationName != "" && op.Name != nil && op.Name.Value == operationName {
-			return op.Operation, nil
-		}
-	}
-
-	if operationName != "" {
+	if metadata == nil || metadata.operationType == "" {
 		return "", nil
 	}
-	if ops == 1 && first != nil {
-		return first.Operation, nil
-	}
-	return "", nil
+	return metadata.operationType, nil
 }

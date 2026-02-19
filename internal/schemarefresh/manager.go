@@ -65,10 +65,6 @@ type Config struct {
 	RoleFromCtx            func(context.Context) (string, bool)
 }
 
-type schemaRefreshMetricsRecorder interface {
-	RecordRefresh(ctx context.Context, duration time.Duration, success bool, trigger string, fingerprintMode string)
-}
-
 // Manager maintains and refreshes schema snapshots.
 type Manager struct {
 	db                     *sql.DB
@@ -76,7 +72,7 @@ type Manager struct {
 	limits                 *planner.PlanLimits
 	defaultLimit           int
 	logger                 *logging.Logger
-	metrics                schemaRefreshMetricsRecorder
+	recordRefreshFn        func(context.Context, time.Duration, bool, string, string)
 	minInterval            time.Duration
 	maxInterval            time.Duration
 	graphiQL               bool
@@ -143,13 +139,17 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	componentLogger := cfg.Logger.WithFields(slog.String("component", "schema_refresh"))
+	var recordRefreshFn func(context.Context, time.Duration, bool, string, string)
+	if cfg.Metrics != nil {
+		recordRefreshFn = cfg.Metrics.RecordRefresh
+	}
 	manager := &Manager{
 		db:                     cfg.DB,
 		databaseName:           cfg.DatabaseName,
 		limits:                 cfg.Limits,
 		defaultLimit:           cfg.DefaultLimit,
 		logger:                 componentLogger,
-		metrics:                cfg.Metrics,
+		recordRefreshFn:        recordRefreshFn,
 		minInterval:            minInterval,
 		maxInterval:            maxInterval,
 		graphiQL:               cfg.GraphiQL,
@@ -797,13 +797,13 @@ func nextInterval(current, minInterval, maxInterval time.Duration) time.Duration
 }
 
 func (m *Manager) recordRefresh(ctx context.Context, duration time.Duration, success bool, trigger string, fingerprintMode string) {
-	if m.metrics == nil {
+	if m.recordRefreshFn == nil {
 		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	m.metrics.RecordRefresh(ctx, duration, success, trigger, defaultOrUnknownMode(fingerprintMode))
+	m.recordRefreshFn(ctx, duration, success, trigger, defaultOrUnknownMode(fingerprintMode))
 }
 
 func combineComponentHashes(componentHashes map[string]string) string {

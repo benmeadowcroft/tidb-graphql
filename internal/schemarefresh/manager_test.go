@@ -447,10 +447,10 @@ func TestRefreshNowContext_ForwardsContextToMetrics(t *testing.T) {
 
 	metricsRecorder := &refreshMetricsRecorder{}
 	manager := &Manager{
-		db:           db,
-		databaseName: "testdb",
-		logger:       testLogger(),
-		metrics:      metricsRecorder,
+		db:              db,
+		databaseName:    "testdb",
+		logger:          testLogger(),
+		recordRefreshFn: metricsRecorder.RecordRefresh,
 	}
 
 	type ctxKey struct{}

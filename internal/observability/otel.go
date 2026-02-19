@@ -28,10 +28,11 @@ import (
 
 // Config holds OpenTelemetry configuration
 type Config struct {
-	ServiceName    string
-	ServiceVersion string
-	Environment    string
-	OTLPConfig     OTLPExporterConfig
+	ServiceName      string
+	ServiceVersion   string
+	Environment      string
+	TraceSampleRatio float64
+	OTLPConfig       OTLPExporterConfig
 }
 
 // OTLPExporterConfig holds OTLP exporter configuration options
@@ -317,7 +318,7 @@ func InitTracerProvider(cfg Config) (*TracerProvider, error) {
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
 		sdktrace.WithBatcher(traceExporter),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()), // Sample all traces (adjust for production)
+		sdktrace.WithSampler(traceSamplerForRatio(cfg.TraceSampleRatio)),
 	)
 
 	// Set global tracer provider
@@ -326,6 +327,17 @@ func InitTracerProvider(cfg Config) (*TracerProvider, error) {
 	return &TracerProvider{
 		provider: provider,
 	}, nil
+}
+
+func traceSamplerForRatio(ratio float64) sdktrace.Sampler {
+	switch {
+	case ratio <= 0:
+		return sdktrace.NeverSample()
+	case ratio >= 1:
+		return sdktrace.AlwaysSample()
+	default:
+		return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
+	}
 }
 
 // Shutdown gracefully shuts down the tracer provider

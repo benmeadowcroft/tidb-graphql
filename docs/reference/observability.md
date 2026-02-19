@@ -16,10 +16,6 @@ TiDB GraphQL supports metrics, tracing, logging, and SQL commenter through OpenT
 - `graphql.errors.total` (counter)
   - labels: `operation_type`
 - `graphql.requests.active` (updown counter)
-- `graphql.query.depth` (histogram)
-  - labels: `operation_type`
-- `graphql.results.count` (histogram)
-  - labels: `operation_type`
 
 ## Schema refresh metrics
 
@@ -49,6 +45,15 @@ TiDB GraphQL supports metrics, tracing, logging, and SQL commenter through OpenT
 ## Tracing
 
 Tracing is enabled with `observability.tracing_enabled`. When enabled, HTTP, GraphQL, and SQL spans are emitted via OTLP.
+Sampling is controlled with `observability.trace_sample_ratio`:
+- `1.0`: sample all traces
+- `0.0`: sample no traces
+- `(0.0, 1.0)`: parent-aware ratio sampling
+
+Span naming conventions:
+- HTTP root spans use `METHOD route` (for example `POST /graphql`, `GET /health`).
+- Startup root span: `startup.init` with child spans such as `startup.db_connect`.
+- Schema refresh root spans: `schema.refresh.startup`, `schema.refresh.poll`, `schema.refresh.manual`.
 
 ## SQL commenter
 

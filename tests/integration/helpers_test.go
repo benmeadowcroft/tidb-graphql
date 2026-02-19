@@ -16,12 +16,14 @@ import (
 	"testing"
 	"time"
 
+	"tidb-graphql/internal/config"
 	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/schemafilter"
 	"tidb-graphql/internal/schemarefresh"
+	"tidb-graphql/internal/serverapp"
 	"tidb-graphql/internal/testutil/tidbcloud"
 
 	"github.com/graphql-go/graphql"
@@ -81,20 +83,177 @@ func startTestServer(t *testing.T, binaryName string, port int, extraEnv ...stri
 	return cmd, cleanup
 }
 
+func startTestApp(t *testing.T, port int, extraEnv ...string) (*serverapp.App, <-chan error, func()) {
+	t.Helper()
+
+	env := mergeEnv(baseServerEnv(), append([]string{fmt.Sprintf("TIGQL_SERVER_PORT=%d", port)}, extraEnv...)...)
+	cfg := buildTestConfigFromEnv(port, env)
+
+	validationResult := cfg.Validate()
+	require.False(t, validationResult.HasErrors(), "test app config should validate: %v", validationResult.Errors)
+
+	logger, loggerProvider, err := serverapp.InitLogger(cfg)
+	require.NoError(t, err)
+
+	app, err := serverapp.New(cfg, logger)
+	require.NoError(t, err)
+	app.AttachLoggerProvider(loggerProvider)
+
+	err = app.Init(context.Background())
+	require.NoError(t, err)
+
+	serverErrors, err := app.Start()
+	require.NoError(t, err)
+
+	waitForHealthy(t, port, serverErrors)
+
+	cleanup := func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+		defer cancel()
+		_ = app.Shutdown(shutdownCtx)
+	}
+	t.Cleanup(cleanup)
+
+	return app, serverErrors, cleanup
+}
+
 func waitForHealthyWithLogs(t *testing.T, port int, stdout, stderr *bytes.Buffer, env []string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", port))
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return
-			}
-		}
+	if err := waitForHTTPStatus(port, "/health", http.StatusOK, 10*time.Second, 50*time.Millisecond, nil); err == nil {
+		return
 	}
 	t.Fatalf("Server did not become ready within 10 seconds.\n%s", formatServerDebugInfo(stdout, stderr, env))
+}
+
+func waitForHealthy(t *testing.T, port int, serverErrors <-chan error) {
+	t.Helper()
+	if err := waitForHTTPStatus(port, "/health", http.StatusOK, 10*time.Second, 50*time.Millisecond, serverErrors); err == nil {
+		return
+	}
+	t.Fatalf("Server did not become ready within 10 seconds on port %d", port)
+}
+
+func waitForHTTPStatus(port int, path string, expectedStatus int, timeout, interval time.Duration, serverErrors <-chan error) error {
+	client := &http.Client{Timeout: 300 * time.Millisecond}
+	url := fmt.Sprintf("http://localhost:%d%s", port, path)
+	deadline := time.Now().Add(timeout)
+
+	for {
+		if serverErrors != nil {
+			select {
+			case err := <-serverErrors:
+				if err == nil {
+					return fmt.Errorf("server stopped unexpectedly while waiting for %s", path)
+				}
+				return fmt.Errorf("server failed while waiting for %s: %w", path, err)
+			default:
+			}
+		}
+
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == expectedStatus {
+				return nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for %s to return %d", path, expectedStatus)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func buildTestConfigFromEnv(port int, env []string) *config.Config {
+	values := map[string]string{}
+	for _, kv := range env {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		values[parts[0]] = parts[1]
+	}
+
+	metricsEnabled := false
+	if raw, ok := values["TIGQL_OBSERVABILITY_METRICS_ENABLED"]; ok {
+		enabled, err := strconv.ParseBool(raw)
+		if err == nil {
+			metricsEnabled = enabled
+		}
+	}
+
+	logFormat := values["TIGQL_OBSERVABILITY_LOGGING_FORMAT"]
+	if strings.TrimSpace(logFormat) == "" {
+		logFormat = "text"
+	}
+
+	return &config.Config{
+		Database: config.DatabaseConfig{
+			Host:     values["TIGQL_DATABASE_HOST"],
+			Port:     atoiDefault(values["TIGQL_DATABASE_PORT"], 4000),
+			User:     values["TIGQL_DATABASE_USER"],
+			Password: values["TIGQL_DATABASE_PASSWORD"],
+			Database: values["TIGQL_DATABASE_DATABASE"],
+			TLS: config.DatabaseTLSConfig{
+				Mode: values["TIGQL_DATABASE_TLS_MODE"],
+			},
+			Pool: config.PoolConfig{
+				MaxOpen:     10,
+				MaxIdle:     5,
+				MaxLifetime: 30 * time.Minute,
+			},
+			ConnectionTimeout:       10 * time.Second,
+			ConnectionRetryInterval: 200 * time.Millisecond,
+		},
+		Server: config.ServerConfig{
+			Port:                     port,
+			GraphQLDefaultLimit:      100,
+			SchemaRefreshMinInterval: time.Second,
+			SchemaRefreshMaxInterval: 5 * time.Second,
+			GraphiQLEnabled:          false,
+			Search: config.SearchConfig{
+				VectorRequireIndex: true,
+				VectorMaxTopK:      100,
+			},
+			ReadTimeout:        10 * time.Second,
+			WriteTimeout:       10 * time.Second,
+			IdleTimeout:        30 * time.Second,
+			ShutdownTimeout:    30 * time.Second,
+			HealthCheckTimeout: 5 * time.Second,
+			TLSMode:            "off",
+		},
+		Observability: config.ObservabilityConfig{
+			ServiceName:    "tidb-graphql",
+			ServiceVersion: "test",
+			Environment:    "integration",
+			MetricsEnabled: metricsEnabled,
+			TracingEnabled: false,
+			Logging: config.LoggingConfig{
+				Level:          "info",
+				Format:         logFormat,
+				ExportsEnabled: false,
+			},
+		},
+		SchemaFilters: schemafilter.Config{},
+		TypeMappings: config.TypeMappingsConfig{
+			UUIDColumns:            map[string][]string{},
+			TinyInt1BooleanColumns: map[string][]string{},
+			TinyInt1IntColumns:     map[string][]string{},
+		},
+		Naming: naming.DefaultConfig(),
+	}
+}
+
+func atoiDefault(raw string, fallback int) int {
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func openCloudDB(t *testing.T) *sql.DB {

@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestInitMeterProvider(t *testing.T) {
@@ -55,8 +57,6 @@ func TestInitMetrics(t *testing.T) {
 	require.NotNil(t, metrics.requestCounter, "Request counter should be initialized")
 	require.NotNil(t, metrics.errorCounter, "Error counter should be initialized")
 	require.NotNil(t, metrics.activeRequests, "Active requests counter should be initialized")
-	require.NotNil(t, metrics.queryDepth, "Query depth metric should be initialized")
-	require.NotNil(t, metrics.resultsCount, "Results count metric should be initialized")
 }
 
 func TestBuildTLSConfig_FileNotFound(t *testing.T) {
@@ -94,4 +94,52 @@ func TestBuildTLSConfig_MissingClientKeyPair(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "OTLP TLS client cert and key must both be set")
+}
+
+func TestTraceSamplerForRatio_Boundaries(t *testing.T) {
+	never := traceSamplerForRatio(0)
+	always := traceSamplerForRatio(1)
+
+	decisionNever := never.ShouldSample(sdktrace.SamplingParameters{
+		ParentContext: context.Background(),
+		TraceID:       trace.TraceID{1},
+		Name:          "test",
+	}).Decision
+	assert.Equal(t, sdktrace.Drop, decisionNever)
+
+	decisionAlways := always.ShouldSample(sdktrace.SamplingParameters{
+		ParentContext: context.Background(),
+		TraceID:       trace.TraceID{2},
+		Name:          "test",
+	}).Decision
+	assert.Equal(t, sdktrace.RecordAndSample, decisionAlways)
+}
+
+func TestTraceSamplerForRatio_ParentAwareMidRange(t *testing.T) {
+	sampler := traceSamplerForRatio(0.5)
+
+	parentSampled := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{3},
+		SpanID:     trace.SpanID{1},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	}))
+	decisionSampledParent := sampler.ShouldSample(sdktrace.SamplingParameters{
+		ParentContext: parentSampled,
+		TraceID:       trace.TraceID{4},
+		Name:          "child",
+	}).Decision
+	assert.Equal(t, sdktrace.RecordAndSample, decisionSampledParent)
+
+	parentNotSampled := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{5},
+		SpanID:  trace.SpanID{2},
+		Remote:  true,
+	}))
+	decisionUnsampledParent := sampler.ShouldSample(sdktrace.SamplingParameters{
+		ParentContext: parentNotSampled,
+		TraceID:       trace.TraceID{6},
+		Name:          "child",
+	}).Decision
+	assert.Equal(t, sdktrace.Drop, decisionUnsampledParent)
 }

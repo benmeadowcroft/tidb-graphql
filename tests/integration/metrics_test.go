@@ -4,11 +4,9 @@
 package integration
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -26,10 +24,8 @@ func TestMetricsEndpoint(t *testing.T) {
 
 	testDB := tidbcloud.NewTestDB(t)
 
-	// Build the server binary
-	cmd, _ := startTestServer(
+	_, _, _ = startTestApp(
 		t,
-		"../../bin/tidb-graphql-metrics-test",
 		18081,
 		fmt.Sprintf("TIGQL_DATABASE_DATABASE=%s", testDB.DatabaseName),
 		"TIGQL_OBSERVABILITY_METRICS_ENABLED=true",
@@ -38,16 +34,7 @@ func TestMetricsEndpoint(t *testing.T) {
 
 	// Test 1: Verify /metrics endpoint exists and returns Prometheus format
 	t.Run("metrics endpoint accessible", func(t *testing.T) {
-		resp, err := http.Get("http://localhost:18081/metrics")
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode, "Metrics endpoint should return 200")
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		metricsOutput := string(body)
+		metricsOutput := fetchMetrics(t, 18081)
 
 		// Verify Prometheus format (should contain HELP and TYPE comments)
 		assert.Contains(t, metricsOutput, "# HELP", "Should contain Prometheus HELP comments")
@@ -57,29 +44,20 @@ func TestMetricsEndpoint(t *testing.T) {
 	// Test 2: Verify HTTP instrumentation metrics
 	t.Run("http instrumentation metrics", func(t *testing.T) {
 		// Make a request to generate HTTP metrics
-			resp, err := http.Get("http://localhost:18081/health")
-			require.NoError(t, err)
-			resp.Body.Close()
-
-		// Wait a bit for metrics to be recorded
-		time.Sleep(100 * time.Millisecond)
-
-		// Fetch metrics
-		resp, err = http.Get("http://localhost:18081/metrics")
+		resp, err := http.Get("http://localhost:18081/health")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		resp.Body.Close()
 
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
+		metricsOutput := waitForMetrics(t, 18081, 2*time.Second, func(output string) bool {
+			// The exact metric names depend on otelhttp version, but should include http_ prefix.
+			return strings.Contains(output, "http_server") ||
+				strings.Contains(output, "http_request") ||
+				strings.Contains(output, "target_info")
+		})
 
-		metricsOutput := string(body)
-
-		// Verify HTTP metrics from otelhttp are present
-		// The exact metric names depend on otelhttp version, but should include http_ prefix
 		hasHttpMetrics := strings.Contains(metricsOutput, "http_server") ||
 			strings.Contains(metricsOutput, "http_request") ||
 			strings.Contains(metricsOutput, "target_info")
-
 		assert.True(t, hasHttpMetrics, "Should contain HTTP instrumentation metrics")
 	})
 
@@ -95,18 +73,10 @@ func TestMetricsEndpoint(t *testing.T) {
 		require.NoError(t, err)
 		resp.Body.Close()
 
-		// Wait for metrics to be recorded
-		time.Sleep(100 * time.Millisecond)
-
-		// Fetch metrics
-		resp, err = http.Get("http://localhost:18081/metrics")
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		metricsOutput := string(body)
+		metricsOutput := waitForMetrics(t, 18081, 2*time.Second, func(output string) bool {
+			return strings.Contains(output, "graphql_request_duration") &&
+				strings.Contains(output, "graphql_requests_total")
+		})
 
 		// Verify custom GraphQL metrics are present
 		assert.Contains(t, metricsOutput, "graphql_request_duration", "Should contain GraphQL request duration metric")
@@ -116,15 +86,9 @@ func TestMetricsEndpoint(t *testing.T) {
 	// Test 4: Verify database instrumentation metrics
 	t.Run("database instrumentation metrics", func(t *testing.T) {
 		// Database connection should already be established by server startup
-		// Fetch metrics
-		resp, err := http.Get("http://localhost:18081/metrics")
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-
-		metricsOutput := string(body)
+		metricsOutput := waitForMetrics(t, 18081, 2*time.Second, func(output string) bool {
+			return strings.Contains(output, "db_sql") || strings.Contains(output, "sql")
+		})
 
 		// Verify database metrics from otelsql are present
 		hasDatabaseMetrics := strings.Contains(metricsOutput, "db_sql") ||
@@ -133,26 +97,34 @@ func TestMetricsEndpoint(t *testing.T) {
 		assert.True(t, hasDatabaseMetrics, "Should contain database instrumentation metrics")
 	})
 
-	// Gracefully stop the server
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+}
 
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
-		t.Logf("Failed to send interrupt signal: %v", err)
+func fetchMetrics(t *testing.T, port int) string {
+	t.Helper()
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/metrics", port))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Metrics endpoint should return 200")
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return string(body)
+}
+
+func waitForMetrics(t *testing.T, port int, timeout time.Duration, predicate func(string) bool) string {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	latest := ""
+	for {
+		latest = fetchMetrics(t, port)
+		if predicate(latest) {
+			return latest
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected metrics condition was not met within %s", timeout)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-
-	// Wait for graceful shutdown
-	doneChan := make(chan error, 1)
-	go func() {
-		doneChan <- cmd.Wait()
-	}()
-
-	select {
-	case <-doneChan:
-		// Server stopped successfully
-	case <-ctx.Done():
-		// Force kill if graceful shutdown takes too long
-		cmd.Process.Kill()
-	}
-
 }

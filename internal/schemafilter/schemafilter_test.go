@@ -15,7 +15,7 @@ func TestApply_AllowsAllByDefault(t *testing.T) {
 		},
 	}
 
-	Apply(schema, Config{})
+	Apply(t.Context(), schema, Config{})
 
 	if len(schema.Tables) != 2 {
 		t.Fatalf("expected all tables to remain, got %d", len(schema.Tables))
@@ -58,7 +58,7 @@ func TestApply_TableAndColumnFilters(t *testing.T) {
 		},
 	}
 
-	Apply(schema, cfg)
+	Apply(t.Context(), schema, cfg)
 
 	if len(schema.Tables) != 1 || schema.Tables[0].Name != "users" {
 		t.Fatalf("expected only users table to remain, got %+v", schema.Tables)
@@ -110,7 +110,7 @@ func TestApply_RemovesForeignKeysAndRelationshipsForFilteredColumns(t *testing.T
 		},
 	}
 
-	Apply(schema, cfg)
+	Apply(t.Context(), schema, cfg)
 
 	posts := findTable(schema, "posts")
 	if posts == nil {
@@ -153,7 +153,7 @@ func TestApply_FiltersOrderByOptionsWithIndexes(t *testing.T) {
 		},
 	}
 
-	Apply(schema, cfg)
+	Apply(t.Context(), schema, cfg)
 
 	table := schema.Tables[0]
 	orderBy := planner.OrderByOptions(table)
@@ -173,7 +173,7 @@ func TestApply_ScanViewsEnabled(t *testing.T) {
 		},
 	}
 
-	Apply(schema, Config{})
+	Apply(t.Context(), schema, Config{})
 	if len(schema.Tables) != 1 || schema.Tables[0].Name != "users" {
 		t.Fatalf("expected views to be skipped by default, got %+v", schema.Tables)
 	}
@@ -185,7 +185,7 @@ func TestApply_ScanViewsEnabled(t *testing.T) {
 		},
 	}
 
-	Apply(schema, Config{ScanViewsEnabled: true, AllowTables: []string{"*"}})
+	Apply(t.Context(), schema, Config{ScanViewsEnabled: true, AllowTables: []string{"*"}})
 	if len(schema.Tables) != 2 {
 		t.Fatalf("expected views to be included when scan_views_enabled is true, got %+v", schema.Tables)
 	}

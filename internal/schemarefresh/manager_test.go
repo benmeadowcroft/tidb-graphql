@@ -10,12 +10,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
+	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/logging"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type structuralFingerprintFixture struct {
@@ -209,6 +215,16 @@ func TestRefreshOnce_NoChange_BacksOff(t *testing.T) {
 	}
 	defer db.Close()
 
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	tp.RegisterSpanProcessor(recorder)
+	originalTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		otel.SetTracerProvider(originalTP)
+	})
+
 	fixture := structuralFingerprintFixture{
 		tables: [][]string{
 			{"alpha", "BASE TABLE"},
@@ -254,6 +270,20 @@ func TestRefreshOnce_NoChange_BacksOff(t *testing.T) {
 
 	if interval <= manager.minInterval {
 		t.Fatalf("expected backoff interval > min interval, got %v", interval)
+	}
+	pollSpan := findSpanByName(recorder.Ended(), refreshSpanPoll)
+	if pollSpan == nil {
+		t.Fatalf("expected %s span", refreshSpanPoll)
+	}
+	pollAttrs := pollSpan.Attributes()
+	if got := readSpanStringAttr(pollAttrs, "schema.refresh.trigger"); got != "poll" {
+		t.Fatalf("expected schema.refresh.trigger=poll, got %q", got)
+	}
+	if got := readSpanStringAttr(pollAttrs, "schema.refresh.outcome"); got != "no_change" {
+		t.Fatalf("expected schema.refresh.outcome=no_change, got %q", got)
+	}
+	if !readSpanBoolAttr(pollAttrs, "schema.refresh.success") {
+		t.Fatalf("expected schema.refresh.success=true")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -405,4 +435,282 @@ func TestHandlerForContext_DefaultWhenRoleSchemasDisabled(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status mismatch: got %d want %d", rec.Code, http.StatusAccepted)
 	}
+}
+
+type refreshMetricsRecorder struct {
+	ctx          context.Context
+	calls        int
+	lastTrigger  string
+	lastSuccess  bool
+	lastDuration time.Duration
+	lastMode     string
+}
+
+func (r *refreshMetricsRecorder) RecordRefresh(ctx context.Context, duration time.Duration, success bool, trigger string, fingerprintMode string) {
+	r.ctx = ctx
+	r.calls++
+	r.lastTrigger = trigger
+	r.lastSuccess = success
+	r.lastDuration = duration
+	r.lastMode = fingerprintMode
+}
+
+func TestRefreshNowContext_ForwardsContextToMetrics(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	tp.RegisterSpanProcessor(recorder)
+	originalTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		otel.SetTracerProvider(originalTP)
+	})
+
+	mock.ExpectQuery("TABLE_TYPE IN \\('BASE TABLE', 'VIEW'\\)").
+		WithArgs("testdb").
+		WillReturnError(fmt.Errorf("structural fingerprint failed"))
+	mock.ExpectQuery("CREATE_TIME").
+		WithArgs("testdb").
+		WillReturnError(fmt.Errorf("lightweight fingerprint failed"))
+
+	metricsRecorder := &refreshMetricsRecorder{}
+	manager := &Manager{
+		db:              db,
+		databaseName:    "testdb",
+		logger:          testLogger(),
+		recordRefreshFn: metricsRecorder.RecordRefresh,
+	}
+
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "manual-refresh")
+	if err := manager.RefreshNowContext(ctx); err == nil {
+		t.Fatalf("expected RefreshNowContext to fail when fingerprint queries fail")
+	}
+
+	if metricsRecorder.calls != 1 {
+		t.Fatalf("expected exactly one metrics call, got %d", metricsRecorder.calls)
+	}
+	if got := metricsRecorder.ctx.Value(ctxKey{}); got != "manual-refresh" {
+		t.Fatalf("expected forwarded context value %q, got %v", "manual-refresh", got)
+	}
+	if metricsRecorder.lastTrigger != "manual" {
+		t.Fatalf("expected trigger manual, got %q", metricsRecorder.lastTrigger)
+	}
+	if metricsRecorder.lastSuccess {
+		t.Fatalf("expected failed refresh metrics recording")
+	}
+	manualSpan := findSpanByName(recorder.Ended(), refreshSpanManual)
+	if manualSpan == nil {
+		t.Fatalf("expected %s span", refreshSpanManual)
+	}
+	manualAttrs := manualSpan.Attributes()
+	if got := readSpanStringAttr(manualAttrs, "schema.refresh.trigger"); got != "manual" {
+		t.Fatalf("expected schema.refresh.trigger=manual, got %q", got)
+	}
+	if got := readSpanStringAttr(manualAttrs, "schema.refresh.outcome"); got != "error" {
+		t.Fatalf("expected schema.refresh.outcome=error, got %q", got)
+	}
+	if readSpanBoolAttr(manualAttrs, "schema.refresh.success") {
+		t.Fatalf("expected schema.refresh.success=false")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestBuildSnapshotSet_EmitsSnapshotSpanPerRole(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	emptyTables := sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"})
+	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
+		WithArgs("testdb").
+		WillReturnRows(emptyTables)
+
+	mock.ExpectExec(regexp.QuoteMeta("SET ROLE NONE")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("SET ROLE `viewer`")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
+		WithArgs("testdb").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"}))
+	mock.ExpectExec(regexp.QuoteMeta("SET ROLE DEFAULT")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	tp.RegisterSpanProcessor(recorder)
+	originalTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		otel.SetTracerProvider(originalTP)
+	})
+
+	manager := &Manager{
+		db:           db,
+		databaseName: "testdb",
+		logger:       testLogger(),
+		roleSchemas:  []string{"viewer"},
+		executor:     dbexec.NewStandardExecutor(db),
+	}
+
+	_, err = manager.buildSnapshotSet(context.Background(), fingerprintDetails{
+		Value: "fingerprint",
+		Mode:  fingerprintModeTiDBStructural,
+	})
+	if err != nil {
+		t.Fatalf("buildSnapshotSet failed: %v", err)
+	}
+
+	snapshotSpans := make([]sdktrace.ReadOnlySpan, 0)
+	for _, span := range recorder.Ended() {
+		if span.Name() == "schema.build_snapshot" {
+			snapshotSpans = append(snapshotSpans, span)
+		}
+	}
+	if len(snapshotSpans) != 2 {
+		t.Fatalf("expected 2 schema.build_snapshot spans, got %d", len(snapshotSpans))
+	}
+
+	roles := map[string]bool{}
+	for _, span := range snapshotSpans {
+		attrs := span.Attributes()
+		role := readSpanStringAttr(attrs, "schema.role")
+		success := readSpanBoolAttr(attrs, "schema.build.success")
+		mode := readSpanStringAttr(attrs, "schema.fingerprint_mode")
+		roles[role] = true
+		if !success {
+			t.Fatalf("expected schema.build.success=true for role %s", role)
+		}
+		if mode != fingerprintModeTiDBStructural {
+			t.Fatalf("expected schema.fingerprint_mode=%s, got %s", fingerprintModeTiDBStructural, mode)
+		}
+	}
+	if !roles["default"] || !roles["viewer"] {
+		t.Fatalf("expected spans for roles default and viewer, got %#v", roles)
+	}
+
+	relationshipSpanCount := 0
+	for _, span := range recorder.Ended() {
+		if span.Name() != "introspection.build_relationships" {
+			continue
+		}
+		relationshipSpanCount++
+		if !span.Parent().IsValid() {
+			t.Fatalf("expected introspection.build_relationships span to have a valid parent context")
+		}
+	}
+	if relationshipSpanCount == 0 {
+		t.Fatalf("expected introspection.build_relationships spans to be emitted")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestNewManager_EmitsStartupRefreshSpan(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	tp.RegisterSpanProcessor(recorder)
+	originalTP := otel.GetTracerProvider()
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		otel.SetTracerProvider(originalTP)
+	})
+
+	fixture := structuralFingerprintFixture{
+		tables: [][]string{
+			{"alpha", "BASE TABLE"},
+		},
+		columns: [][]string{
+			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+		},
+		primaryKeys: [][]string{
+			{"alpha", "id", "1"},
+		},
+		foreignKeys: [][]string{},
+		indexes: [][]string{
+			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+		},
+	}
+	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
+	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
+		WithArgs("testdb").
+		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"}))
+
+	_, err = NewManager(context.Background(), Config{
+		DB:           db,
+		DatabaseName: "testdb",
+		Logger:       testLogger(),
+		MinInterval:  time.Second,
+		MaxInterval:  2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	startupSpan := findSpanByName(recorder.Ended(), refreshSpanStartup)
+	if startupSpan == nil {
+		t.Fatalf("expected %s span", refreshSpanStartup)
+	}
+	startupAttrs := startupSpan.Attributes()
+	if got := readSpanStringAttr(startupAttrs, "schema.refresh.trigger"); got != "startup" {
+		t.Fatalf("expected schema.refresh.trigger=startup, got %q", got)
+	}
+	if got := readSpanStringAttr(startupAttrs, "schema.refresh.outcome"); got != "rebuilt" {
+		t.Fatalf("expected schema.refresh.outcome=rebuilt, got %q", got)
+	}
+	if !readSpanBoolAttr(startupAttrs, "schema.refresh.success") {
+		t.Fatalf("expected schema.refresh.success=true")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func readSpanStringAttr(attrs []attribute.KeyValue, key string) string {
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			return attr.Value.AsString()
+		}
+	}
+	return ""
+}
+
+func readSpanBoolAttr(attrs []attribute.KeyValue, key string) bool {
+	for _, attr := range attrs {
+		if string(attr.Key) == key {
+			return attr.Value.AsBool()
+		}
+	}
+	return false
+}
+
+func findSpanByName(spans []sdktrace.ReadOnlySpan, name string) sdktrace.ReadOnlySpan {
+	for _, span := range spans {
+		if span.Name() == name {
+			return span
+		}
+	}
+	return nil
 }

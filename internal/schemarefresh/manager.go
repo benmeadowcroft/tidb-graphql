@@ -29,6 +29,8 @@ import (
 	"github.com/graphql-go/handler"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Snapshot contains an immutable view of the current schema state.
@@ -71,7 +73,7 @@ type Manager struct {
 	limits                 *planner.PlanLimits
 	defaultLimit           int
 	logger                 *logging.Logger
-	metrics                *observability.SchemaRefreshMetrics
+	recordRefreshFn        func(context.Context, time.Duration, bool, string, string)
 	minInterval            time.Duration
 	maxInterval            time.Duration
 	graphiQL               bool
@@ -114,10 +116,13 @@ const (
 	fingerprintModeTiDBStructural  = "tidb_structural"
 	fingerprintModeTiDBLightweight = "tidb_lightweight"
 	fingerprintModeUnknown         = "unknown"
+	refreshSpanStartup             = "schema.refresh.startup"
+	refreshSpanPoll                = "schema.refresh.poll"
+	refreshSpanManual              = "schema.refresh.manual"
 )
 
 // NewManager builds the initial schema snapshot and returns a manager.
-func NewManager(cfg Config) (*Manager, error) {
+func NewManager(ctx context.Context, cfg Config) (*Manager, error) {
 	if cfg.DB == nil {
 		return nil, fmt.Errorf("schema refresh manager requires a database handle")
 	}
@@ -138,13 +143,17 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	componentLogger := cfg.Logger.WithFields(slog.String("component", "schema_refresh"))
+	var recordRefreshFn func(context.Context, time.Duration, bool, string, string)
+	if cfg.Metrics != nil {
+		recordRefreshFn = cfg.Metrics.RecordRefresh
+	}
 	manager := &Manager{
 		db:                     cfg.DB,
 		databaseName:           cfg.DatabaseName,
 		limits:                 cfg.Limits,
 		defaultLimit:           cfg.DefaultLimit,
 		logger:                 componentLogger,
-		metrics:                cfg.Metrics,
+		recordRefreshFn:        recordRefreshFn,
 		minInterval:            minInterval,
 		maxInterval:            maxInterval,
 		graphiQL:               cfg.GraphiQL,
@@ -167,19 +176,28 @@ func NewManager(cfg Config) (*Manager, error) {
 		manager.defaultLimit = planner.DefaultListLimit
 	}
 
+	startupCtx := ctx
+	if startupCtx == nil {
+		startupCtx = context.Background()
+	}
+	startupCtx, startupSpan := startRefreshSpan(startupCtx, refreshSpanStartup, "startup")
+	defer startupSpan.End()
+
 	start := time.Now()
-	fingerprint, err := manager.computeFingerprintDetails(context.Background())
+	fingerprint, err := manager.computeFingerprintDetails(startupCtx)
 	if err != nil {
 		manager.logger.Warn("failed to compute schema fingerprint", slog.String("error", err.Error()))
 	}
 
-	state, err := manager.buildSnapshotSet(context.Background(), fingerprint)
+	state, err := manager.buildSnapshotSet(startupCtx, fingerprint)
 	if err != nil {
-		manager.recordRefresh(time.Since(start), false, "startup", fingerprint.Mode)
+		manager.recordRefresh(startupCtx, time.Since(start), false, "startup", fingerprint.Mode)
+		recordRefreshSpanError(startupSpan, err, fingerprint.Mode)
 		return nil, err
 	}
 	manager.active.Store(state)
-	manager.recordRefresh(time.Since(start), true, "startup", state.FingerprintMode)
+	manager.recordRefresh(startupCtx, time.Since(start), true, "startup", state.FingerprintMode)
+	recordRefreshSpanSuccess(startupSpan, state.FingerprintMode, "rebuilt")
 
 	return manager, nil
 }
@@ -276,21 +294,27 @@ func (m *Manager) RefreshNow() error {
 
 // RefreshNowContext forces a schema rebuild and swap with context support.
 func (m *Manager) RefreshNowContext(ctx context.Context) error {
+	ctx, span := startRefreshSpan(ctx, refreshSpanManual, "manual")
+	defer span.End()
+
 	start := time.Now()
 	fingerprint, err := m.computeFingerprintDetails(ctx)
 	if err != nil {
-		m.recordRefresh(time.Since(start), false, "manual", fingerprint.Mode)
+		m.recordRefresh(ctx, time.Since(start), false, "manual", fingerprint.Mode)
+		recordRefreshSpanError(span, err, fingerprint.Mode)
 		return err
 	}
 
 	state, err := m.buildSnapshotSet(ctx, fingerprint)
 	if err != nil {
-		m.recordRefresh(time.Since(start), false, "manual", fingerprint.Mode)
+		m.recordRefresh(ctx, time.Since(start), false, "manual", fingerprint.Mode)
+		recordRefreshSpanError(span, err, fingerprint.Mode)
 		return err
 	}
 
 	m.active.Store(state)
-	m.recordRefresh(time.Since(start), true, "manual", state.FingerprintMode)
+	m.recordRefresh(ctx, time.Since(start), true, "manual", state.FingerprintMode)
+	recordRefreshSpanSuccess(span, state.FingerprintMode, "rebuilt")
 	return nil
 }
 
@@ -327,7 +351,7 @@ func (m *Manager) refreshLoop(ctx context.Context) {
 	}
 }
 
-func (m *Manager) introspectionQueryer(ctx context.Context) (introspection.Queryer, func(), error) {
+func (m *Manager) introspectionQueryer(ctx context.Context) (introspection.Queryer, func(context.Context), error) {
 	if m.introspectionRole == "" {
 		return m.db, nil, nil
 	}
@@ -343,15 +367,15 @@ func (m *Manager) introspectionQueryer(ctx context.Context) (introspection.Query
 		return nil, nil, fmt.Errorf("failed to set introspection role %s: %w", m.introspectionRole, err)
 	}
 
-	cleanup := func() {
-		_, _ = conn.ExecContext(context.Background(), "SET ROLE DEFAULT")
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = conn.ExecContext(contextWithoutCancel(cleanupCtx), "SET ROLE DEFAULT")
 		_ = conn.Close()
 	}
 
 	return conn, cleanup, nil
 }
 
-func (m *Manager) roleQueryer(ctx context.Context, role string) (introspection.Queryer, func(), error) {
+func (m *Manager) roleQueryer(ctx context.Context, role string) (introspection.Queryer, func(context.Context), error) {
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to acquire connection: %w", err)
@@ -366,8 +390,8 @@ func (m *Manager) roleQueryer(ctx context.Context, role string) (introspection.Q
 		return nil, nil, fmt.Errorf("failed to set role %s: %w", role, err)
 	}
 
-	cleanup := func() {
-		_, _ = conn.ExecContext(context.Background(), "SET ROLE DEFAULT")
+	cleanup := func(cleanupCtx context.Context) {
+		_, _ = conn.ExecContext(contextWithoutCancel(cleanupCtx), "SET ROLE DEFAULT")
 		_ = conn.Close()
 	}
 
@@ -375,18 +399,23 @@ func (m *Manager) roleQueryer(ctx context.Context, role string) (introspection.Q
 }
 
 func (m *Manager) refreshOnce(ctx context.Context, interval *time.Duration) {
+	ctx, span := startRefreshSpan(ctx, refreshSpanPoll, "poll")
+	defer span.End()
+
 	start := time.Now()
 	fingerprint, err := m.computeFingerprintDetails(ctx)
 	if err != nil {
 		m.logger.Warn("schema fingerprint check failed", slog.String("error", err.Error()))
-		m.recordRefresh(time.Since(start), false, "poll", fingerprint.Mode)
+		m.recordRefresh(ctx, time.Since(start), false, "poll", fingerprint.Mode)
+		recordRefreshSpanError(span, err, fingerprint.Mode)
 		*interval = m.minInterval
 		return
 	}
 
 	current := m.currentState()
 	if current != nil && fingerprint.Value == current.Fingerprint {
-		m.recordRefresh(time.Since(start), true, "poll_no_change", fingerprint.Mode)
+		m.recordRefresh(ctx, time.Since(start), true, "poll_no_change", fingerprint.Mode)
+		recordRefreshSpanSuccess(span, fingerprint.Mode, "no_change")
 		*interval = nextInterval(*interval, m.minInterval, m.maxInterval)
 		return
 	}
@@ -405,14 +434,16 @@ func (m *Manager) refreshOnce(ctx context.Context, interval *time.Duration) {
 	state, err := m.buildSnapshotSet(ctx, fingerprint)
 	if err != nil {
 		m.logger.Error("failed to rebuild schema", slog.String("error", err.Error()))
-		m.recordRefresh(time.Since(start), false, "poll", fingerprint.Mode)
+		m.recordRefresh(ctx, time.Since(start), false, "poll", fingerprint.Mode)
+		recordRefreshSpanError(span, err, fingerprint.Mode)
 		*interval = m.minInterval
 		return
 	}
 
 	m.active.Store(state)
 	*interval = m.minInterval
-	m.recordRefresh(time.Since(start), true, "poll", state.FingerprintMode)
+	m.recordRefresh(ctx, time.Since(start), true, "poll", state.FingerprintMode)
+	recordRefreshSpanSuccess(span, state.FingerprintMode, "rebuilt")
 	m.logger.Info("schema refresh complete",
 		slog.String("fingerprint", state.Fingerprint),
 		slog.String("fingerprint_mode", state.FingerprintMode),
@@ -430,9 +461,9 @@ func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint fingerprintD
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize introspection role: %w", err)
 	}
-	defaultSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint.Value, defaultQueryer)
+	defaultSnapshot, err := m.buildSnapshotWithQueryer(ctx, "", fingerprint.Value, fingerprint.Mode, defaultQueryer)
 	if defaultCleanup != nil {
-		defaultCleanup()
+		defaultCleanup(ctx)
 	}
 	if err != nil {
 		return nil, err
@@ -459,9 +490,9 @@ func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint fingerprintD
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize role queryer for %s: %w", role, err)
 		}
-		roleSnapshot, err := m.buildSnapshotWithQueryer(ctx, fingerprint.Value, roleQueryer)
+		roleSnapshot, err := m.buildSnapshotWithQueryer(ctx, role, fingerprint.Value, fingerprint.Mode, roleQueryer)
 		if roleCleanup != nil {
-			roleCleanup()
+			roleCleanup(ctx)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to build role-specific schema for %s: %w", role, err)
@@ -472,8 +503,30 @@ func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint fingerprintD
 	return state, nil
 }
 
-func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, fingerprint string, queryer introspection.Queryer) (*Snapshot, error) {
+func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, role string, fingerprint string, fingerprintMode string, queryer introspection.Queryer) (_ *Snapshot, err error) {
 	start := time.Now()
+	roleName := strings.TrimSpace(role)
+	if roleName == "" {
+		roleName = "default"
+	}
+	tracer := otel.Tracer("tidb-graphql/schemarefresh")
+	ctx, span := tracer.Start(ctx, "schema.build_snapshot")
+	span.SetAttributes(
+		attribute.String("schema.role", roleName),
+		attribute.Bool("schema.fingerprint.provided", strings.TrimSpace(fingerprint) != ""),
+		attribute.String("schema.fingerprint_mode", defaultOrUnknownMode(fingerprintMode)),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.SetAttributes(attribute.Bool("schema.build.success", false))
+		} else {
+			span.SetAttributes(attribute.Bool("schema.build.success", true))
+		}
+		span.End()
+	}()
+
 	executor := m.executor
 	if executor == nil {
 		executor = dbexec.NewStandardExecutor(m.db)
@@ -556,7 +609,7 @@ func (m *Manager) computeFingerprintDetails(ctx context.Context) (fingerprintDet
 		return fallback, err
 	}
 	if cleanup != nil {
-		defer cleanup()
+		defer cleanup(ctx)
 	}
 
 	details, err := m.computeTiDBStructuralFingerprint(ctx, queryer)
@@ -768,11 +821,49 @@ func nextInterval(current, minInterval, maxInterval time.Duration) time.Duration
 	return next
 }
 
-func (m *Manager) recordRefresh(duration time.Duration, success bool, trigger string, fingerprintMode string) {
-	if m.metrics == nil {
+func (m *Manager) recordRefresh(ctx context.Context, duration time.Duration, success bool, trigger string, fingerprintMode string) {
+	if m.recordRefreshFn == nil {
 		return
 	}
-	m.metrics.RecordRefresh(context.Background(), duration, success, trigger, defaultOrUnknownMode(fingerprintMode))
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.recordRefreshFn(ctx, duration, success, trigger, defaultOrUnknownMode(fingerprintMode))
+}
+
+func startRefreshSpan(ctx context.Context, name, trigger string) (context.Context, trace.Span) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tracer := otel.Tracer("tidb-graphql/schemarefresh")
+	ctx, span := tracer.Start(ctx, name)
+	span.SetAttributes(attribute.String("schema.refresh.trigger", trigger))
+	return ctx, span
+}
+
+func recordRefreshSpanSuccess(span trace.Span, fingerprintMode, outcome string) {
+	span.SetAttributes(
+		attribute.Bool("schema.refresh.success", true),
+		attribute.String("schema.refresh.outcome", outcome),
+		attribute.String("schema.fingerprint_mode", defaultOrUnknownMode(fingerprintMode)),
+	)
+}
+
+func recordRefreshSpanError(span trace.Span, err error, fingerprintMode string) {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+	span.SetAttributes(
+		attribute.Bool("schema.refresh.success", false),
+		attribute.String("schema.refresh.outcome", "error"),
+		attribute.String("schema.fingerprint_mode", defaultOrUnknownMode(fingerprintMode)),
+	)
+}
+
+func contextWithoutCancel(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
 }
 
 func combineComponentHashes(componentHashes map[string]string) string {

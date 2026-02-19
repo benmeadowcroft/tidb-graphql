@@ -205,15 +205,23 @@ func TestSetFiltering_MutationRoundTrip(t *testing.T) {
 	mutation := `
 		mutation {
 			createProduct(input: { name: "Purple Widget", price: "79.99", tags: [SEASONAL, FEATURED, SEASONAL] }) {
-				name
-				tags
+				__typename
+				... on CreateProductSuccess {
+					product {
+						name
+						tags
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	createResult := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, createResult.Errors)
-
-	record := createResult.Data.(map[string]interface{})["createProduct"].(map[string]interface{})
+	recordWrapper := mutationResultField(t, createResult, "createProduct")
+	assert.Equal(t, "CreateProductSuccess", recordWrapper["__typename"])
+	record := recordWrapper["product"].(map[string]interface{})
 	assert.Equal(t, "Purple Widget", record["name"])
 	// GraphQL enum fields serialize as enum names, not underlying lowercase SQL values.
 	assert.Equal(t, []interface{}{"FEATURED", "SEASONAL"}, record["tags"])
@@ -248,24 +256,40 @@ func TestSetFiltering_MutationUpdateAndDelete(t *testing.T) {
 	update := `
 		mutation {
 			updateProduct(id: "` + productID + `", set: { tags: [LIMITED, FEATURED] }) {
-				name
-				tags
+				__typename
+				... on UpdateProductSuccess {
+					product {
+						name
+						tags
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	updateResult := executeMutation(t, schema, executor, update, nil)
-	require.Empty(t, updateResult.Errors)
-	updated := updateResult.Data.(map[string]interface{})["updateProduct"].(map[string]interface{})
+	updatedWrapper := mutationResultField(t, updateResult, "updateProduct")
+	assert.Equal(t, "UpdateProductSuccess", updatedWrapper["__typename"])
+	updated := updatedWrapper["product"].(map[string]interface{})
 	assert.Equal(t, "Green Widget", updated["name"])
 	assert.Equal(t, []interface{}{"FEATURED", "LIMITED"}, updated["tags"])
 
 	del := `
 		mutation {
 			deleteProduct(id: "` + productID + `") {
-				id
+				__typename
+				... on DeleteProductSuccess {
+					id
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	deleteResult := executeMutation(t, schema, executor, del, nil)
-	require.Empty(t, deleteResult.Errors)
+	deleteWrapper := mutationResultField(t, deleteResult, "deleteProduct")
+	assert.Equal(t, "DeleteProductSuccess", deleteWrapper["__typename"])
 }

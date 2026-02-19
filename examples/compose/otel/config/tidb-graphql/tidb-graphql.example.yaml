@@ -1,0 +1,56 @@
+database:
+  host: tidb
+  port: 4000
+  user: tidb_graphql
+  password: tidb_graphql_pw
+  database: tidb_graphql_tutorial
+
+server:
+  port: 8080
+  graphiql_enabled: true
+  tls_mode: off
+  search:
+    vector_require_index: false
+  auth:
+    oidc_enabled: true
+    oidc_issuer_url: https://jwks:9000
+    oidc_audience: tidb-graphql
+    oidc_skip_tls_verify: true
+    db_role_enabled: true
+    db_role_claim_name: db_role
+    db_role_validation_enabled: true
+    db_role_introspection_role: app_introspect
+
+observability:
+  environment: development
+  service_name: tidb-graphql
+
+  # Metrics configuration
+  metrics_enabled: true
+
+  # Distributed tracing configuration
+
+  tracing_enabled: true
+  sqlcommenter_enabled: true
+
+  # Logging configuration
+  logging:
+    level: info
+    format: json
+    exports_enabled: false
+
+  # Global OTLP configuration (defaults for all signals: traces, logs)
+  otlp:
+    protocol: http/protobuf                # Protocol for OTLP export: http/protobuf, grpc, http/json
+    endpoint: api.honeycomb.io:443
+    insecure: false                 # Use insecure connection (no TLS)
+    tls_cert_file: ""               # Path to CA certificate for server verification
+    tls_client_cert_file: ""        # Path to client certificate for mTLS
+    tls_client_key_file: ""         # Path to client key for mTLS
+    # Keep headers empty in checked-in config. Inject auth headers via
+    # OTEL_EXPORTER_OTLP_HEADERS at runtime (for example via .env).
+    headers: {}
+    timeout: 10s                    # Export timeout duration
+    compression: gzip               # Compression type: none, gzip
+    retry_enabled: true             # Enable retry on transient errors
+    retry_max_attempts: 3           # Maximum retry attempts

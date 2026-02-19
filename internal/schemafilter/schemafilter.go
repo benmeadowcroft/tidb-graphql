@@ -2,6 +2,7 @@
 package schemafilter
 
 import (
+	"context"
 	"path"
 	"slices"
 	"strings"
@@ -24,7 +25,7 @@ type Config struct {
 
 // Apply filters tables, columns, indexes, and relationships in place.
 // Missing allow lists default to allow-all; deny rules always win.
-func Apply(schema *introspection.Schema, cfg Config) {
+func Apply(ctx context.Context, schema *introspection.Schema, cfg Config) {
 	if schema == nil {
 		return
 	}
@@ -82,7 +83,7 @@ func Apply(schema *introspection.Schema, cfg Config) {
 		return
 	}
 
-	_ = introspection.RebuildRelationships(schema)
+	_ = introspection.RebuildRelationships(ctx, schema)
 }
 
 func tableAllowed(table string, allow, deny []string) bool {

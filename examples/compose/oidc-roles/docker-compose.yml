@@ -46,20 +46,6 @@ services:
         mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/roles.sql
     restart: "no"
 
-  # seed-roles:
-  #   image: mysql:8
-  #   depends_on:
-  #     seed-data:
-  #       condition: service_completed_successfully
-  #   volumes:
-  #     - ./seed/roles.sql:/seed/roles.sql:ro
-  #   entrypoint: /bin/sh
-  #   command:
-  #     - -ec
-  #     - |
-  #       mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/roles.sql
-  #   restart: "no"
-
   jwks:
     image: golang:1.25
     working_dir: /workspace

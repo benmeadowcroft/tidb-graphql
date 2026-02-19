@@ -336,6 +336,32 @@ func TestConfig_Validate(t *testing.T) {
 		assert.False(t, result.HasErrors())
 	})
 
+	t.Run("invalid trace sample ratio below zero", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Observability.TraceSampleRatio = -0.1
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "observability.trace_sample_ratio")
+	})
+
+	t.Run("invalid trace sample ratio above one", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Observability.TraceSampleRatio = 1.1
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "observability.trace_sample_ratio")
+	})
+
+	t.Run("valid trace sample ratio boundaries", func(t *testing.T) {
+		cfgZero := validConfig()
+		cfgZero.Observability.TraceSampleRatio = 0.0
+		assert.False(t, cfgZero.Validate().HasErrors())
+
+		cfgOne := validConfig()
+		cfgOne.Observability.TraceSampleRatio = 1.0
+		assert.False(t, cfgOne.Validate().HasErrors())
+	})
+
 	t.Run("rate limit enabled without RPS", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Server.RateLimitEnabled = true

@@ -25,7 +25,7 @@ func TestIntegrationHelperSchemaMatchesManagerSchemaForJunctionFields(t *testing
 
 	helperSchema := buildGraphQLSchema(t, testDB)
 
-	manager, err := schemarefresh.NewManager(schemarefresh.Config{
+	manager, err := schemarefresh.NewManager(context.Background(), schemarefresh.Config{
 		DB:           testDB.DB,
 		DatabaseName: testDB.DatabaseName,
 	})
@@ -86,7 +86,7 @@ func TestIntegrationHelperSchemaMatchesManagerSchemaForCompositeJunctionFields(t
 
 	helperSchema := buildGraphQLSchema(t, testDB)
 
-	manager, err := schemarefresh.NewManager(schemarefresh.Config{
+	manager, err := schemarefresh.NewManager(context.Background(), schemarefresh.Config{
 		DB:           testDB.DB,
 		DatabaseName: testDB.DatabaseName,
 	})

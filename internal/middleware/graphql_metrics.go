@@ -1,7 +1,10 @@
 package middleware
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"tidb-graphql/internal/observability"
@@ -27,6 +30,13 @@ func GraphQLMetricsMiddleware(metrics *observability.GraphQLMetrics) func(http.H
 			// Record start time
 			start := time.Now()
 
+			operationType := "unknown"
+			query, operationName := extractGraphQLRequest(r)
+			metadata, err := extractQueryMetadata(query, operationName)
+			if err == nil && metadata != nil && strings.TrimSpace(metadata.operationType) != "" {
+				operationType = metadata.operationType
+			}
+
 			// Wrap response writer to capture response
 			wrapped := &metricsResponseWriter{
 				ResponseWriter: w,
@@ -39,13 +49,8 @@ func GraphQLMetricsMiddleware(metrics *observability.GraphQLMetrics) func(http.H
 			// Calculate duration
 			duration := time.Since(start)
 
-			// Determine if there were errors (status >= 400 indicates errors)
-			hasErrors := wrapped.statusCode >= 400
-
-			// For now, we'll mark all operations as "query" since we can't easily
-			// parse the operation type without modifying the GraphQL handler
-			// In a production system, you might use a custom GraphQL executor
-			operationType := "query"
+			// Determine if there were errors.
+			hasErrors := wrapped.statusCode >= 400 || responseHasGraphQLErrors(wrapped.body.Bytes())
 
 			// Record the request metrics
 			metrics.RecordRequest(ctx, duration, hasErrors, operationType)
@@ -58,6 +63,7 @@ type metricsResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	written    bool
+	body       bytes.Buffer
 }
 
 func (w *metricsResponseWriter) WriteHeader(statusCode int) {
@@ -72,9 +78,36 @@ func (w *metricsResponseWriter) Write(b []byte) (int, error) {
 	if !w.written {
 		w.WriteHeader(http.StatusOK)
 	}
+	if len(b) > 0 {
+		_, _ = w.body.Write(b)
+	}
 	return w.ResponseWriter.Write(b)
 }
 
-// Note: Additional GraphQL-specific metrics like query depth and results count
-// would require deeper integration with the GraphQL execution pipeline.
-// The current middleware provides basic HTTP-level metrics for GraphQL operations.
+func responseHasGraphQLErrors(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+
+	var payload struct {
+		Errors json.RawMessage `json:"errors"`
+	}
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		return false
+	}
+	if len(payload.Errors) == 0 {
+		return false
+	}
+
+	errorsValue := bytes.TrimSpace(payload.Errors)
+	if len(errorsValue) == 0 || bytes.Equal(errorsValue, []byte("null")) {
+		return false
+	}
+
+	var errorsList []json.RawMessage
+	if err := json.Unmarshal(errorsValue, &errorsList); err != nil {
+		return false
+	}
+	return len(errorsList) > 0
+}

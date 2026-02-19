@@ -1,0 +1,104 @@
+# OTEL scenario for local development.
+#
+# Usage:
+#   docker compose -f examples/compose/otel/docker-compose.yml up
+#
+# This stack starts:
+# - TiDB with sample data
+# - role grants + restricted DB user
+# - local JWKS server at https://localhost:9000
+# - tidb-graphql with OTEL + OIDC + DB role authorization enabled
+
+services:
+  tidb:
+    image: pingcap/tidb:v8.5.5
+    command:
+      - "--config=/tidb.toml"
+    volumes:
+      - ./config/tidb/tidb.toml:/tidb.toml:ro
+      - tidb-roles-data:/tmp/tidb
+    ports:
+      - "4000:4000"
+      - "10080:10080"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:10080/status"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  seed-data:
+    image: mysql:8
+    depends_on:
+      tidb:
+        condition: service_healthy
+    volumes:
+      - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
+      - ../../../docs/tutorials/sample-data-vectors.sql:/seed/sample-data-vectors.sql:ro
+      - ./seed/roles.sql:/seed/roles.sql:ro
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - |
+        until mysqladmin --protocol=TCP --host=tidb --port=4000 --user=root ping --silent; do
+          sleep 1
+        done
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data.sql
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data-vectors.sql
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/roles.sql
+    restart: "no"
+
+  jwks:
+    image: golang:1.25
+    working_dir: /workspace
+    volumes:
+      - ../../../:/workspace
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - |
+        go run ./scripts/jwt-generate-keys --dir /workspace/.auth
+        go run ./scripts/jwks-server --addr :9000 --issuer https://jwks:9000 --public-key /workspace/.auth/jwt_public.pem --kid local-key
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "go",
+          "run",
+          "./scripts/jwks-healthcheck",
+          "--url",
+          "https://localhost:9000/.well-known/openid-configuration",
+          "--expected-issuer",
+          "https://jwks:9000",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  tidb-graphql:
+    image: ${TIGQL_IMAGE:-ghcr.io/benmeadowcroft/tidb-graphql:main}
+    build:
+      context: ../../../
+      dockerfile: Containerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+    volumes:
+      - ./config/tidb-graphql/tidb-graphql.example.yaml:/etc/tidb-graphql/tidb-graphql.yaml:ro
+    environment:
+      OTEL_EXPORTER_OTLP_HEADERS: x-honeycomb-team=${HONEYCOMB_API_KEY}
+    ports:
+      - "8080:8080"
+    depends_on:
+      seed-data:
+        condition: service_completed_successfully
+      jwks:
+        condition: service_healthy
+      tidb:
+        condition: service_healthy
+
+volumes:
+  tidb-roles-data:

@@ -68,16 +68,24 @@ func TestUUIDMapping_MutationRoundTrip(t *testing.T) {
 				uuidBin: "A0Eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
 				uuidText: "A0Eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 			}) {
-				label
-				uuidBin
-				uuidText
+				__typename
+				... on CreateUuidRecordSuccess {
+					uuidRecord {
+						label
+						uuidBin
+						uuidText
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	result := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, result.Errors)
-
-	row := result.Data.(map[string]interface{})["createUuidRecord"].(map[string]interface{})
+	wrapper := mutationResultField(t, result, "createUuidRecord")
+	assert.Equal(t, "CreateUuidRecordSuccess", wrapper["__typename"])
+	row := wrapper["uuidRecord"].(map[string]interface{})
 	assert.Equal(t, "gamma", row["label"])
 	assert.Equal(t, "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", row["uuidBin"])
 	assert.Equal(t, "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", row["uuidText"])

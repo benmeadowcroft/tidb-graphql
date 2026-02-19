@@ -62,16 +62,24 @@ func TestBytesFiltering_MutationRoundTrip(t *testing.T) {
 	mutation := `
 		mutation {
 			createFile(input: { name: "gamma", payload: "` + payload + `", hash: "` + hash + `" }) {
-				name
-				payload
-				hash
+				__typename
+				... on CreateFileSuccess {
+					file {
+						name
+						payload
+						hash
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	createResult := executeMutation(t, schema, executor, mutation, nil)
-	require.Empty(t, createResult.Errors)
-
-	record := createResult.Data.(map[string]interface{})["createFile"].(map[string]interface{})
+	wrapper := mutationResultField(t, createResult, "createFile")
+	assert.Equal(t, "CreateFileSuccess", wrapper["__typename"])
+	record := wrapper["file"].(map[string]interface{})
 	assert.Equal(t, "gamma", record["name"])
 	assert.Equal(t, payload, record["payload"])
 	assert.Equal(t, hash, record["hash"])
@@ -156,24 +164,40 @@ func TestBytesFiltering_MutationUpdateAndDelete(t *testing.T) {
 	update := `
 		mutation {
 			updateFile(id: "` + fileID + `", set: { payload: "` + newPayload + `" }) {
-				name
-				payload
+				__typename
+				... on UpdateFileSuccess {
+					file {
+						name
+						payload
+					}
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	updateResult := executeMutation(t, schema, executor, update, nil)
-	require.Empty(t, updateResult.Errors)
-	updated := updateResult.Data.(map[string]interface{})["updateFile"].(map[string]interface{})
+	updatedWrapper := mutationResultField(t, updateResult, "updateFile")
+	assert.Equal(t, "UpdateFileSuccess", updatedWrapper["__typename"])
+	updated := updatedWrapper["file"].(map[string]interface{})
 	assert.Equal(t, "alpha", updated["name"])
 	assert.Equal(t, newPayload, updated["payload"])
 
 	del := `
 		mutation {
 			deleteFile(id: "` + fileID + `") {
-				id
+				__typename
+				... on DeleteFileSuccess {
+					id
+				}
+				... on MutationError {
+					message
+				}
 			}
 		}
 	`
 	deleteResult := executeMutation(t, schema, executor, del, nil)
-	require.Empty(t, deleteResult.Errors)
+	deleteWrapper := mutationResultField(t, deleteResult, "deleteFile")
+	assert.Equal(t, "DeleteFileSuccess", deleteWrapper["__typename"])
 }

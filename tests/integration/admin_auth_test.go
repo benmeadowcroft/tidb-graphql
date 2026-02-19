@@ -36,7 +36,7 @@ func TestAdminEndpointAuthentication(t *testing.T) {
 
 	// Create schema refresh manager
 	logger := logging.NewLogger(logging.Config{Level: "info", Format: "json"})
-	manager, err := schemarefresh.NewManager(schemarefresh.Config{
+	manager, err := schemarefresh.NewManager(context.Background(), schemarefresh.Config{
 		DB:           testDB.DB,
 		DatabaseName: testDB.DatabaseName,
 		Logger:       logger,

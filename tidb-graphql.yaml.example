@@ -73,7 +73,6 @@ server:
     oidc_skip_tls_verify: false     # Skip TLS verification for OIDC provider (dev only)
     db_role_enabled: false          # Enable database role authorization (SET ROLE)
     db_role_claim_name: "db_role"   # JWT claim for DB role
-    db_role_validation_enabled: true # Validate db_role against discovered roles
     db_role_introspection_role: ""  # Database role used for schema introspection
     role_schema_include: ["*"]      # Role glob patterns to include for role-specific schemas
     role_schema_exclude: []          # Role glob patterns to exclude from role-specific schemas

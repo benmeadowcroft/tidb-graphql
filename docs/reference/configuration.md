@@ -217,7 +217,6 @@ Authentication (under `server.auth`):
 - `server.auth.oidc_skip_tls_verify` (bool, default: `false`; dev-only)
 - `server.auth.db_role_enabled` (bool, default: `false`)
 - `server.auth.db_role_claim_name` (string, default: `db_role`)
-- `server.auth.db_role_validation_enabled` (bool, default: `true`)
 - `server.auth.db_role_introspection_role` (string, default: empty; role used only during schema refresh)
 - `server.auth.role_schema_include` (list of string, default: `["*"]`; role glob patterns to include for role-specific schemas)
 - `server.auth.role_schema_exclude` (list of string, default: empty; role glob patterns to exclude from role-specific schemas)

@@ -12,7 +12,7 @@ This keeps policy centralized in the database while still letting the API enforc
 
 ## Role discovery and validation
 
-When `server.auth.db_role_validation_enabled` is enabled, the server discovers the roles granted to the database user and rejects roles that are not on the allowlist. This prevents callers from supplying arbitrary role names.
+The server discovers the roles granted to the database user and rejects roles that are not on the allowlist. This prevents callers from supplying arbitrary role names.
 
 ## Introspection flow
 

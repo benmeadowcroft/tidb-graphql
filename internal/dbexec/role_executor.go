@@ -14,7 +14,6 @@ type RoleExecutor struct {
 	databaseName string
 	roleFromCtx  func(context.Context) (string, bool)
 	allowedRoles map[string]struct{}
-	validateRole bool
 }
 
 // RoleExecutorConfig controls role execution behavior.
@@ -23,7 +22,6 @@ type RoleExecutorConfig struct {
 	DatabaseName string
 	RoleFromCtx  func(context.Context) (string, bool)
 	AllowedRoles []string
-	ValidateRole bool
 }
 
 // NewRoleExecutor creates an executor that applies SET ROLE before each query.
@@ -38,7 +36,6 @@ func NewRoleExecutor(cfg RoleExecutorConfig) *RoleExecutor {
 		databaseName: cfg.DatabaseName,
 		roleFromCtx:  cfg.RoleFromCtx,
 		allowedRoles: allowed,
-		validateRole: cfg.ValidateRole,
 	}
 }
 
@@ -98,11 +95,9 @@ func (e *RoleExecutor) prepareRoleConn(ctx context.Context) (*sql.Conn, func(), 
 
 	role, ok := e.roleFromCtx(ctx)
 	if ok && role != "" {
-		if e.validateRole {
-			if _, allowed := e.allowedRoles[role]; !allowed {
-				cleanup()
-				return nil, nil, fmt.Errorf("role not allowed: %s", role)
-			}
+		if _, allowed := e.allowedRoles[role]; !allowed {
+			cleanup()
+			return nil, nil, fmt.Errorf("role not allowed: %s", role)
 		}
 		// MySQL/TiDB don't support parameterized SET ROLE, use string formatting
 		// Safe because role is validated against allowlist above

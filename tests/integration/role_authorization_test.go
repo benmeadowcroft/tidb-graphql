@@ -293,7 +293,6 @@ func buildRoleGraphQLHandler(t *testing.T, testDB *tidbcloud.RoleTestDB, issuerU
 			return role.Role, ok && role.Validated
 		},
 		AllowedRoles: availableRoles,
-		ValidateRole: true,
 	})
 
 	manager, err := schemarefresh.NewManager(context.Background(), schemarefresh.Config{
@@ -324,7 +323,7 @@ func buildRoleGraphQLHandler(t *testing.T, testDB *tidbcloud.RoleTestDB, issuerU
 	}, nil)
 	require.NoError(t, err)
 
-	dbRoleHandler := middleware.DBRoleMiddleware("", true, availableRoles)(batchingHandler)
+	dbRoleHandler := middleware.DBRoleMiddleware("", availableRoles)(batchingHandler)
 	return authMiddleware(dbRoleHandler)
 }
 

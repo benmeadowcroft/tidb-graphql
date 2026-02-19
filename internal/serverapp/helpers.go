@@ -456,7 +456,6 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string,
 				return role.Role, ok && role.Validated
 			},
 			AllowedRoles: availableRoles,
-			ValidateRole: cfg.Server.Auth.DBRoleValidationEnabled,
 		})
 	}
 	return queryExecutor
@@ -541,7 +540,7 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 	}
 	dbRoleHandler := baseHandler
 	if cfg.Server.Auth.DBRoleEnabled {
-		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.Auth.DBRoleClaimName, cfg.Server.Auth.DBRoleValidationEnabled, availableRoles)(baseHandler)
+		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.Auth.DBRoleClaimName, availableRoles)(baseHandler)
 		logger.Info("database role middleware enabled")
 	}
 

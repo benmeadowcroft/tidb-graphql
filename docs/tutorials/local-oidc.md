@@ -93,7 +93,6 @@ server:
     # enable authorization
     db_role_enabled: true
     db_role_claim_name: "db_role"  # JWT claim containing the role name
-    db_role_validation_enabled: true  # Validate role against discovered roles
     db_role_introspection_role: "app_introspect" # role to assume for introspection
 ```
 

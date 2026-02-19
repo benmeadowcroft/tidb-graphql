@@ -128,7 +128,6 @@ type AuthConfig struct {
 	OIDCSkipTLSVerify       bool          `mapstructure:"oidc_skip_tls_verify"`
 	DBRoleEnabled           bool          `mapstructure:"db_role_enabled"`
 	DBRoleClaimName         string        `mapstructure:"db_role_claim_name"`
-	DBRoleValidationEnabled bool          `mapstructure:"db_role_validation_enabled"`
 	DBRoleIntrospectionRole string        `mapstructure:"db_role_introspection_role"`
 	RoleSchemaInclude       []string      `mapstructure:"role_schema_include"`
 	RoleSchemaExclude       []string      `mapstructure:"role_schema_exclude"`

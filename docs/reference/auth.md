@@ -28,7 +28,6 @@ Key settings:
 
 - `server.auth.db_role_enabled` (bool)
 - `server.auth.db_role_claim_name` (string; default `db_role`)
-- `server.auth.db_role_validation_enabled` (bool; validate claim against discovered roles)
 - `server.auth.db_role_introspection_role` (string; role used during schema introspection)
 - `server.auth.role_schema_include` (list; default `["*"]`)
 - `server.auth.role_schema_exclude` (list; default empty)

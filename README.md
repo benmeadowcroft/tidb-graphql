@@ -128,6 +128,7 @@ For deeper setup details, use:
 - [How-To guides](docs/how-to/README.md)
 - [Technical reference](docs/reference/README.md)
 - [Architecture and explanation docs](docs/explanation/README.md)
+- [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/benmeadowcroft/tidb-graphql)
 
 ## Contributing and local development
 

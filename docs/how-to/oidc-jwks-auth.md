@@ -37,7 +37,6 @@ server:
     oidc_audience: "tidb-graphql"
     oidc_ca_file: "/etc/ssl/certs/custom-oidc-ca.pem" # optional for private/self-managed CAs
     oidc_clock_skew: 2m
-    oidc_skip_tls_verify: false
 ```
 
 Local dev (private/local CA-managed JWKS):
@@ -48,13 +47,11 @@ server:
     oidc_issuer_url: "https://jwks:9000"
     oidc_audience: "tidb-graphql"
     oidc_ca_file: "/pki/ca/root_ca.crt"
-    oidc_skip_tls_verify: false
 ```
 
 Notes:
 - `server.auth.oidc_issuer_url` must be HTTPS.
-- `server.auth.oidc_ca_file` lets you trust private/self-managed CAs without disabling verification.
-- `server.auth.oidc_skip_tls_verify` is a dev-only escape hatch and logs a warning.
+- `server.auth.oidc_ca_file` lets you trust private/self-managed CAs while keeping certificate verification enabled.
 
 ## 3) Restart the TiDB GraphQL server
 

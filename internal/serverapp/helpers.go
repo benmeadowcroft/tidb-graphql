@@ -503,12 +503,11 @@ func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging
 
 func oidcAuthConfig(cfg *config.Config) middleware.OIDCAuthConfig {
 	return middleware.OIDCAuthConfig{
-		Enabled:       cfg.Server.Auth.OIDCEnabled,
-		IssuerURL:     cfg.Server.Auth.OIDCIssuerURL,
-		Audience:      cfg.Server.Auth.OIDCAudience,
-		CAFile:        cfg.Server.Auth.OIDCCAFile,
-		ClockSkew:     cfg.Server.Auth.OIDCClockSkew,
-		SkipTLSVerify: cfg.Server.Auth.OIDCSkipTLSVerify,
+		Enabled:   cfg.Server.Auth.OIDCEnabled,
+		IssuerURL: cfg.Server.Auth.OIDCIssuerURL,
+		Audience:  cfg.Server.Auth.OIDCAudience,
+		CAFile:    cfg.Server.Auth.OIDCCAFile,
+		ClockSkew: cfg.Server.Auth.OIDCClockSkew,
 	}
 }
 

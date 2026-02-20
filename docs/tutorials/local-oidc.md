@@ -65,7 +65,7 @@ server:
     oidc_enabled: true
     oidc_issuer_url: "https://localhost:9000"
     oidc_audience: "tidb-graphql"
-    oidc_skip_tls_verify: true # fallback for ad-hoc self-signed local JWKS only
+    oidc_ca_file: ".auth/jwks_tls.crt" # trust the local JWKS self-signed cert
 ```
 
 If your local JWKS server is using a private/local CA, prefer this instead:
@@ -77,10 +77,7 @@ server:
     oidc_issuer_url: "https://jwks:9000"
     oidc_audience: "tidb-graphql"
     oidc_ca_file: "/pki/ca/root_ca.crt"
-    oidc_skip_tls_verify: false
 ```
-
-`oidc_skip_tls_verify` is a dev-only escape hatch and logs a warning.
 
 ## 5) Enable RBAC in the config (Optional)
 
@@ -107,7 +104,7 @@ server:
     oidc_enabled: true
     oidc_issuer_url: "https://localhost:9000"
     oidc_audience: "tidb-graphql"
-    oidc_skip_tls_verify: true # set oidc_ca_file + false when using a private/local CA
+    oidc_ca_file: ".auth/jwks_tls.crt" # set to your private/local CA bundle as needed
 
     # enable authorization
     db_role_enabled: true

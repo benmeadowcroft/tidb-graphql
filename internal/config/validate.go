@@ -525,13 +525,6 @@ func (s *ServerConfig) validate(result *ValidationResult) {
 				Message: "audience is required when OIDC is enabled",
 			})
 		}
-		if strings.TrimSpace(s.Auth.OIDCCAFile) != "" && s.Auth.OIDCSkipTLSVerify {
-			result.Warnings = append(result.Warnings, ValidationWarning{
-				Field:   "server.auth.oidc_skip_tls_verify",
-				Message: "oidc_skip_tls_verify=true disables certificate verification even when oidc_ca_file is set",
-				Hint:    "set server.auth.oidc_skip_tls_verify=false to enforce CA-based TLS verification",
-			})
-		}
 	}
 
 	adminTokenConfigured := strings.TrimSpace(s.Admin.AuthToken) != "" || strings.TrimSpace(s.Admin.AuthTokenFile) != ""

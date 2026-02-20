@@ -21,7 +21,6 @@ server:
     oidc_issuer_url: https://jwks:9000
     oidc_audience: tidb-graphql
     oidc_ca_file: /pki/ca/root_ca.crt
-    oidc_skip_tls_verify: false
     db_role_enabled: true
     db_role_claim_name: db_role
     db_role_introspection_role: app_introspect

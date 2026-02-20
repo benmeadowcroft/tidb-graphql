@@ -26,12 +26,11 @@ import (
 
 // OIDCAuthConfig controls OIDC/JWKS validation behavior.
 type OIDCAuthConfig struct {
-	Enabled       bool
-	IssuerURL     string
-	Audience      string
-	CAFile        string
-	ClockSkew     time.Duration
-	SkipTLSVerify bool
+	Enabled   bool
+	IssuerURL string
+	Audience  string
+	CAFile    string
+	ClockSkew time.Duration
 }
 
 type authContextKey struct{}
@@ -86,11 +85,6 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 	}
 	if issuerURL.Scheme != "https" {
 		return nil, errors.New("oidc issuer url must use https")
-	}
-	if logger != nil && cfg.SkipTLSVerify {
-		logger.Warn("oidc tls verification is disabled; enable only for local development",
-			"issuer", cfg.IssuerURL,
-		)
 	}
 
 	httpClient, err := newOIDCHTTPClient(cfg)
@@ -235,8 +229,7 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 
 func newOIDCHTTPClient(cfg OIDCAuthConfig) (*http.Client, error) {
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: cfg.SkipTLSVerify,
-		MinVersion:         tls.VersionTLS12,
+		MinVersion: tls.VersionTLS12,
 	}
 
 	caFile := strings.TrimSpace(cfg.CAFile)

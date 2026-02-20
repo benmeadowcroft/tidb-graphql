@@ -1,5 +1,9 @@
-# TiDB configuration for development with Docker Compose
-# Enables automatic TLS certificate generation
+# TiDB configuration for OTEL scenario.
+# initialize-sql-file runs on first data-dir initialization.
+
+initialize-sql-file = "/etc/tidb/init.sql"
 
 [security]
-auto-tls = true
+ssl-ca = "/pki/ca/root_ca.crt"
+ssl-cert = "/pki/tidb/server.crt"
+ssl-key = "/pki/tidb/server.key"

@@ -4,18 +4,114 @@
 #   docker compose -f examples/compose/otel/docker-compose.yml up
 #
 # This stack starts:
+# - local step-ca certificate authority
+# - one-shot PKI bootstrap to mint service and client certificates
 # - TiDB with sample data
-# - role grants + restricted DB user
+# - idempotent role + cert-auth user bootstrap via initialize-sql-file
 # - local JWKS server at https://localhost:9000
 # - tidb-graphql with OTEL + OIDC + DB role authorization enabled
 
 services:
+  step-ca:
+    image: smallstep/step-ca:latest
+    environment:
+      DOCKER_STEPCA_INIT_NAME: Local Dev CA
+      DOCKER_STEPCA_INIT_DNS_NAMES: step-ca,localhost
+      DOCKER_STEPCA_INIT_PROVISIONER_NAME: admin
+      DOCKER_STEPCA_INIT_PASSWORD: changeit
+    volumes:
+      - step:/home/step
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000", "--root", "/home/step/certs/root_ca.crt"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  pki-bootstrap:
+    image: smallstep/step-ca:latest
+    user: "0:0"
+    depends_on:
+      step-ca:
+        condition: service_healthy
+    volumes:
+      - step:/home/step:ro
+      - pki:/pki
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - |
+        until [ -s /home/step/certs/root_ca.crt ]; do
+          sleep 1
+        done
+
+        mkdir -p /pki/ca /pki/jwks /pki/tidb /pki/tidb-graphql /pki/tidb-graphql-to-tidb /pki/seed-to-tidb
+        cp /home/step/certs/root_ca.crt /pki/ca/root_ca.crt
+
+        until step ca health --ca-url https://step-ca:9000 --root /home/step/certs/root_ca.crt >/dev/null 2>&1; do
+          sleep 1
+        done
+
+        step ca certificate "spiffe://dev.local/oidc/jwks" /pki/jwks/server.crt /pki/jwks/server.key \
+          --ca-url https://step-ca:9000 \
+          --root /home/step/certs/root_ca.crt \
+          --provisioner admin \
+          --provisioner-password-file /home/step/secrets/password \
+          --san jwks \
+          --san localhost \
+          --san spiffe://dev.local/oidc/jwks
+
+        step ca certificate "spiffe://dev.local/db/tidb" /pki/tidb/server.crt /pki/tidb/server.key \
+          --ca-url https://step-ca:9000 \
+          --root /home/step/certs/root_ca.crt \
+          --provisioner admin \
+          --provisioner-password-file /home/step/secrets/password \
+          --san tidb \
+          --san localhost \
+          --san spiffe://dev.local/db/tidb
+
+        step ca certificate "app_mtls" /pki/tidb-graphql-to-tidb/client.crt /pki/tidb-graphql-to-tidb/client.key \
+          --ca-url https://step-ca:9000 \
+          --root /home/step/certs/root_ca.crt \
+          --provisioner admin \
+          --provisioner-password-file /home/step/secrets/password \
+          --san spiffe://dev.local/service/tidb-graphql
+
+        step ca certificate "seed_mtls" /pki/seed-to-tidb/client.crt /pki/seed-to-tidb/client.key \
+          --ca-url https://step-ca:9000 \
+          --root /home/step/certs/root_ca.crt \
+          --provisioner admin \
+          --provisioner-password-file /home/step/secrets/password \
+          --san spiffe://dev.local/job/seed
+
+        step ca certificate "spiffe://dev.local/service/tidb-graphql-server" /pki/tidb-graphql/server.crt /pki/tidb-graphql/server.key \
+          --ca-url https://step-ca:9000 \
+          --root /home/step/certs/root_ca.crt \
+          --provisioner admin \
+          --provisioner-password-file /home/step/secrets/password \
+          --san localhost \
+          --san tidb-graphql \
+          --san spiffe://dev.local/service/tidb-graphql-server
+
+        # Keep private keys strict and grant tidb-graphql (distroless nonroot: 65532)
+        # ownership of only the files it needs.
+        find /pki -type d -exec chmod 755 {} \;
+        find /pki -type f -name '*.crt' -exec chmod 644 {} \;
+        find /pki -type f -name '*.key' -exec chmod 600 {} \;
+        chown 65532:65532 /pki/tidb-graphql/server.crt /pki/tidb-graphql/server.key /pki/tidb-graphql-to-tidb/client.crt /pki/tidb-graphql-to-tidb/client.key
+    restart: "no"
+
   tidb:
     image: pingcap/tidb:v8.5.5
+    depends_on:
+      pki-bootstrap:
+        condition: service_completed_successfully
     command:
-      - "--config=/tidb.toml"
+      - "--config=/etc/tidb/tidb.toml"
     volumes:
-      - ./config/tidb/tidb.toml:/tidb.toml:ro
+      - ./config/tidb/tidb.toml:/etc/tidb/tidb.toml:ro
+      - ./config/tidb/init.sql:/etc/tidb/init.sql:ro
+      - pki:/pki:ro
       - tidb-roles-data:/tmp/tidb
     ports:
       - "4000:4000"
@@ -35,17 +131,29 @@ services:
     volumes:
       - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
       - ../../../docs/tutorials/sample-data-vectors.sql:/seed/sample-data-vectors.sql:ro
-      - ./seed/roles.sql:/seed/roles.sql:ro
+      - pki:/pki:ro
     entrypoint: /bin/sh
     command:
       - -ec
       - |
-        until mysqladmin --protocol=TCP --host=tidb --port=4000 --user=root ping --silent; do
+        until mysqladmin --protocol=TCP --host=tidb --port=4000 --user=seed_mtls \
+          --ssl-mode=VERIFY_IDENTITY \
+          --ssl-ca=/pki/ca/root_ca.crt \
+          --ssl-cert=/pki/seed-to-tidb/client.crt \
+          --ssl-key=/pki/seed-to-tidb/client.key \
+          ping --silent; do
           sleep 1
         done
-        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data.sql
-        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data-vectors.sql
-        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/roles.sql
+        mysql --protocol=TCP --host=tidb --port=4000 --user=seed_mtls \
+          --ssl-mode=VERIFY_IDENTITY \
+          --ssl-ca=/pki/ca/root_ca.crt \
+          --ssl-cert=/pki/seed-to-tidb/client.crt \
+          --ssl-key=/pki/seed-to-tidb/client.key < /seed/sample-data.sql
+        mysql --protocol=TCP --host=tidb --port=4000 --user=seed_mtls \
+          --ssl-mode=VERIFY_IDENTITY \
+          --ssl-ca=/pki/ca/root_ca.crt \
+          --ssl-cert=/pki/seed-to-tidb/client.crt \
+          --ssl-key=/pki/seed-to-tidb/client.key < /seed/sample-data-vectors.sql
     restart: "no"
 
   jwks:
@@ -53,14 +161,32 @@ services:
     working_dir: /workspace
     volumes:
       - ../../../:/workspace
+      - pki:/pki:ro
     entrypoint: /bin/sh
     command:
       - -ec
       - |
-        go run ./scripts/jwt-generate-keys --dir /workspace/.auth
-        go run ./scripts/jwks-server --addr :9000 --issuer https://jwks:9000 --public-key /workspace/.auth/jwt_public.pem --kid local-key
+        if [ ! -s /workspace/.auth/jwt_private.pem ] || [ ! -s /workspace/.auth/jwt_public.pem ]; then
+          go run ./scripts/jwt-generate-keys --dir /workspace/.auth
+        fi
+        go run ./scripts/jwks-server \
+          --addr :9000 \
+          --issuer https://jwks:9000 \
+          --audience tidb-graphql \
+          --public-key /workspace/.auth/jwt_public.pem \
+          --kid local-key \
+          --tls-cert /pki/jwks/server.crt \
+          --tls-key /pki/jwks/server.key \
+          --dev-token-enabled \
+          --dev-token-admin-token "${DEV_ADMIN_TOKEN:-dev-admin-token}" \
+          --dev-token-private-key /workspace/.auth/jwt_private.pem \
+          --dev-token-default-ttl 24h \
+          --dev-token-max-ttl 168h
     ports:
       - "9000:9000"
+    depends_on:
+      pki-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -70,6 +196,8 @@ services:
           "./scripts/jwks-healthcheck",
           "--url",
           "https://localhost:9000/.well-known/openid-configuration",
+          "--ca-file",
+          "/pki/ca/root_ca.crt",
           "--expected-issuer",
           "https://jwks:9000",
         ]
@@ -88,6 +216,7 @@ services:
         COMMIT: ${COMMIT:-none}
     volumes:
       - ./config/tidb-graphql/tidb-graphql.example.yaml:/etc/tidb-graphql/tidb-graphql.yaml:ro
+      - pki:/pki:ro
     environment:
       OTEL_EXPORTER_OTLP_HEADERS: x-honeycomb-team=${HONEYCOMB_API_KEY}
     ports:
@@ -102,3 +231,5 @@ services:
 
 volumes:
   tidb-roles-data:
+  step:
+  pki:

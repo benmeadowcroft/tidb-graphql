@@ -124,6 +124,7 @@ type AuthConfig struct {
 	OIDCEnabled             bool          `mapstructure:"oidc_enabled"`
 	OIDCIssuerURL           string        `mapstructure:"oidc_issuer_url"`
 	OIDCAudience            string        `mapstructure:"oidc_audience"`
+	OIDCCAFile              string        `mapstructure:"oidc_ca_file"`
 	OIDCClockSkew           time.Duration `mapstructure:"oidc_clock_skew"`
 	OIDCSkipTLSVerify       bool          `mapstructure:"oidc_skip_tls_verify"`
 	DBRoleEnabled           bool          `mapstructure:"db_role_enabled"`

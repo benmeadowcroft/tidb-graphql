@@ -214,6 +214,7 @@ Authentication (under `server.auth`):
 - `server.auth.oidc_enabled` (bool, default: `false`)
 - `server.auth.oidc_issuer_url` (string, default: empty; must be HTTPS)
 - `server.auth.oidc_audience` (string, default: empty)
+- `server.auth.oidc_ca_file` (string, default: empty; optional CA bundle for OIDC provider TLS)
 - `server.auth.oidc_clock_skew` (duration, default: `2m`)
 - `server.auth.oidc_skip_tls_verify` (bool, default: `false`; dev-only)
 - `server.auth.db_role_enabled` (bool, default: `false`)

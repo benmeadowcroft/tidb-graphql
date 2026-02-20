@@ -4,6 +4,14 @@ Goal: enable authentication locally without requiring a full OIDC (OpenID Connec
 
 TiDB GraphQL uses OIDC discovery + JWKS (JSON Web Key Set). For local development use, you can use the built-in JWKS server with a self-signed TLS cert to test authentication and authorization without having to set up an OpenID Connect deployment. The TiDB GraphQL project provides some helper scripts to faciliatate developer testing, before you go to production with an actual OIDC/JWKS setup.
 
+If you are using `examples/compose/oidc-roles` or `examples/compose/otel`, use:
+
+```bash
+make token-viewer SCENARIO=oidc-roles
+```
+
+This uses the scenario JWKS `POST /dev/token` endpoint and prints a ready-to-use JWT.
+
 ## 1) Generate local keys
 
 First, we will generate some local keys. These artefacts will be used by our lightweight JWKS server, and to mint new JWS Tokens.
@@ -12,8 +20,7 @@ First, we will generate some local keys. These artefacts will be used by our lig
 go run ./scripts/jwt-generate-keys
 ```
 
-This writes JWT signing keys under `.auth/`. The JWKS server will generate its
-own self-signed TLS certificate on first start.
+This writes JWT signing keys under `.auth/`.
 
 ## 2) Start the local JWKS server
 
@@ -58,10 +65,22 @@ server:
     oidc_enabled: true
     oidc_issuer_url: "https://localhost:9000"
     oidc_audience: "tidb-graphql"
-    oidc_skip_tls_verify: true
+    oidc_skip_tls_verify: true # fallback for ad-hoc self-signed local JWKS only
 ```
 
-Note: `oidc_skip_tls_verify` is a dev-only escape hatch for the self-signed cert. It logs a warning.
+If your local JWKS server is using a private/local CA, prefer this instead:
+
+```yaml
+server:
+  auth:
+    oidc_enabled: true
+    oidc_issuer_url: "https://jwks:9000"
+    oidc_audience: "tidb-graphql"
+    oidc_ca_file: "/pki/ca/root_ca.crt"
+    oidc_skip_tls_verify: false
+```
+
+`oidc_skip_tls_verify` is a dev-only escape hatch and logs a warning.
 
 ## 5) Enable RBAC in the config (Optional)
 
@@ -88,7 +107,7 @@ server:
     oidc_enabled: true
     oidc_issuer_url: "https://localhost:9000"
     oidc_audience: "tidb-graphql"
-    oidc_skip_tls_verify: true
+    oidc_skip_tls_verify: true # set oidc_ca_file + false when using a private/local CA
 
     # enable authorization
     db_role_enabled: true

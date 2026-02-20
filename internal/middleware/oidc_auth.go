@@ -3,12 +3,14 @@ package middleware
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,7 @@ type OIDCAuthConfig struct {
 	Enabled       bool
 	IssuerURL     string
 	Audience      string
+	CAFile        string
 	ClockSkew     time.Duration
 	SkipTLSVerify bool
 }
@@ -90,11 +93,9 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 		)
 	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.SkipTLSVerify},
-		},
-		Timeout: 10 * time.Second,
+	httpClient, err := newOIDCHTTPClient(cfg)
+	if err != nil {
+		return nil, err
 	}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, httpClient)
 
@@ -229,6 +230,37 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}, nil
+}
+
+func newOIDCHTTPClient(cfg OIDCAuthConfig) (*http.Client, error) {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: cfg.SkipTLSVerify,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	caFile := strings.TrimSpace(cfg.CAFile)
+	if caFile != "" {
+		pemData, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read OIDC CA file %q: %w", caFile, err)
+		}
+
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if ok := pool.AppendCertsFromPEM(pemData); !ok {
+			return nil, fmt.Errorf("failed to parse OIDC CA file %q", caFile)
+		}
+		tlsConfig.RootCAs = pool
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+		Timeout: 10 * time.Second,
 	}, nil
 }
 

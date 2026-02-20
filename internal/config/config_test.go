@@ -555,6 +555,26 @@ func TestConfig_Validate(t *testing.T) {
 		assert.Contains(t, result.Error(), "oidc_audience")
 	})
 
+	t.Run("OIDC ca file with skip verify warns", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Server.Auth.OIDCEnabled = true
+		cfg.Server.Auth.OIDCIssuerURL = "https://issuer.test"
+		cfg.Server.Auth.OIDCAudience = "aud"
+		cfg.Server.Auth.OIDCCAFile = "/tmp/oidc-ca.crt"
+		cfg.Server.Auth.OIDCSkipTLSVerify = true
+		result := cfg.Validate()
+		assert.False(t, result.HasErrors())
+		found := false
+		for _, warning := range result.Warnings {
+			if warning.Field == "server.auth.oidc_skip_tls_verify" &&
+				strings.Contains(warning.Message, "disables certificate verification") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "expected warning for oidc_ca_file with skip verify enabled")
+	})
+
 	t.Run("admin schema reload enabled without OIDC requires token", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Server.Admin.SchemaReloadEnabled = true

@@ -1,4 +1,4 @@
-.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server container-build compose-up compose-down compose-reset compose-validate
+.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server token-viewer token-admin container-build compose-up compose-down compose-reset compose-validate
 
 # Default target
 help:
@@ -17,6 +17,8 @@ help:
 	@echo "  jwt-keys           - Generate local JWT keypair in .auth/"
 	@echo "  jwt-token          - Mint a JWT token from local keypair"
 	@echo "  jwks-server        - Run a local JWKS server for dev auth testing"
+	@echo "  token-viewer       - Mint app_viewer token from scenario JWKS /dev/token"
+	@echo "  token-admin        - Mint app_admin token from scenario JWKS /dev/token"
 	@echo "  container-build    - Build container image locally (podman/docker)"
 	@echo "  compose-up         - Start development environment (TiDB + tidb-graphql)"
 	@echo "  compose-down       - Stop development environment"
@@ -119,6 +121,34 @@ jwt-token:
 jwks-server:
 	go run ./scripts/jwks-server
 
+# Scenario-backed JWT minting defaults
+SCENARIO ?= oidc-roles
+OIDC_COMPOSE_FILE ?= examples/compose/$(SCENARIO)/docker-compose.yml
+OIDC_ENV_FILE ?= examples/compose/$(SCENARIO)/.env
+TOKEN_ENDPOINT ?= https://localhost:9000/dev/token
+DEFAULT_DEV_ADMIN_TOKEN ?= dev-admin-token
+TOKEN_CURL_TLS_FLAGS ?= -k
+
+token-viewer:
+	@admin_token="$${DEV_ADMIN_TOKEN:-$$(grep -E '^DEV_ADMIN_TOKEN=' $(OIDC_ENV_FILE) 2>/dev/null | tail -n1 | cut -d= -f2-)}"; \
+	admin_token="$${admin_token:-$(DEFAULT_DEV_ADMIN_TOKEN)}"; \
+	admin_token="$$(printf '%s' "$$admin_token" | sed -e 's/^"//' -e 's/"$$//' -e "s/^'//" -e "s/'$$//")"; \
+	curl $(TOKEN_CURL_TLS_FLAGS) -fsS -X POST $(TOKEN_ENDPOINT) \
+		-H "X-Admin-Token: $$admin_token" \
+		-H "Content-Type: application/json" \
+		-H "Accept: text/plain" \
+		-d '{"db_role":"app_viewer"}'
+
+token-admin:
+	@admin_token="$${DEV_ADMIN_TOKEN:-$$(grep -E '^DEV_ADMIN_TOKEN=' $(OIDC_ENV_FILE) 2>/dev/null | tail -n1 | cut -d= -f2-)}"; \
+	admin_token="$${admin_token:-$(DEFAULT_DEV_ADMIN_TOKEN)}"; \
+	admin_token="$$(printf '%s' "$$admin_token" | sed -e 's/^"//' -e 's/"$$//' -e "s/^'//" -e "s/'$$//")"; \
+	curl $(TOKEN_CURL_TLS_FLAGS) -fsS -X POST $(TOKEN_ENDPOINT) \
+		-H "X-Admin-Token: $$admin_token" \
+		-H "Content-Type: application/json" \
+		-H "Accept: text/plain" \
+		-d '{"db_role":"app_admin"}'
+
 # Auto-detect container tool (podman preferred, docker fallback)
 CONTAINER_TOOL ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
 QUICKSTART_COMPOSE_FILE ?= examples/compose/quickstart/docker-compose.yml
@@ -154,6 +184,7 @@ compose-validate:
 	@$(CONTAINER_TOOL) compose -f examples/compose/quickstart-db-zero/docker-compose.yml config >/dev/null
 	@$(CONTAINER_TOOL) compose -f examples/compose/remote-db/docker-compose.yml config >/dev/null
 	@$(CONTAINER_TOOL) compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
+	@$(CONTAINER_TOOL) compose -f examples/compose/otel/docker-compose.yml config >/dev/null
 	@echo "Compose validation passed."
 
 # Build and run in one command

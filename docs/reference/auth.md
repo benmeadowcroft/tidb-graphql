@@ -9,6 +9,7 @@ Key settings:
 - `server.auth.oidc_enabled` (bool)
 - `server.auth.oidc_issuer_url` (HTTPS only)
 - `server.auth.oidc_audience` (expected audience)
+- `server.auth.oidc_ca_file` (optional CA bundle for private/self-managed OIDC TLS)
 - `server.auth.oidc_clock_skew` (JWT clock skew allowance)
 - `server.auth.oidc_skip_tls_verify` (dev-only; logs a warning)
 

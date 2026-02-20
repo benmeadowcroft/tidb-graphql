@@ -456,7 +456,6 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string,
 				return role.Role, ok && role.Validated
 			},
 			AllowedRoles: availableRoles,
-			ValidateRole: cfg.Server.Auth.DBRoleValidationEnabled,
 		})
 	}
 	return queryExecutor
@@ -504,11 +503,11 @@ func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging
 
 func oidcAuthConfig(cfg *config.Config) middleware.OIDCAuthConfig {
 	return middleware.OIDCAuthConfig{
-		Enabled:       cfg.Server.Auth.OIDCEnabled,
-		IssuerURL:     cfg.Server.Auth.OIDCIssuerURL,
-		Audience:      cfg.Server.Auth.OIDCAudience,
-		ClockSkew:     cfg.Server.Auth.OIDCClockSkew,
-		SkipTLSVerify: cfg.Server.Auth.OIDCSkipTLSVerify,
+		Enabled:   cfg.Server.Auth.OIDCEnabled,
+		IssuerURL: cfg.Server.Auth.OIDCIssuerURL,
+		Audience:  cfg.Server.Auth.OIDCAudience,
+		CAFile:    cfg.Server.Auth.OIDCCAFile,
+		ClockSkew: cfg.Server.Auth.OIDCClockSkew,
 	}
 }
 
@@ -541,7 +540,7 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 	}
 	dbRoleHandler := baseHandler
 	if cfg.Server.Auth.DBRoleEnabled {
-		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.Auth.DBRoleClaimName, cfg.Server.Auth.DBRoleValidationEnabled, availableRoles)(baseHandler)
+		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.Auth.DBRoleClaimName, availableRoles)(baseHandler)
 		logger.Info("database role middleware enabled")
 	}
 
@@ -559,6 +558,11 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 }
 
 func buildAdminHandler(cfg *config.Config, logger *logging.Logger, manager *schemarefresh.Manager, securityMetrics *observability.SecurityMetrics) (http.Handler, error) {
+	if !cfg.Server.Admin.SchemaReloadEnabled {
+		logger.Info("admin schema reload endpoint disabled")
+		return nil, nil
+	}
+
 	var adminHandler http.Handler = http.HandlerFunc(schemaReloadHandler(manager, securityMetrics))
 	if cfg.Server.Auth.OIDCEnabled {
 		adminAuthMiddleware, err := middleware.OIDCAuthMiddleware(oidcAuthConfig(cfg), logger, securityMetrics)
@@ -566,11 +570,18 @@ func buildAdminHandler(cfg *config.Config, logger *logging.Logger, manager *sche
 			return nil, err
 		}
 		adminHandler = adminAuthMiddleware(adminHandler)
-		logger.Info("admin endpoints require authentication")
+		logger.Info("admin schema reload endpoint enabled with OIDC authentication")
 	} else {
-		logger.Warn("admin endpoints are not authenticated - consider enabling OIDC authentication")
+		adminAuthMiddleware, err := middleware.AdminTokenAuthMiddleware(middleware.AdminTokenAuthConfig{
+			Token: cfg.Server.Admin.AuthToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		adminHandler = adminAuthMiddleware(adminHandler)
+		logger.Info("admin schema reload endpoint enabled with shared token authentication")
 	}
-	return adminHandler, nil
+	return middleware.LoggingMiddleware(logger)(adminHandler), nil
 }
 
 func buildRouter(cfg *config.Config, logger *logging.Logger, db *sql.DB, graphqlHandler http.Handler, adminHandler http.Handler, meterProvider *observability.MeterProvider) *http.ServeMux {
@@ -585,7 +596,9 @@ func buildRouter(cfg *config.Config, logger *logging.Logger, db *sql.DB, graphql
 	})
 
 	mux.HandleFunc("/health", healthHandler(db, cfg.Server.HealthCheckTimeout))
-	mux.Handle("/admin/reload-schema", adminHandler)
+	if cfg.Server.Admin.SchemaReloadEnabled && adminHandler != nil {
+		mux.Handle("/admin/reload-schema", adminHandler)
+	}
 
 	if cfg.Observability.MetricsEnabled && meterProvider != nil {
 		mux.Handle("/metrics", promhttp.Handler())

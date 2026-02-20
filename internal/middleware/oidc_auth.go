@@ -3,12 +3,14 @@ package middleware
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -24,11 +26,11 @@ import (
 
 // OIDCAuthConfig controls OIDC/JWKS validation behavior.
 type OIDCAuthConfig struct {
-	Enabled       bool
-	IssuerURL     string
-	Audience      string
-	ClockSkew     time.Duration
-	SkipTLSVerify bool
+	Enabled   bool
+	IssuerURL string
+	Audience  string
+	CAFile    string
+	ClockSkew time.Duration
 }
 
 type authContextKey struct{}
@@ -49,6 +51,11 @@ func AuthFromContext(ctx context.Context) (AuthContext, bool) {
 	}
 	auth, ok := value.(AuthContext)
 	return auth, ok
+}
+
+// WithAuthContext attaches validated authentication details to the request context.
+func WithAuthContext(ctx context.Context, auth AuthContext) context.Context {
+	return context.WithValue(ctx, authContextKey{}, auth)
 }
 
 // OIDCAuthMiddleware validates Bearer tokens when enabled.
@@ -79,17 +86,10 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 	if issuerURL.Scheme != "https" {
 		return nil, errors.New("oidc issuer url must use https")
 	}
-	if logger != nil && cfg.SkipTLSVerify {
-		logger.Warn("oidc tls verification is disabled; enable only for local development",
-			"issuer", cfg.IssuerURL,
-		)
-	}
 
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.SkipTLSVerify},
-		},
-		Timeout: 10 * time.Second,
+	httpClient, err := newOIDCHTTPClient(cfg)
+	if err != nil {
+		return nil, err
 	}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, httpClient)
 
@@ -215,7 +215,7 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 				}
 			}
 
-			ctx := context.WithValue(r.Context(), authContextKey{}, AuthContext{
+			ctx := WithAuthContext(r.Context(), AuthContext{
 				Subject:  subject,
 				Issuer:   cfg.IssuerURL,
 				Audience: aud,
@@ -224,6 +224,36 @@ func OIDCAuthMiddleware(cfg OIDCAuthConfig, logger *logging.Logger, securityMetr
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
+	}, nil
+}
+
+func newOIDCHTTPClient(cfg OIDCAuthConfig) (*http.Client, error) {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	caFile := strings.TrimSpace(cfg.CAFile)
+	if caFile != "" {
+		pemData, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read OIDC CA file %q: %w", caFile, err)
+		}
+
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if ok := pool.AppendCertsFromPEM(pemData); !ok {
+			return nil, fmt.Errorf("failed to parse OIDC CA file %q", caFile)
+		}
+		tlsConfig.RootCAs = pool
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+		Timeout: 10 * time.Second,
 	}, nil
 }
 

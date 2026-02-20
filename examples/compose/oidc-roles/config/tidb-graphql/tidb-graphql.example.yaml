@@ -1,23 +1,31 @@
 database:
   host: tidb
   port: 4000
-  user: tidb_graphql
-  password: tidb_graphql_pw
+  user: app_mtls
   database: tidb_graphql_tutorial
+  tls:
+    mode: verify-full
+    ca_file: /pki/ca/root_ca.crt
+    cert_file: /pki/tidb-graphql-to-tidb/client.crt
+    key_file: /pki/tidb-graphql-to-tidb/client.key
+    server_name: tidb
 
 server:
   port: 8080
   graphiql_enabled: true
-  tls_mode: off
+  tls_mode: file
+  tls_cert_file: /pki/tidb-graphql/server.crt
+  tls_key_file: /pki/tidb-graphql/server.key
   auth:
     oidc_enabled: true
     oidc_issuer_url: https://jwks:9000
     oidc_audience: tidb-graphql
-    oidc_skip_tls_verify: true
+    oidc_ca_file: /pki/ca/root_ca.crt
     db_role_enabled: true
     db_role_claim_name: db_role
-    db_role_validation_enabled: true
     db_role_introspection_role: app_introspect
+  admin:
+    schema_reload_enabled: true
 
 observability:
   environment: development

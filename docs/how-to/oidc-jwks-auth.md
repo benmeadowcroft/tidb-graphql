@@ -20,6 +20,12 @@ go run ./scripts/jwt-mint --issuer https://localhost:9000 --audience tidb-graphq
 
 See [Secure local dev with OIDC/JWKS](../tutorials/local-oidc.md) for more details on the local JWKS server for development testing.
 
+For the compose-based OIDC scenarios, you can mint via the built-in dev token endpoint:
+
+```bash
+make token-viewer SCENARIO=oidc-roles
+```
+
 ## 2) Set the OIDC config
 
 Production (OIDC provider):
@@ -29,23 +35,23 @@ server:
     oidc_enabled: true
     oidc_issuer_url: "https://issuer.example.com"
     oidc_audience: "tidb-graphql"
+    oidc_ca_file: "/etc/ssl/certs/custom-oidc-ca.pem" # optional for private/self-managed CAs
     oidc_clock_skew: 2m
-    oidc_skip_tls_verify: false
 ```
 
-Local dev (self-signed JWKS):
+Local dev (private/local CA-managed JWKS):
 ```yaml
 server:
   auth:
     oidc_enabled: true
-    oidc_issuer_url: "https://localhost:9000"
+    oidc_issuer_url: "https://jwks:9000"
     oidc_audience: "tidb-graphql"
-    oidc_skip_tls_verify: true
+    oidc_ca_file: "/pki/ca/root_ca.crt"
 ```
 
 Notes:
 - `server.auth.oidc_issuer_url` must be HTTPS.
-- `server.auth.oidc_skip_tls_verify` is for local dev with self-signed certs and logs a warning.
+- `server.auth.oidc_ca_file` lets you trust private/self-managed CAs while keeping certificate verification enabled.
 
 ## 3) Restart the TiDB GraphQL server
 
@@ -64,7 +70,15 @@ If you omit the token, requests should be rejected.
 
 ## 5) Protect admin endpoints too
 
-When OIDC is enabled, `/admin/reload-schema` is protected automatically.
+Enable admin schema reload explicitly:
+
+```yaml
+server:
+  admin:
+    schema_reload_enabled: true
+```
+
+When OIDC is enabled and the admin endpoint is enabled, `/admin/reload-schema` is protected automatically.
 
 ---
 # Related Docs

@@ -68,6 +68,9 @@ func Load() (*Config, error) {
 	// --- Flags binding (highest normal priority) ---
 	bindChangedFlagsToViper(v)
 	databaseNameExplicit := databaseNameExplicitlyConfigured(v)
+	if err := validateSingleStdinFileSource(v); err != nil {
+		return nil, err
+	}
 
 	// --- DSN from file (explicit override) ---
 	if v.GetString("database.dsn") == "" && v.GetString("database.dsn_file") != "" {
@@ -123,6 +126,19 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("failed to read password: %w", err)
 		}
 		v.Set("database.password", pwd)
+	}
+
+	// --- Admin auth token from file (explicit override) ---
+	if v.GetString("server.admin.auth_token") == "" && v.GetString("server.admin.auth_token_file") != "" {
+		tokenPath := v.GetString("server.admin.auth_token_file")
+		token, err := readPasswordFile(tokenPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read admin auth token file: %w", err)
+		}
+		if token == "" {
+			return nil, fmt.Errorf("admin auth token file %q is empty", tokenPath)
+		}
+		v.Set("server.admin.auth_token", token)
 	}
 
 	// --- Effective database normalization ---
@@ -250,15 +266,17 @@ func defineFlags() {
 		pflag.Bool("server.auth.oidc_enabled", false, "Enable OIDC/JWKS authentication middleware")
 		pflag.String("server.auth.oidc_issuer_url", "", "OIDC issuer URL (for discovery and JWKS)")
 		pflag.String("server.auth.oidc_audience", "", "Expected JWT audience (client ID)")
+		pflag.String("server.auth.oidc_ca_file", "", "Path to CA bundle for OIDC provider TLS verification")
 		pflag.Duration("server.auth.oidc_clock_skew", 0, "Allowed JWT clock skew (e.g. 2m)")
-		pflag.Bool("server.auth.oidc_skip_tls_verify", false, "Skip TLS verification for OIDC provider (dev only)")
 		pflag.Bool("server.auth.db_role_enabled", false, "Enable database role-based authorization (SET ROLE)")
 		pflag.String("server.auth.db_role_claim_name", "", "JWT claim name containing database role (default: db_role)")
-		pflag.Bool("server.auth.db_role_validation_enabled", false, "Validate db_role against discovered database roles")
 		pflag.String("server.auth.db_role_introspection_role", "", "Database role used for schema introspection when role auth is enabled")
 		pflag.StringSlice("server.auth.role_schema_include", nil, "Role glob patterns to include for role-specific schema snapshots (default: [*])")
 		pflag.StringSlice("server.auth.role_schema_exclude", nil, "Role glob patterns to exclude from role-specific schema snapshots")
 		pflag.Int("server.auth.role_schema_max_roles", 0, "Maximum number of role-specific schemas to build when db_role_enabled is true")
+		pflag.Bool("server.admin.schema_reload_enabled", false, "Enable /admin/reload-schema endpoint")
+		pflag.String("server.admin.auth_token", "", "Shared secret required in X-Admin-Token header when admin endpoint is enabled without OIDC")
+		pflag.String("server.admin.auth_token_file", "", "Path to file containing admin auth token (use @- for stdin)")
 		pflag.Bool("server.rate_limit_enabled", false, "Enable global rate limiting for all HTTP endpoints")
 		pflag.Float64("server.rate_limit_rps", 0, "Global rate limit requests per second")
 		pflag.Int("server.rate_limit_burst", 0, "Global rate limit burst size")
@@ -376,15 +394,17 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.auth.oidc_enabled", false)
 	v.SetDefault("server.auth.oidc_issuer_url", "")
 	v.SetDefault("server.auth.oidc_audience", "")
+	v.SetDefault("server.auth.oidc_ca_file", "")
 	v.SetDefault("server.auth.oidc_clock_skew", 2*time.Minute)
-	v.SetDefault("server.auth.oidc_skip_tls_verify", false)
 	v.SetDefault("server.auth.db_role_enabled", false)
 	v.SetDefault("server.auth.db_role_claim_name", "db_role")
-	v.SetDefault("server.auth.db_role_validation_enabled", true)
 	v.SetDefault("server.auth.db_role_introspection_role", "")
 	v.SetDefault("server.auth.role_schema_include", []string{"*"})
 	v.SetDefault("server.auth.role_schema_exclude", []string{})
 	v.SetDefault("server.auth.role_schema_max_roles", 64)
+	v.SetDefault("server.admin.schema_reload_enabled", false)
+	v.SetDefault("server.admin.auth_token", "")
+	v.SetDefault("server.admin.auth_token_file", "")
 	v.SetDefault("server.rate_limit_enabled", false)
 	v.SetDefault("server.rate_limit_rps", 0.0)
 	v.SetDefault("server.rate_limit_burst", 0)
@@ -492,6 +512,31 @@ func readRawFile(path string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func validateSingleStdinFileSource(v *viper.Viper) error {
+	stdinBackedKeys := []string{
+		"database.dsn_file",
+		"database.mycnf_file",
+		"database.password_file",
+		"server.admin.auth_token_file",
+	}
+
+	var configured []string
+	for _, key := range stdinBackedKeys {
+		if strings.TrimSpace(v.GetString(key)) == "@-" {
+			configured = append(configured, key)
+		}
+	}
+
+	if len(configured) > 1 {
+		return fmt.Errorf(
+			"multiple stdin-backed file settings use @- (%s); only one @- source is allowed",
+			strings.Join(configured, ", "),
+		)
+	}
+
+	return nil
 }
 
 func parseMyCnfFile(path string) (myCnfSettings, error) {

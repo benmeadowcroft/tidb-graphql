@@ -18,7 +18,6 @@ func TestRoleExecutorConfig(t *testing.T) {
 				return "test_role", true
 			},
 			AllowedRoles: []string{"app_admin", "app_analyst"},
-			ValidateRole: true,
 		})
 
 		// Check that allowedRoles map is populated correctly
@@ -46,7 +45,6 @@ func TestRoleExecutorConfig(t *testing.T) {
 			DB:           nil,
 			RoleFromCtx:  roleFunc,
 			AllowedRoles: []string{},
-			ValidateRole: false,
 		})
 
 		// Call the stored function
@@ -59,27 +57,6 @@ func TestRoleExecutorConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("validation flag is stored", func(t *testing.T) {
-		executor1 := NewRoleExecutor(RoleExecutorConfig{
-			DB:           nil,
-			RoleFromCtx:  nil,
-			AllowedRoles: []string{},
-			ValidateRole: true,
-		})
-		if !executor1.validateRole {
-			t.Error("expected validateRole to be true")
-		}
-
-		executor2 := NewRoleExecutor(RoleExecutorConfig{
-			DB:           nil,
-			RoleFromCtx:  nil,
-			AllowedRoles: []string{},
-			ValidateRole: false,
-		})
-		if executor2.validateRole {
-			t.Error("expected validateRole to be false")
-		}
-	})
 }
 
 func TestStandardExecutor(t *testing.T) {
@@ -119,39 +96,27 @@ func TestRoleValidationLogic(t *testing.T) {
 		role         string
 		hasRole      bool
 		allowedRoles []string
-		validateRole bool
 		expectValid  bool
 	}{
 		{
-			name:         "valid role with validation enabled",
+			name:         "valid role passes allowlist",
 			role:         "app_analyst",
 			hasRole:      true,
 			allowedRoles: []string{"app_admin", "app_analyst", "app_viewer"},
-			validateRole: true,
 			expectValid:  true,
 		},
 		{
-			name:         "invalid role with validation enabled",
+			name:         "invalid role is rejected by allowlist",
 			role:         "superuser",
 			hasRole:      true,
 			allowedRoles: []string{"app_admin", "app_analyst"},
-			validateRole: true,
 			expectValid:  false,
-		},
-		{
-			name:         "invalid role with validation disabled",
-			role:         "superuser",
-			hasRole:      true,
-			allowedRoles: []string{"app_admin"},
-			validateRole: false,
-			expectValid:  true, // Validation disabled, so any role passes
 		},
 		{
 			name:         "no role provided",
 			role:         "",
 			hasRole:      false,
 			allowedRoles: []string{"app_admin"},
-			validateRole: true,
 			expectValid:  true, // No role means skip validation
 		},
 		{
@@ -159,7 +124,6 @@ func TestRoleValidationLogic(t *testing.T) {
 			role:         "",
 			hasRole:      true,
 			allowedRoles: []string{"app_admin"},
-			validateRole: true,
 			expectValid:  true, // Empty role skips validation
 		},
 	}
@@ -172,12 +136,11 @@ func TestRoleValidationLogic(t *testing.T) {
 					return tt.role, tt.hasRole
 				},
 				AllowedRoles: tt.allowedRoles,
-				ValidateRole: tt.validateRole,
 			})
 
-			// Simulate the validation logic
+			// Simulate the allowlist logic
 			role, ok := executor.roleFromCtx(context.Background())
-			shouldValidate := ok && role != "" && executor.validateRole
+			shouldValidate := ok && role != ""
 
 			var valid bool
 			if !shouldValidate {
@@ -187,8 +150,8 @@ func TestRoleValidationLogic(t *testing.T) {
 			}
 
 			if valid != tt.expectValid {
-				t.Errorf("expected valid=%v, got valid=%v (role=%q, hasRole=%v, validateRole=%v)",
-					tt.expectValid, valid, role, ok, executor.validateRole)
+				t.Errorf("expected valid=%v, got valid=%v (role=%q, hasRole=%v)",
+					tt.expectValid, valid, role, ok)
 			}
 		})
 	}

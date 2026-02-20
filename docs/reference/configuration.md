@@ -25,6 +25,7 @@ Examples:
 - `database.pool.max_open` → `TIGQL_DATABASE_POOL_MAX_OPEN`
 - `server.graphql_max_depth` → `TIGQL_SERVER_GRAPHQL_MAX_DEPTH`
 - `server.auth.oidc_enabled` → `TIGQL_SERVER_AUTH_OIDC_ENABLED`
+- `server.admin.schema_reload_enabled` → `TIGQL_SERVER_ADMIN_SCHEMA_RELOAD_ENABLED`
 - `observability.otlp.endpoint` → `TIGQL_OBSERVABILITY_OTLP_ENDPOINT`
 - `observability.trace_sample_ratio` → `TIGQL_OBSERVABILITY_TRACE_SAMPLE_RATIO`
 
@@ -213,11 +214,10 @@ Authentication (under `server.auth`):
 - `server.auth.oidc_enabled` (bool, default: `false`)
 - `server.auth.oidc_issuer_url` (string, default: empty; must be HTTPS)
 - `server.auth.oidc_audience` (string, default: empty)
+- `server.auth.oidc_ca_file` (string, default: empty; optional CA bundle for OIDC provider TLS)
 - `server.auth.oidc_clock_skew` (duration, default: `2m`)
-- `server.auth.oidc_skip_tls_verify` (bool, default: `false`; dev-only)
 - `server.auth.db_role_enabled` (bool, default: `false`)
 - `server.auth.db_role_claim_name` (string, default: `db_role`)
-- `server.auth.db_role_validation_enabled` (bool, default: `true`)
 - `server.auth.db_role_introspection_role` (string, default: empty; role used only during schema refresh)
 - `server.auth.role_schema_include` (list of string, default: `["*"]`; role glob patterns to include for role-specific schemas)
 - `server.auth.role_schema_exclude` (list of string, default: empty; role glob patterns to exclude from role-specific schemas)
@@ -227,6 +227,16 @@ When `server.auth.db_role_enabled` is true, the server builds role-specific Grap
 from discovered database roles. Discovery is filtered by `role_schema_include`/`role_schema_exclude`
 (case-insensitive glob matching), and startup/refresh fails if selected roles exceed `role_schema_max_roles`.
 An explicitly empty include list is treated as `["*"]`.
+
+Admin endpoints (under `server.admin`):
+- `server.admin.schema_reload_enabled` (bool, default: `false`) - expose `/admin/reload-schema`
+- `server.admin.auth_token` (string, default: empty) - shared secret checked against `X-Admin-Token` when schema reload is enabled and OIDC is disabled
+- `server.admin.auth_token_file` (string, default: empty) - path to file containing admin auth token
+
+Admin auth behavior:
+- If `schema_reload_enabled` is `false`, `/admin/reload-schema` is not registered (`404`).
+- If `schema_reload_enabled` is `true` and `server.auth.oidc_enabled` is `true`, OIDC protects the endpoint.
+- If `schema_reload_enabled` is `true` and OIDC is disabled, `X-Admin-Token` is required.
 
 Rate limiting:
 - `server.rate_limit_enabled` (bool, default: `false`)

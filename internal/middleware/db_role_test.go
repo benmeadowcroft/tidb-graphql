@@ -21,7 +21,6 @@ func TestDBRoleMiddleware(t *testing.T) {
 		name           string
 		claims         map[string]interface{}
 		availableRoles []string
-		validate       bool
 		expectStatus   int
 		expectRole     string
 		expectMessage  string
@@ -47,7 +46,6 @@ func TestDBRoleMiddleware(t *testing.T) {
 			name:           "invalid db_role value",
 			claims:         map[string]interface{}{"db_role": "superuser"},
 			availableRoles: []string{"app_viewer", "app_analyst"},
-			validate:       true,
 			expectStatus:   http.StatusForbidden,
 			expectMessage:  "invalid database role: superuser",
 		},
@@ -55,7 +53,6 @@ func TestDBRoleMiddleware(t *testing.T) {
 			name:           "valid db_role value",
 			claims:         map[string]interface{}{"db_role": "app_analyst"},
 			availableRoles: []string{"app_viewer", "app_analyst"},
-			validate:       true,
 			expectStatus:   http.StatusOK,
 			expectRole:     "app_analyst",
 		},
@@ -71,7 +68,7 @@ func TestDBRoleMiddleware(t *testing.T) {
 			}
 
 			rec := httptest.NewRecorder()
-			middleware := DBRoleMiddleware("", tt.validate, tt.availableRoles)
+			middleware := DBRoleMiddleware("", tt.availableRoles)
 			middleware(handler).ServeHTTP(rec, req)
 
 			if rec.Code != tt.expectStatus {

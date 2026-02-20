@@ -31,7 +31,9 @@ Example response:
 
 - Method: `POST`
   - Triggers a schema rebuild and atomic swap.
-  - Protected by OIDC when `server.auth.oidc_enabled` is true.
+  - Disabled by default (`server.admin.schema_reload_enabled: false`).
+  - When enabled and OIDC is on, protected by OIDC.
+  - When enabled and OIDC is off, requires `X-Admin-Token`.
 
 ## /metrics
 

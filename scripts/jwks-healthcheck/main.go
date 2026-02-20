@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -18,16 +19,14 @@ type oidcDiscoveryDocument struct {
 
 func main() {
 	url := flag.String("url", "https://localhost:9000/.well-known/openid-configuration", "OIDC discovery URL to probe")
+	caFile := flag.String("ca-file", "", "Optional CA certificate file for TLS verification")
 	timeout := flag.Duration("timeout", 3*time.Second, "HTTP request timeout")
 	expectedIssuer := flag.String("expected-issuer", "", "Optional expected issuer value")
 	flag.Parse()
 
-	client := &http.Client{
-		Timeout: *timeout,
-		Transport: &http.Transport{
-			// Local compose JWKS uses a self-signed cert.
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
+	client, err := newHTTPClient(*timeout, *caFile)
+	if err != nil {
+		exitErr(err)
 	}
 
 	resp, err := client.Get(*url)
@@ -54,6 +53,32 @@ func main() {
 	if *expectedIssuer != "" && doc.Issuer != *expectedIssuer {
 		exitErr(fmt.Errorf("issuer mismatch: got %q want %q", doc.Issuer, *expectedIssuer))
 	}
+}
+
+func newHTTPClient(timeout time.Duration, caFile string) (*http.Client, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	caFile = strings.TrimSpace(caFile)
+	if caFile != "" {
+		pemData, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA file %q: %w", caFile, err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if ok := pool.AppendCertsFromPEM(pemData); !ok {
+			return nil, fmt.Errorf("failed to parse CA file %q", caFile)
+		}
+		tlsConfig.RootCAs = pool
+	}
+
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}, nil
 }
 
 func exitErr(err error) {

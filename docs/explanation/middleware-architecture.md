@@ -13,7 +13,7 @@ Middleware is where we enforce cross-cutting behavior that should be consistent 
 ## Design choices
 
 - Middleware keeps policy separate from business logic in resolvers.
-- Authentication is centralized so admin endpoints and GraphQL behave the same way.
+- Authentication is centralized, but admin endpoint auth mode can differ from GraphQL when OIDC is disabled (shared admin token).
 - Role mapping is explicit so database permissions remain the source of truth.
 - DB role activation requires OIDC to be enabled so requests carry a validated JWT.
 

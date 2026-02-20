@@ -21,6 +21,29 @@ docker compose up
 
 Open [http://localhost:8080/graphql](http://localhost:8080/graphql).
 
+## Admin reload endpoint demo (`X-Admin-Token`)
+
+This scenario enables `/admin/reload-schema` and requires `X-Admin-Token`.
+
+Without token (expected `401`):
+
+```bash
+curl -i -X POST http://localhost:8080/admin/reload-schema
+```
+
+With token (expected `200`):
+
+```bash
+curl -i -X POST http://localhost:8080/admin/reload-schema \
+  -H "X-Admin-Token: quickstart-admin-token"
+```
+
+Optional: change the demo token before startup in:
+
+```bash
+examples/compose/quickstart/config/tidb-graphql/tidb-graphql.example.yaml
+```
+
 ## Stop
 
 ```bash

@@ -6,6 +6,9 @@ server:
   port: 8080
   graphiql_enabled: true
   tls_mode: off
+  admin:
+    schema_reload_enabled: true
+    auth_token: quickstart-db-zero-admin-token
 
 observability:
   environment: development

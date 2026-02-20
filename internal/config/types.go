@@ -124,11 +124,10 @@ type AuthConfig struct {
 	OIDCEnabled             bool          `mapstructure:"oidc_enabled"`
 	OIDCIssuerURL           string        `mapstructure:"oidc_issuer_url"`
 	OIDCAudience            string        `mapstructure:"oidc_audience"`
+	OIDCCAFile              string        `mapstructure:"oidc_ca_file"`
 	OIDCClockSkew           time.Duration `mapstructure:"oidc_clock_skew"`
-	OIDCSkipTLSVerify       bool          `mapstructure:"oidc_skip_tls_verify"`
 	DBRoleEnabled           bool          `mapstructure:"db_role_enabled"`
 	DBRoleClaimName         string        `mapstructure:"db_role_claim_name"`
-	DBRoleValidationEnabled bool          `mapstructure:"db_role_validation_enabled"`
 	DBRoleIntrospectionRole string        `mapstructure:"db_role_introspection_role"`
 	RoleSchemaInclude       []string      `mapstructure:"role_schema_include"`
 	RoleSchemaExclude       []string      `mapstructure:"role_schema_exclude"`
@@ -139,6 +138,13 @@ type AuthConfig struct {
 type SearchConfig struct {
 	VectorRequireIndex bool `mapstructure:"vector_require_index"`
 	VectorMaxTopK      int  `mapstructure:"vector_max_top_k"`
+}
+
+// AdminConfig controls administrative endpoint exposure and authentication.
+type AdminConfig struct {
+	SchemaReloadEnabled bool   `mapstructure:"schema_reload_enabled"`
+	AuthToken           string `mapstructure:"auth_token"`
+	AuthTokenFile       string `mapstructure:"auth_token_file"`
 }
 
 // ServerConfig holds HTTP server parameters.
@@ -153,6 +159,7 @@ type ServerConfig struct {
 	GraphiQLEnabled          bool          `mapstructure:"graphiql_enabled"`
 	Search                   SearchConfig  `mapstructure:"search"`
 	Auth                     AuthConfig    `mapstructure:"auth"`
+	Admin                    AdminConfig   `mapstructure:"admin"`
 	RateLimitEnabled         bool          `mapstructure:"rate_limit_enabled"`
 	RateLimitRPS             float64       `mapstructure:"rate_limit_rps"`
 	RateLimitBurst           int           `mapstructure:"rate_limit_burst"`

@@ -1,10 +1,21 @@
 # OIDC + Roles scenario
 
-This scenario starts TiDB, seeds sample data and roles, runs a local JWKS server, and enables OIDC + DB role authorization in `tidb-graphql`.
+This scenario starts:
+- step-ca (local CA)
+- pki-bootstrap (one-shot certificate minting into a Docker named volume)
+- TiDB with TLS + initialize-sql-file bootstrap for roles/users
+- local JWKS server with a CA-issued TLS certificate
+- `tidb-graphql` with HTTPS, OIDC, and DB role authorization enabled
 
 Primary app settings are in:
 
 [examples/compose/oidc-roles/config/tidb-graphql/tidb-graphql.example.yaml](./config/tidb-graphql/tidb-graphql.example.yaml)
+
+Copy `.env.example` to `.env` to optionally override runtime values:
+
+```bash
+cp examples/compose/oidc-roles/.env.example examples/compose/oidc-roles/.env
+```
 
 ## Start
 
@@ -12,16 +23,31 @@ Primary app settings are in:
 docker compose -f examples/compose/oidc-roles/docker-compose.yml up
 ```
 
+If you have previously started this scenario before the TLS/cert-auth changes, reset volumes once so `initialize-sql-file` can bootstrap users/roles:
+
+```bash
+docker compose -f examples/compose/oidc-roles/docker-compose.yml down -v
+docker compose -f examples/compose/oidc-roles/docker-compose.yml up
+```
+
+`tidb-graphql` serves HTTPS on `https://localhost:8080/graphql`.
+
 ## Mint a role token
 
 In a separate shell from the project root:
 
 ```bash
-go run ./scripts/jwt-mint --issuer https://jwks:9000 --audience tidb-graphql --kid local-key --db_role app_viewer
+make token-viewer SCENARIO=oidc-roles
 ```
 
-> [!NOTE]
-> The issuer is set to `https://jwks:9000` as `jwks` is the service name in [docker-compose.yml](docker-compose.yml). The same issuer is also set in the [tidb-graphql.example.yaml](./config/tidb-graphql/tidb-graphql.example.yaml) configuration.
+To mint an admin-role token:
+
+```bash
+make token-admin SCENARIO=oidc-roles
+```
+
+`make token-*` calls JWKS `POST /dev/token` with `X-Admin-Token`.
+It reads `DEV_ADMIN_TOKEN` from `examples/compose/oidc-roles/.env`, and falls back to `dev-admin-token`.
 
 ## Call GraphQL with token
 
@@ -29,5 +55,8 @@ go run ./scripts/jwt-mint --issuer https://jwks:9000 --audience tidb-graphql --k
 curl -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"query":"{ __typename }"}' \
-  http://localhost:8080/graphql
+  -k \
+  https://localhost:8080/graphql
 ```
+
+`-k` is used because the local dev CA root is stored in a Docker volume (`pki`) rather than the host trust store.

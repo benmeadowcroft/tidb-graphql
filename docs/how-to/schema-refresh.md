@@ -4,10 +4,26 @@ Goal: rebuild the GraphQL schema when the database changes.
 
 ## Manual refresh
 
-If auth is enabled, include a token. Otherwise call directly:
+`/admin/reload-schema` is disabled by default. Enable it first:
+
+```yaml
+server:
+  admin:
+    schema_reload_enabled: true
+```
+
+If OIDC is enabled, use Bearer auth:
 
 ```bash
-curl -X POST http://localhost:8080/admin/reload-schema
+curl -X POST http://localhost:8080/admin/reload-schema \
+  -H "Authorization: Bearer <TOKEN>"
+```
+
+If OIDC is disabled, configure `server.admin.auth_token` (or `server.admin.auth_token_file`) and send `X-Admin-Token`:
+
+```bash
+curl -X POST http://localhost:8080/admin/reload-schema \
+  -H "X-Admin-Token: <ADMIN_TOKEN>"
 ```
 
 The server rebuilds the schema snapshot and swaps it atomically.

@@ -33,8 +33,8 @@ func DBRoleFromContext(ctx context.Context) (DBRoleContext, bool) {
 	return role, ok
 }
 
-// DBRoleMiddleware extracts and validates db_role claims from JWTs.
-func DBRoleMiddleware(claimName string, validate bool, availableRoles []string) func(http.Handler) http.Handler {
+// DBRoleMiddleware extracts db_role claims from JWTs and enforces allowlist validation.
+func DBRoleMiddleware(claimName string, availableRoles []string) func(http.Handler) http.Handler {
 	if claimName == "" {
 		claimName = "db_role"
 	}
@@ -64,11 +64,9 @@ func DBRoleMiddleware(claimName string, validate bool, availableRoles []string) 
 				return
 			}
 
-			if validate {
-				if _, allowedRole := allowed[role]; !allowedRole {
-					writeGraphQLError(w, http.StatusForbidden, fmt.Sprintf("invalid database role: %s", role), "FORBIDDEN")
-					return
-				}
+			if _, allowedRole := allowed[role]; !allowedRole {
+				writeGraphQLError(w, http.StatusForbidden, fmt.Sprintf("invalid database role: %s", role), "FORBIDDEN")
+				return
 			}
 
 			ctx := WithDBRole(r.Context(), role, true)

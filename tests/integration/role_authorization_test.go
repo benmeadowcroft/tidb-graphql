@@ -55,8 +55,9 @@ func TestRoleAuthorization(t *testing.T) {
 	privateKey, publicPath := generateKeypair(t)
 	jwksServer := newJWKSServer(t, publicPath, "test-key")
 	t.Cleanup(jwksServer.Close)
+	oidcCAFile := writeOIDCTestCAFile(t, jwksServer)
 
-	handler := buildRoleGraphQLHandler(t, testDB, jwksServer.URL, roles.introspection, roles.all) // OIDC + DB role middleware chain.
+	handler := buildRoleGraphQLHandler(t, testDB, jwksServer.URL, oidcCAFile, roles.introspection, roles.all) // OIDC + DB role middleware chain.
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
@@ -282,7 +283,7 @@ func runtimeUserForGrant(t *testing.T, testDB *tidbcloud.RoleTestDB) string {
 	return fmt.Sprintf("'%s'@'%s'", testDB.RuntimeUser, testDB.RuntimeHost)
 }
 
-func buildRoleGraphQLHandler(t *testing.T, testDB *tidbcloud.RoleTestDB, issuerURL, introspectionRole string, availableRoles []string) http.Handler {
+func buildRoleGraphQLHandler(t *testing.T, testDB *tidbcloud.RoleTestDB, issuerURL, oidcCAFile, introspectionRole string, availableRoles []string) http.Handler {
 	t.Helper()
 
 	executor := dbexec.NewRoleExecutor(dbexec.RoleExecutorConfig{
@@ -315,11 +316,11 @@ func buildRoleGraphQLHandler(t *testing.T, testDB *tidbcloud.RoleTestDB, issuerU
 	})
 
 	authMiddleware, err := middleware.OIDCAuthMiddleware(middleware.OIDCAuthConfig{
-		Enabled:       true,
-		IssuerURL:     issuerURL,
-		Audience:      "tidb-graphql",
-		ClockSkew:     time.Minute,
-		SkipTLSVerify: true,
+		Enabled:   true,
+		IssuerURL: issuerURL,
+		Audience:  "tidb-graphql",
+		CAFile:    oidcCAFile,
+		ClockSkew: time.Minute,
 	}, nil)
 	require.NoError(t, err)
 

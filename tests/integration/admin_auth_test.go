@@ -64,10 +64,11 @@ func TestAdminEndpointAuthentication(t *testing.T) {
 	privateKey, publicPath := generateKeypair(t)
 	jwksServer := newJWKSServer(t, publicPath, "test-key")
 	defer jwksServer.Close()
+	oidcCAFile := writeOIDCTestCAFile(t, jwksServer)
 
 	t.Run("without authentication - unauthenticated access blocked", func(t *testing.T) {
 		// Create admin handler without authentication
-		adminHandler := createAdminHandler(t, manager, false, "", "")
+		adminHandler := createAdminHandler(t, manager, false, "", "", "")
 		server := httptest.NewServer(adminHandler)
 		defer server.Close()
 
@@ -82,7 +83,7 @@ func TestAdminEndpointAuthentication(t *testing.T) {
 
 	t.Run("with authentication - missing token blocked", func(t *testing.T) {
 		// Create admin handler with authentication enabled
-		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql")
+		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql", oidcCAFile)
 		server := httptest.NewServer(adminHandler)
 		defer server.Close()
 
@@ -100,7 +101,7 @@ func TestAdminEndpointAuthentication(t *testing.T) {
 	})
 
 	t.Run("with authentication - invalid token blocked", func(t *testing.T) {
-		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql")
+		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql", oidcCAFile)
 		server := httptest.NewServer(adminHandler)
 		defer server.Close()
 
@@ -117,7 +118,7 @@ func TestAdminEndpointAuthentication(t *testing.T) {
 	})
 
 	t.Run("with authentication - valid token allowed", func(t *testing.T) {
-		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql")
+		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql", oidcCAFile)
 		server := httptest.NewServer(adminHandler)
 		defer server.Close()
 
@@ -140,7 +141,7 @@ func TestAdminEndpointAuthentication(t *testing.T) {
 	})
 
 	t.Run("with authentication - wrong HTTP method blocked", func(t *testing.T) {
-		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql")
+		adminHandler := createAdminHandler(t, manager, true, jwksServer.URL, "tidb-graphql", oidcCAFile)
 		server := httptest.NewServer(adminHandler)
 		defer server.Close()
 
@@ -160,7 +161,7 @@ func TestAdminEndpointAuthentication(t *testing.T) {
 	})
 }
 
-func createAdminHandler(t *testing.T, manager *schemarefresh.Manager, authEnabled bool, issuerURL, audience string) http.Handler {
+func createAdminHandler(t *testing.T, manager *schemarefresh.Manager, authEnabled bool, issuerURL, audience, caFile string) http.Handler {
 	t.Helper()
 
 	logger := logging.NewLogger(logging.Config{Level: "info", Format: "json"})
@@ -171,11 +172,11 @@ func createAdminHandler(t *testing.T, manager *schemarefresh.Manager, authEnable
 	// Wrap with authentication if enabled
 	if authEnabled {
 		authMiddleware, err := middleware.OIDCAuthMiddleware(middleware.OIDCAuthConfig{
-			Enabled:       true,
-			IssuerURL:     issuerURL,
-			Audience:      audience,
-			ClockSkew:     time.Minute,
-			SkipTLSVerify: true,
+			Enabled:   true,
+			IssuerURL: issuerURL,
+			Audience:  audience,
+			CAFile:    caFile,
+			ClockSkew: time.Minute,
 		}, logger)
 		require.NoError(t, err)
 		handler = authMiddleware(handler)

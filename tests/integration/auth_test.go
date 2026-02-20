@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -32,11 +33,11 @@ func TestOIDCAuthMiddleware(t *testing.T) {
 	defer jwksServer.Close()
 
 	cfg := middleware.OIDCAuthConfig{
-		Enabled:       true,
-		IssuerURL:     jwksServer.URL,
-		Audience:      "tidb-graphql",
-		ClockSkew:     time.Minute,
-		SkipTLSVerify: true,
+		Enabled:   true,
+		IssuerURL: jwksServer.URL,
+		Audience:  "tidb-graphql",
+		CAFile:    writeOIDCTestCAFile(t, jwksServer),
+		ClockSkew: time.Minute,
 	}
 
 	authMiddleware, err := middleware.OIDCAuthMiddleware(cfg, nil)
@@ -141,6 +142,21 @@ func newJWKSServer(t *testing.T, publicPath, kid string) *httptest.Server {
 
 	server = httptest.NewTLSServer(mux)
 	return server
+}
+
+func writeOIDCTestCAFile(t *testing.T, server *httptest.Server) string {
+	t.Helper()
+	require.NotNil(t, server)
+	require.NotNil(t, server.Certificate())
+
+	caPath := filepath.Join(t.TempDir(), "oidc_test_ca.crt")
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: server.Certificate().Raw,
+	})
+	require.NotEmpty(t, certPEM)
+	require.NoError(t, os.WriteFile(caPath, certPEM, 0o600))
+	return caPath
 }
 
 func buildJWKS(t *testing.T, publicPath, kid string) []byte {

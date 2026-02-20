@@ -571,17 +571,16 @@ func buildAdminHandler(cfg *config.Config, logger *logging.Logger, manager *sche
 		}
 		adminHandler = adminAuthMiddleware(adminHandler)
 		logger.Info("admin schema reload endpoint enabled with OIDC authentication")
-		return middleware.LoggingMiddleware(logger)(adminHandler), nil
+	} else {
+		adminAuthMiddleware, err := middleware.AdminTokenAuthMiddleware(middleware.AdminTokenAuthConfig{
+			Token: cfg.Server.Admin.AuthToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		adminHandler = adminAuthMiddleware(adminHandler)
+		logger.Info("admin schema reload endpoint enabled with shared token authentication")
 	}
-
-	adminAuthMiddleware, err := middleware.AdminTokenAuthMiddleware(middleware.AdminTokenAuthConfig{
-		Token: cfg.Server.Admin.AuthToken,
-	})
-	if err != nil {
-		return nil, err
-	}
-	adminHandler = adminAuthMiddleware(adminHandler)
-	logger.Info("admin schema reload endpoint enabled with shared token authentication")
 	return middleware.LoggingMiddleware(logger)(adminHandler), nil
 }
 

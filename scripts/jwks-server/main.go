@@ -284,17 +284,18 @@ func decodeDevTokenRequest(r *http.Request) (devTokenRequest, error) {
 		_ = r.Body.Close()
 	}()
 
-	var req devTokenRequest
+	// Decode exactly one JSON object; decoder.More() detects unexpected trailing content.
 	decoder := json.NewDecoder(io.LimitReader(r.Body, maxRequestBodyBytes))
 	decoder.DisallowUnknownFields()
+
+	var req devTokenRequest
 	if err := decoder.Decode(&req); err != nil {
 		if errors.Is(err, io.EOF) {
 			return devTokenRequest{}, nil
 		}
 		return devTokenRequest{}, err
 	}
-	var extra struct{}
-	if err := decoder.Decode(&extra); err != io.EOF {
+	if decoder.More() {
 		return devTokenRequest{}, errors.New("request body must contain a single JSON object")
 	}
 	return req, nil

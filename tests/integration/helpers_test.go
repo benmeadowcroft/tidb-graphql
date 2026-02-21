@@ -35,19 +35,19 @@ func requireIntegrationEnv(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
-	if os.Getenv("TIDB_CLOUD_HOST") == "" {
-		t.Skip("TiDB Cloud credentials not set")
+	if os.Getenv("TIDB_HOST") == "" {
+		t.Skip("TiDB credentials not set")
 	}
 }
 
 func cloudDSN() string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&tls=%s",
 		cloudUserWithPrefix(),
-		os.Getenv("TIDB_CLOUD_PASSWORD"),
-		os.Getenv("TIDB_CLOUD_HOST"),
-		getEnvOrDefault("TIDB_CLOUD_PORT", "4000"),
-		getEnvOrDefault("TIDB_CLOUD_DATABASE", "test"),
-		getEnvOrDefault("TIDB_CLOUD_TLS_MODE", "skip-verify"),
+		os.Getenv("TIDB_PASSWORD"),
+		os.Getenv("TIDB_HOST"),
+		getEnvOrDefault("TIDB_PORT", "4000"),
+		getEnvOrDefault("TIDB_DATABASE", "test"),
+		getEnvOrDefault("TIDB_TLS_MODE", "skip-verify"),
 	)
 }
 

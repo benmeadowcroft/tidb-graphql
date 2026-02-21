@@ -1,0 +1,33 @@
+name: govulncheck
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "33 3 * * MON,THU" # Monday & Thursday at 03:33 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Determine Go toolchain version from go.mod
+        id: go
+        shell: bash
+        run: |
+          echo "go_version=$(awk '$1=="toolchain"{print substr($2,3)}' go.mod)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.go_version }}
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...

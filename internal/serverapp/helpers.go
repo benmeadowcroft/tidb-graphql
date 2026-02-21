@@ -532,15 +532,18 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 	// Middleware order: OIDC auth runs outermost, then DB role extraction.
 	// DB role middleware must run after OIDC because it reads claims from the
 	// validated JWT token that OIDC places in context. The chain is:
-	//   request -> logging -> OIDC auth -> DB role -> mutation tx -> metrics -> tracing -> batching -> graphql
+	//   request -> logging -> OIDC auth -> DB role -> request analysis -> mutation tx -> metrics -> tracing -> batching -> graphql
 	baseHandler := metricsHandler
 	if executor != nil {
 		baseHandler = middleware.MutationTransactionMiddleware(executor)(baseHandler)
 		logger.Info("mutation transaction middleware enabled")
 	}
-	dbRoleHandler := baseHandler
+
+	analysisHandler := middleware.GraphQLRequestAnalysisMiddleware(manager)(baseHandler)
+
+	dbRoleHandler := analysisHandler
 	if cfg.Server.Auth.DBRoleEnabled {
-		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.Auth.DBRoleClaimName, availableRoles)(baseHandler)
+		dbRoleHandler = middleware.DBRoleMiddleware(cfg.Server.Auth.DBRoleClaimName, availableRoles)(analysisHandler)
 		logger.Info("database role middleware enabled")
 	}
 

@@ -437,6 +437,132 @@ func TestHandlerForContext_DefaultWhenRoleSchemasDisabled(t *testing.T) {
 	}
 }
 
+func TestSnapshotForContext_RoleAwareSelection(t *testing.T) {
+	defaultSnapshot := &Snapshot{Fingerprint: "fp-default"}
+	viewerSnapshot := &Snapshot{Fingerprint: "fp-viewer"}
+
+	manager := &Manager{
+		roleSchemas: []string{"viewer"},
+		roleFromCtx: func(ctx context.Context) (string, bool) {
+			role, ok := ctx.Value("role").(string)
+			return role, ok
+		},
+	}
+	manager.active.Store(&snapshotSet{
+		Default: defaultSnapshot,
+		ByRole: map[string]*Snapshot{
+			"viewer": viewerSnapshot,
+		},
+		Fingerprint: "fp-state",
+		BuiltAt:     time.Now(),
+	})
+
+	tests := []struct {
+		name            string
+		ctx             context.Context
+		useNilRoleFunc  bool
+		wantOK          bool
+		wantRole        string
+		wantFingerprint string
+		wantSnapshot    *Snapshot
+	}{
+		{
+			name:            "known role returns role snapshot",
+			ctx:             context.WithValue(context.Background(), "role", "viewer"),
+			wantOK:          true,
+			wantRole:        "viewer",
+			wantFingerprint: "fp-state",
+			wantSnapshot:    viewerSnapshot,
+		},
+		{
+			name:            "missing role fails closed",
+			ctx:             context.Background(),
+			wantOK:          false,
+			wantRole:        "",
+			wantFingerprint: "fp-state",
+			wantSnapshot:    nil,
+		},
+		{
+			name:            "unknown role fails closed",
+			ctx:             context.WithValue(context.Background(), "role", "admin"),
+			wantOK:          false,
+			wantRole:        "admin",
+			wantFingerprint: "fp-state",
+			wantSnapshot:    nil,
+		},
+		{
+			name:            "nil role extractor fails closed",
+			ctx:             context.WithValue(context.Background(), "role", "viewer"),
+			useNilRoleFunc:  true,
+			wantOK:          false,
+			wantRole:        "",
+			wantFingerprint: "fp-state",
+			wantSnapshot:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			originalRoleFromCtx := manager.roleFromCtx
+			if tt.useNilRoleFunc {
+				manager.roleFromCtx = nil
+			} else {
+				manager.roleFromCtx = originalRoleFromCtx
+			}
+			snapshot, role, fingerprint, ok := manager.SnapshotForContext(tt.ctx)
+			if ok != tt.wantOK {
+				t.Fatalf("ok mismatch: got %v want %v", ok, tt.wantOK)
+			}
+			if role != tt.wantRole {
+				t.Fatalf("role mismatch: got %q want %q", role, tt.wantRole)
+			}
+			if fingerprint != tt.wantFingerprint {
+				t.Fatalf("fingerprint mismatch: got %q want %q", fingerprint, tt.wantFingerprint)
+			}
+			if snapshot != tt.wantSnapshot {
+				t.Fatalf("snapshot mismatch: got %v want %v", snapshot, tt.wantSnapshot)
+			}
+			manager.roleFromCtx = originalRoleFromCtx
+		})
+	}
+}
+
+func TestSnapshotForContext_DefaultRoleWhenRoleSchemasDisabled(t *testing.T) {
+	defaultSnapshot := &Snapshot{Fingerprint: "fp-default"}
+	manager := &Manager{}
+	manager.active.Store(&snapshotSet{
+		Default:     defaultSnapshot,
+		ByRole:      map[string]*Snapshot{},
+		Fingerprint: "fp-state",
+		BuiltAt:     time.Now(),
+	})
+
+	snapshot, role, fingerprint, ok := manager.SnapshotForContext(context.Background())
+	if !ok {
+		t.Fatalf("expected SnapshotForContext to succeed when role schemas disabled")
+	}
+	if snapshot != defaultSnapshot {
+		t.Fatalf("snapshot mismatch: got %v want %v", snapshot, defaultSnapshot)
+	}
+	if role != "default" {
+		t.Fatalf("role mismatch: got %q want %q", role, "default")
+	}
+	if fingerprint != "fp-state" {
+		t.Fatalf("fingerprint mismatch: got %q want %q", fingerprint, "fp-state")
+	}
+}
+
+func TestHandlerForContext_StateNotReady(t *testing.T) {
+	manager := &Manager{}
+	req := httptest.NewRequest(http.MethodPost, "/graphql", nil)
+	rec := httptest.NewRecorder()
+
+	manager.HandlerForContext(req.Context()).ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status mismatch: got %d want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
 type refreshMetricsRecorder struct {
 	ctx          context.Context
 	calls        int

@@ -55,6 +55,18 @@ Span naming conventions:
 - Startup root span: `startup.init` with child spans such as `startup.db_connect`.
 - Schema refresh root spans: `schema.refresh.startup`, `schema.refresh.poll`, `schema.refresh.manual`.
 
+Common GraphQL span attributes:
+- `graphql.operation.requested_name`: operation name requested by the client payload (if present).
+- `graphql.operation.name`: resolved operation name selected from the parsed document.
+- `graphql.operation.type`: `query`, `mutation`, or `subscription` when operation selection succeeds.
+- `graphql.operation.hash`: deterministic hash of canonical selected operation + dependent fragments.
+- `graphql.document.size_bytes`: size of the GraphQL document text in bytes.
+- `graphql.query.field_count`, `graphql.query.depth`, `graphql.query.variable_count`: query-shape metadata.
+- `auth.role`: active request role when role schemas are enabled.
+- `schema.fingerprint`: active schema snapshot fingerprint.
+
+`schema.fingerprint` and `graphql.operation.hash` are orthogonal: one identifies the serving schema version, the other identifies request operation text.
+
 ## SQL commenter
 
 `observability.sqlcommenter_enabled` injects trace context into SQL comments so you can correlate database queries with traces. It requires tracing to be enabled.

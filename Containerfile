@@ -1,5 +1,6 @@
-# Stage 1: Build
-FROM --platform=$BUILDPLATFORM golang:1.25 AS build
+# Stage 1: Build#
+ARG GO_VERSION=1.25
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
 
 WORKDIR /src
 

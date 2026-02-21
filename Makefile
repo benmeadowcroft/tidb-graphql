@@ -1,4 +1,4 @@
-.PHONY: help build run clean test test-unit test-integration test-coverage test-race lint jwt-keys jwt-token jwks-server token-viewer token-admin container-build compose-up compose-down compose-reset compose-validate
+.PHONY: help build clean test test-unit test-integration test-coverage test-race lint jwt-keys token-viewer token-admin container-build compose-up compose-down compose-reset compose-validate
 
 # Default target
 help:
@@ -10,13 +10,9 @@ help:
 	@echo "  test-coverage      - Run tests with coverage report"
 	@echo "  test-race          - Run tests with race detector"
 	@echo "  clean              - Remove build artifacts"
-	@echo "  run                - Build and run the server"
-	@echo "  deps               - Download and tidy dependencies"
 	@echo "  fmt                - Format code"
 	@echo "  lint               - Run linter"
 	@echo "  jwt-keys           - Generate local JWT keypair in .auth/"
-	@echo "  jwt-token          - Mint a JWT token from local keypair"
-	@echo "  jwks-server        - Run a local JWKS server for dev auth testing"
 	@echo "  token-viewer       - Mint app_viewer token from scenario JWKS /dev/token"
 	@echo "  token-admin        - Mint app_admin token from scenario JWKS /dev/token"
 	@echo "  container-build    - Build container image locally (podman/docker)"
@@ -45,10 +41,6 @@ build:
 	@mkdir -p bin
 	go build -ldflags "-X main.Version=$(VERSION) -X main.Commit=$(COMMIT)" -o bin/tidb-graphql ./cmd/server
 
-# Run the server (requires database configuration)
-run: build
-	./bin/tidb-graphql
-
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -66,13 +58,13 @@ test-unit:
 # Run integration tests (requires TiDB Cloud credentials)
 test-integration:
 	@echo "Checking TiDB Cloud credentials..."
-	@if [ -z "$$TIDB_CLOUD_HOST" ]; then \
-		echo "Error: TiDB Cloud credentials not set."; \
+	@if [ -z "$$TIDB_HOST" ]; then \
+		echo "Error: TiDB credentials not set."; \
 		echo ""; \
-		echo "To run integration tests, you need to set TiDB Cloud environment variables:"; \
-		echo "  export TIDB_CLOUD_HOST=your-cluster.tidbcloud.com"; \
-		echo "  export TIDB_CLOUD_USER=your.user"; \
-		echo "  export TIDB_CLOUD_PASSWORD=your-password"; \
+		echo "To run integration tests, you need to set TiDB environment variables:"; \
+		echo "  export TIDB_HOST=your-cluster.tidbcloud.com"; \
+		echo "  export TIDB_USER=your.user"; \
+		echo "  export TIDB_PASSWORD=your-password"; \
 		echo ""; \
 		echo "Or create a .env.test file (see .env.test.example)"; \
 		exit 1; \
@@ -92,11 +84,6 @@ test-race:
 	@echo "Running tests with race detector..."
 	go test -race ./...
 
-# Install dependencies
-deps:
-	go mod download
-	go mod tidy
-
 # Format code
 fmt:
 	go fmt ./...
@@ -112,14 +99,6 @@ lint:
 # Generate local JWT keypair for auth testing
 jwt-keys:
 	go run ./scripts/jwt-generate-keys
-
-# Mint a JWT token for auth testing
-jwt-token:
-	go run ./scripts/jwt-mint
-
-# Run a local JWKS server for dev auth testing
-jwks-server:
-	go run ./scripts/jwks-server
 
 # Scenario-backed JWT minting defaults
 SCENARIO ?= oidc-roles
@@ -186,6 +165,3 @@ compose-validate:
 	@$(CONTAINER_TOOL) compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
 	@$(CONTAINER_TOOL) compose -f examples/compose/otel/docker-compose.yml config >/dev/null
 	@echo "Compose validation passed."
-
-# Build and run in one command
-dev: build run

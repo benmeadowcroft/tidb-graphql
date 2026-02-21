@@ -1,0 +1,21 @@
+name: govulncheck
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "33 3 * * MON,THU" # Monday & Thursday at 03:33 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee  # v1.0.4
+        with:
+          go-version-file: go.mod

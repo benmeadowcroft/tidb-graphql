@@ -323,18 +323,18 @@ func (tdb *TestDB) LoadFixtures(t *testing.T, fixturePath string) {
 func getTestConfig(t *testing.T) Config {
 	t.Helper()
 
-	host := os.Getenv("TIDB_CLOUD_HOST")
-	port := os.Getenv("TIDB_CLOUD_PORT")
-	user := os.Getenv("TIDB_CLOUD_USER")
-	userPrefix := os.Getenv("TIDB_CLOUD_USER_PREFIX")
-	tlsMode := os.Getenv("TIDB_CLOUD_TLS_MODE")
+	host := os.Getenv("TIDB_HOST")
+	port := os.Getenv("TIDB_PORT")
+	user := os.Getenv("TIDB_USER")
+	userPrefix := os.Getenv("TIDB_USER_PREFIX")
+	tlsMode := os.Getenv("TIDB_TLS_MODE")
 	if userPrefix != "" && !strings.HasPrefix(user, userPrefix) {
 		user = userPrefix + user
 	}
-	password := os.Getenv("TIDB_CLOUD_PASSWORD")
+	password := os.Getenv("TIDB_PASSWORD")
 
 	if host == "" || user == "" || password == "" {
-		t.Skip("TiDB Cloud credentials not set. Set TIDB_CLOUD_HOST, TIDB_CLOUD_USER, TIDB_CLOUD_PASSWORD environment variables to run integration tests")
+		t.Skip("TiDB credentials not set. Set TIDB_HOST, TIDB_USER, TIDB_PASSWORD environment variables to run integration tests")
 	}
 
 	if port == "" {

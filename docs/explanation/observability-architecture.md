@@ -23,6 +23,14 @@ Personally, I also wanted a practical way to dive deeper into tracing with this 
 
 This setup lets you start with low-friction metrics, then add tracing when you need deeper insight, without changing the rest of the system.
 
+## GraphQL request metadata model
+
+GraphQL request observability is produced from a single request-analysis pass in middleware. The parsed operation metadata (requested/resolved operation names, operation type, operation hash, and query-shape fields) is attached to context once and reused by tracing, metrics, and mutation-transaction middleware. This avoids duplicate parsing logic and keeps emitted telemetry fields consistent across components.
+
+Schema identity and operation identity are tracked separately:
+- `schema.fingerprint`: which schema snapshot served the request.
+- `graphql.operation.hash`: which operation text shape was requested.
+
 ---
 # Related Docs
 

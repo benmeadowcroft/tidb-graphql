@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
+	"tidb-graphql/internal/gqlrequest"
 	"tidb-graphql/internal/observability"
 )
 
@@ -31,10 +31,8 @@ func GraphQLMetricsMiddleware(metrics *observability.GraphQLMetrics) func(http.H
 			start := time.Now()
 
 			operationType := "unknown"
-			query, operationName := extractGraphQLRequest(r)
-			metadata, err := extractQueryMetadata(query, operationName)
-			if err == nil && metadata != nil && strings.TrimSpace(metadata.operationType) != "" {
-				operationType = metadata.operationType
+			if analysis := gqlrequest.AnalysisFromContext(r.Context()); analysis != nil && analysis.OperationType != "" {
+				operationType = analysis.OperationType
 			}
 
 			// Wrap response writer to capture response

@@ -5,10 +5,9 @@ import (
 	"net/http"
 
 	"tidb-graphql/internal/dbexec"
+	"tidb-graphql/internal/gqlrequest"
 	"tidb-graphql/internal/logging"
 	"tidb-graphql/internal/resolver"
-
-	"github.com/graphql-go/graphql/language/ast"
 )
 
 // MutationTransactionMiddleware wraps GraphQL mutations in a single transaction.
@@ -23,16 +22,8 @@ func MutationTransactionMiddleware(executor dbexec.QueryExecutor) func(http.Hand
 				return
 			}
 
-			query, operationName := extractGraphQLRequest(r)
-			opType, parseErr := resolveOperationType(query, operationName)
-			if parseErr != nil {
-				reqLogger.Debug("mutation middleware: failed to parse operation type",
-					slog.String("error", parseErr.Error()),
-				)
-				next.ServeHTTP(w, r)
-				return
-			}
-			if opType != ast.OperationTypeMutation {
+			analysis := gqlrequest.AnalysisFromContext(r.Context())
+			if analysis == nil || analysis.OperationType != "mutation" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -72,19 +63,4 @@ func MutationTransactionMiddleware(executor dbexec.QueryExecutor) func(http.Hand
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
-}
-
-func resolveOperationType(query, operationName string) (string, error) {
-	if query == "" {
-		return "", nil
-	}
-
-	metadata, err := extractQueryMetadata(query, operationName)
-	if err != nil {
-		return "", err
-	}
-	if metadata == nil || metadata.operationType == "" {
-		return "", nil
-	}
-	return metadata.operationType, nil
 }

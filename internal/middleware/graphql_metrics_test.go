@@ -102,7 +102,7 @@ func setupGraphQLMetricsMiddleware(t *testing.T, next http.Handler) (http.Handle
 	if err != nil {
 		t.Fatalf("failed to initialize GraphQL metrics: %v", err)
 	}
-	return GraphQLMetricsMiddleware(metrics)(next), reader
+	return GraphQLRequestAnalysisMiddleware(nil)(GraphQLMetricsMiddleware(metrics)(next)), reader
 }
 
 func collectMetrics(t *testing.T, reader *sdkmetric.ManualReader) metricdata.ResourceMetrics {

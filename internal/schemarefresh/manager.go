@@ -232,30 +232,52 @@ func (m *Manager) Handler() http.Handler {
 func (m *Manager) HandlerForContext(ctx context.Context) http.Handler {
 	state := m.currentState()
 	if state == nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "schema not ready", http.StatusServiceUnavailable)
-		})
+		return schemaNotReadyHandler()
 	}
-	if len(m.roleSchemas) == 0 {
-		if state.Default != nil && state.Default.Handler != nil {
-			return state.Default.Handler
+
+	snapshot, _, _, ok := m.SnapshotForContext(ctx)
+	if !ok {
+		if len(m.roleSchemas) > 0 {
+			return forbiddenRoleHandler()
 		}
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "schema not ready", http.StatusServiceUnavailable)
-		})
+		return schemaNotReadyHandler()
 	}
+	if snapshot == nil || snapshot.Handler == nil {
+		return schemaNotReadyHandler()
+	}
+	return snapshot.Handler
+}
+
+// SnapshotForContext returns the schema snapshot and namespace metadata for the
+// caller's role context. When role-specific snapshots are configured,
+// missing/unknown roles fail closed.
+func (m *Manager) SnapshotForContext(ctx context.Context) (snap *Snapshot, role string, fingerprint string, ok bool) {
+	state := m.currentState()
+	if state == nil {
+		return nil, "", "", false
+	}
+
+	fingerprint = state.Fingerprint
+	if len(m.roleSchemas) == 0 {
+		if state.Default == nil {
+			return nil, "default", fingerprint, false
+		}
+		return state.Default, "default", fingerprint, true
+	}
+
 	if m.roleFromCtx == nil {
-		return forbiddenRoleHandler()
+		return nil, "", fingerprint, false
 	}
-	role, ok := m.roleFromCtx(ctx)
-	if !ok || role == "" {
-		return forbiddenRoleHandler()
+	role, roleOK := m.roleFromCtx(ctx)
+	if !roleOK || role == "" {
+		return nil, "", fingerprint, false
 	}
+
 	roleSnapshot, exists := state.ByRole[role]
-	if !exists || roleSnapshot == nil || roleSnapshot.Handler == nil {
-		return forbiddenRoleHandler()
+	if !exists || roleSnapshot == nil {
+		return nil, role, fingerprint, false
 	}
-	return roleSnapshot.Handler
+	return roleSnapshot, role, fingerprint, true
 }
 
 // CurrentSnapshot returns the active schema snapshot.
@@ -935,5 +957,11 @@ func defaultOrUnknownMode(mode string) string {
 func forbiddenRoleHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "role schema not available", http.StatusForbidden)
+	})
+}
+
+func schemaNotReadyHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "schema not ready", http.StatusServiceUnavailable)
 	})
 }

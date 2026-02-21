@@ -6,9 +6,16 @@ Middleware is where we enforce cross-cutting behavior that should be consistent 
 
 - **OIDC/JWKS auth**: validate JWTs for `/graphql` and admin endpoints.
 - **DB role activation**: map a JWT claim to `SET ROLE` on the database.
+- **GraphQL request analysis**: parse request payload once and share operation metadata via context.
 - **Rate limiting**: guardrail against overload or accidental abuse.
 - **CORS**: explicit, opt-in browser access.
 - **Logging**: consistent request logging with context.
+
+## GraphQL chain order
+
+For `/graphql`, the middleware stack is ordered as:
+
+`logging -> OIDC auth -> DB role -> request analysis -> mutation tx -> metrics -> tracing -> batching -> graphql handler`
 
 ## Design choices
 

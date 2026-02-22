@@ -258,6 +258,202 @@ func TestMutation_CreateWithCompositePK(t *testing.T) {
 	assert.EqualValues(t, 5, item["quantity"])
 }
 
+func TestMutation_CreateCategoryWithNestedProducts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/mutation_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/mutation_seed.sql")
+
+	schema, executor := buildMutationSchema(t, testDB)
+
+	mutation := `
+		mutation {
+			createCategory(input: {
+				name: "Nested Category"
+				description: "Created with nested products"
+				productsCreate: [
+					{
+						sku: "NEST-001"
+						name: "Nested Product 1"
+						price: 12.34
+					}
+				]
+			}) {
+				__typename
+				... on CreateCategorySuccess {
+					category {
+						databaseId
+						name
+						products(first: 10) {
+							nodes {
+								sku
+								categoryId
+							}
+						}
+					}
+				}
+				... on MutationError {
+					__typename
+					message
+				}
+			}
+		}
+	`
+
+	result := executeMutation(t, schema, executor, mutation, nil)
+	wrapper := mutationResultField(t, result, "createCategory")
+	assert.Equal(t, "CreateCategorySuccess", wrapper["__typename"])
+
+	category := wrapper["category"].(map[string]interface{})
+	assert.Equal(t, "Nested Category", category["name"])
+	categoryID := category["databaseId"]
+
+	products := requireCollectionNodes(t, category, "products")
+	require.Len(t, products, 1)
+	product := products[0].(map[string]interface{})
+	assert.Equal(t, "NEST-001", product["sku"])
+	assert.Equal(t, categoryID, product["categoryId"])
+}
+
+func TestMutation_CreateProduct_ConnectScalarXORValidation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/mutation_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/mutation_seed.sql")
+
+	schema, executor := buildMutationSchema(t, testDB)
+
+	mutation := `
+		mutation {
+			createProduct(input: {
+				categoryId: 1
+				categoryConnect: { byName: { name: "Electronics" } }
+				sku: "XOR-001"
+				name: "Xor Product"
+				price: 9.99
+			}) {
+				__typename
+				... on CreateProductSuccess {
+					product { databaseId }
+				}
+				... on InputValidationError {
+					message
+				}
+				... on MutationError {
+					__typename
+					message
+				}
+			}
+		}
+	`
+
+	result := executeMutationExpectRollback(t, schema, executor, mutation, nil)
+	wrapper := mutationResultField(t, result, "createProduct")
+	assert.Equal(t, "InputValidationError", wrapper["__typename"])
+	assert.Contains(t, wrapper["message"], "either categoryId or categoryConnect")
+}
+
+func TestMutation_CreateProduct_ConnectNotFoundValidation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/mutation_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/mutation_seed.sql")
+
+	schema, executor := buildMutationSchema(t, testDB)
+
+	mutation := `
+		mutation {
+			createProduct(input: {
+				categoryConnect: { byName: { name: "DoesNotExist" } }
+				sku: "NF-001"
+				name: "Not Found Product"
+				price: 2.99
+			}) {
+				__typename
+				... on CreateProductSuccess {
+					product { databaseId }
+				}
+				... on InputValidationError {
+					message
+				}
+				... on MutationError {
+					__typename
+					message
+				}
+			}
+		}
+	`
+
+	result := executeMutationExpectRollback(t, schema, executor, mutation, nil)
+	wrapper := mutationResultField(t, result, "createProduct")
+	assert.Equal(t, "InputValidationError", wrapper["__typename"])
+	assert.Contains(t, wrapper["message"], "not found")
+}
+
+func TestMutation_NestedCreateRollbackOnChildConflict(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB := tidbcloud.NewTestDB(t)
+	testDB.LoadSchema(t, "../fixtures/mutation_schema.sql")
+	testDB.LoadFixtures(t, "../fixtures/mutation_seed.sql")
+
+	schema, executor := buildMutationSchema(t, testDB)
+
+	// Ensure target category does not exist before mutation.
+	var beforeExists bool
+	err := testDB.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM categories WHERE name = 'Rollback Nested Category')").Scan(&beforeExists)
+	require.NoError(t, err)
+	require.False(t, beforeExists)
+
+	// Child row uses an existing product SKU (ELEC-001), triggering unique violation.
+	mutation := `
+		mutation {
+			createCategory(input: {
+				name: "Rollback Nested Category"
+				productsCreate: [
+					{
+						sku: "ELEC-001"
+						name: "Should Fail"
+						price: 1.23
+					}
+				]
+			}) {
+				__typename
+				... on CreateCategorySuccess {
+					category { databaseId }
+				}
+				... on ConflictError {
+					message
+				}
+				... on MutationError {
+					__typename
+					message
+				}
+			}
+		}
+	`
+	result := executeMutationExpectRollback(t, schema, executor, mutation, nil)
+	wrapper := mutationResultField(t, result, "createCategory")
+	assert.Equal(t, "ConflictError", wrapper["__typename"])
+
+	// Parent insert must be rolled back.
+	var afterExists bool
+	err = testDB.DB.QueryRow("SELECT EXISTS(SELECT 1 FROM categories WHERE name = 'Rollback Nested Category')").Scan(&afterExists)
+	require.NoError(t, err)
+	assert.False(t, afterExists, "parent row should be rolled back when nested child insert fails")
+}
+
 func TestMutation_UpdateSimple(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")

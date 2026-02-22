@@ -39,6 +39,8 @@ type Resolver struct {
 	aggregateCache         map[string]*graphql.Object // Cache for aggregate types (XxxAggregate, XxxAvgFields, etc.)
 	createInputCache       map[string]*graphql.InputObject
 	updateInputCache       map[string]*graphql.InputObject
+	connectInputCache      map[string]*graphql.InputObject
+	nestedCreateCache      map[string]*graphql.InputObject
 	deletePayloadCache     map[string]*graphql.Object
 	mutationErrorInterface *graphql.Interface
 	validationErrorType    *graphql.Object
@@ -132,6 +134,8 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		aggregateCache:     make(map[string]*graphql.Object),
 		createInputCache:   make(map[string]*graphql.InputObject),
 		updateInputCache:   make(map[string]*graphql.InputObject),
+		connectInputCache:  make(map[string]*graphql.InputObject),
+		nestedCreateCache:  make(map[string]*graphql.InputObject),
 		deletePayloadCache: make(map[string]*graphql.Object),
 		createSuccessCache: make(map[string]*graphql.Object),
 		updateSuccessCache: make(map[string]*graphql.Object),
@@ -286,7 +290,7 @@ func (r *Resolver) makeSingleRowResolver(table introspection.Table) graphql.Fiel
 			return nil, fmt.Errorf("planned table mismatch: expected %s got %s", table.Name, planned.Table.Name)
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, planned.Root.SQL, planned.Root.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, planned.Root.SQL, planned.Root.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -363,7 +367,7 @@ func (r *Resolver) makePrimaryKeyResolver(table introspection.Table, pkCols []in
 			return nil, err
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, query.SQL, query.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, query.SQL, query.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -430,7 +434,7 @@ func (r *Resolver) makeNodeResolver() graphql.FieldResolveFn {
 			return nil, err
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, query.SQL, query.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, query.SQL, query.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -598,7 +602,7 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 			return nil, fmt.Errorf("failed to plan connection: %w", err)
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -648,7 +652,7 @@ func (r *Resolver) makeVectorConnectionResolver(table introspection.Table, vecto
 			return nil, fmt.Errorf("failed to plan vector search connection: %w", err)
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -806,7 +810,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			return nil, fmt.Errorf("failed to plan connection: %w", err)
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -878,7 +882,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			return nil, fmt.Errorf("failed to plan connection: %w", err)
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -947,7 +951,7 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 			return nil, fmt.Errorf("failed to plan connection: %w", err)
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, plan.Root.SQL, plan.Root.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}
@@ -2164,7 +2168,7 @@ func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspe
 			return nil, fmt.Errorf("failed to build query: %w", err)
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, planned.Root.SQL, planned.Root.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, planned.Root.SQL, planned.Root.Args...)
 		if err != nil {
 			return nil, normalizeQueryError(err)
 		}

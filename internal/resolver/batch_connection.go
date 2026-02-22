@@ -82,7 +82,7 @@ func runBatchConnectionChunks(
 		return groupedConnections, nil
 	}
 
-	rows, err := r.executor.QueryContext(ctx, planned.SQL, planned.Args...)
+	rows, err := r.queryExecutorForContext(ctx).QueryContext(ctx, planned.SQL, planned.Args...)
 	if err != nil {
 		return nil, normalizeQueryError(err)
 	}

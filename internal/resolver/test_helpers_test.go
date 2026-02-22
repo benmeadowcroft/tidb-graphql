@@ -192,6 +192,60 @@ func (e *fakeExecutor) BeginTx(_ context.Context) (dbexec.TxExecutor, error) {
 	return nil, errors.New("not implemented")
 }
 
+type txAwareFakeExecutor struct {
+	baseResponses [][][]any
+	baseCalls     int
+	baseArgs      [][]any
+
+	txResponses [][][]any
+	txCalls     int
+	txArgs      [][]any
+}
+
+func (e *txAwareFakeExecutor) QueryContext(_ context.Context, _ string, args ...any) (dbexec.Rows, error) {
+	e.baseCalls++
+	e.baseArgs = append(e.baseArgs, args)
+	idx := e.baseCalls - 1
+	if idx >= len(e.baseResponses) {
+		return &fakeRows{}, nil
+	}
+	return &fakeRows{rows: e.baseResponses[idx]}, nil
+}
+
+func (e *txAwareFakeExecutor) ExecContext(_ context.Context, _ string, _ ...any) (sql.Result, error) {
+	return nil, nil
+}
+
+func (e *txAwareFakeExecutor) BeginTx(_ context.Context) (dbexec.TxExecutor, error) {
+	return &txAwareFakeTx{parent: e}, nil
+}
+
+type txAwareFakeTx struct {
+	parent *txAwareFakeExecutor
+}
+
+func (t *txAwareFakeTx) QueryContext(_ context.Context, _ string, args ...any) (dbexec.Rows, error) {
+	t.parent.txCalls++
+	t.parent.txArgs = append(t.parent.txArgs, args)
+	idx := t.parent.txCalls - 1
+	if idx >= len(t.parent.txResponses) {
+		return &fakeRows{}, nil
+	}
+	return &fakeRows{rows: t.parent.txResponses[idx]}, nil
+}
+
+func (t *txAwareFakeTx) ExecContext(_ context.Context, _ string, _ ...any) (sql.Result, error) {
+	return nil, nil
+}
+
+func (t *txAwareFakeTx) Commit() error {
+	return nil
+}
+
+func (t *txAwareFakeTx) Rollback() error {
+	return nil
+}
+
 func renamePrimaryKeyID(table *introspection.Table) {
 	for i := range table.Columns {
 		col := &table.Columns[i]

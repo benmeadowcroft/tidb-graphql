@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"tidb-graphql/internal/dbexec"
 	"tidb-graphql/internal/testutil/tidbcloud"
 
 	"github.com/graphql-go/graphql"
@@ -207,4 +208,67 @@ func TestCompositeJunction_EdgeListTraversal_ProjectMemberships(t *testing.T) {
 	assert.EqualValues(t, 2, edgeUser["tenantId"])
 	assert.EqualValues(t, 1, edgeUser["databaseId"])
 	assert.Equal(t, "alice_t2", edgeUser["username"])
+}
+
+func TestCompositeJunction_CreateUserWithManyToManyConnect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	testDB, schema := setupCompositeJunctionSchema(t)
+	executor := dbexec.NewStandardExecutor(testDB.DB)
+
+	groupNodeID := nodeIDForTable("groups", 1, 10)
+	mutation := `
+		mutation {
+			createUser(input: {
+				tenantId: 1
+				databaseId: 99
+				username: "new_user_t1"
+				groupsConnect: [{ id: "` + groupNodeID + `" }]
+			}) {
+				__typename
+				... on CreateUserSuccess {
+					user {
+						tenantId
+						databaseId
+						username
+						groups(first: 10) {
+							nodes {
+								tenantId
+								databaseId
+								name
+							}
+						}
+					}
+				}
+				... on MutationError {
+					__typename
+					message
+				}
+			}
+		}
+	`
+	result := executeMutation(t, schema, executor, mutation, nil)
+	wrapper := mutationResultField(t, result, "createUser")
+	assert.Equal(t, "CreateUserSuccess", wrapper["__typename"])
+
+	user := wrapper["user"].(map[string]interface{})
+	assert.EqualValues(t, 1, user["tenantId"])
+	assert.EqualValues(t, 99, user["databaseId"])
+	assert.Equal(t, "new_user_t1", user["username"])
+
+	groups := requireCollectionNodes(t, user, "groups")
+	require.Len(t, groups, 1)
+	group := groups[0].(map[string]interface{})
+	assert.EqualValues(t, 1, group["tenantId"])
+	assert.EqualValues(t, 10, group["databaseId"])
+	assert.Equal(t, "admins_t1", group["name"])
+
+	var exists bool
+	err := testDB.DB.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM user_groups WHERE tenant_id = 1 AND user_id = 99 AND group_tenant_id = 1 AND group_id = 10)",
+	).Scan(&exists)
+	require.NoError(t, err)
+	assert.True(t, exists)
 }

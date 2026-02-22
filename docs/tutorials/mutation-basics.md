@@ -2,7 +2,7 @@
 
 This tutorial walks through create, update, and delete mutations using the typed mutation result unions. The examples use the same schema as the [first schema tutorial](./first-schema.md)
 
-Goal: perform a full object lifecycle and handle mutation outcomes with inline fragments.
+Goal: perform a full object lifecycle — including a nested mutation that creates related rows in one request — and handle mutation outcomes with inline fragments.
 
 ## 1) Understand the mutation shape
 
@@ -58,7 +58,74 @@ mutation CreateUser {
 
 On success, copy the returned `id` (global Node ID). You will use it for update and delete.
 
-## 3) Update the user
+## 3) Create an order with nested line items
+
+The `createOrder` mutation accepts nested `orderItemsCreate` to insert line items in the same transaction. FK references (user, product) can be supplied as an opaque node `id` or via a unique-field lookup — no raw database IDs required.
+
+```graphql
+mutation CreateOrder {
+  createOrder(
+    input: {
+      # Reference the owning user by their unique email address.
+      userConnect: { byEmail: { email: "casey.doe@example.com" } }
+      status: PROCESSING
+      total: "59.97"
+      # Create line items inline — they are inserted atomically with the order.
+      orderItemsCreate: [
+        {
+          # Reference a product by its SKU instead of a raw foreign key.
+          productConnect: { bySku: { sku: "SKU-1001" } }
+          quantity: 3
+          unitPrice: "19.99"
+        }
+      ]
+    }
+  ) {
+    __typename
+    ... on CreateOrderSuccess {
+      order {
+        id
+        status
+        total
+        user {
+          fullName
+          email
+        }
+        orderItems {
+          edges {
+            node {
+              quantity
+              unitPrice
+              product {
+                sku
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+    ... on InputValidationError {
+      message
+      field
+    }
+    ... on ConstraintError {
+      message
+    }
+    ... on MutationError {
+      message
+    }
+  }
+}
+```
+
+Key behaviors:
+- **`userConnect`** and **`productConnect`** accept either `{ id: "<nodeId>" }` or a unique-index sub-object (e.g., `{ byEmail: { email: "..." } }`, `{ bySku: { sku: "..." } }`). Exactly one strategy must be provided.
+- Providing both a raw FK scalar (e.g., `userId`) and the corresponding connect field (e.g., `userConnect`) is an `InputValidationError`.
+- All inserts — parent order and every line item — share the same transaction. A failure on any line item rolls back the entire request.
+- If a connected record is not found (user, product), the mutation returns `InputValidationError` rather than a database constraint error.
+
+## 4) Update the user
 
 ```graphql
 mutation UpdateUser($id: ID!) {
@@ -92,7 +159,7 @@ Important behavior:
 - `UpdateUserSuccess` can return `user: null` when the row is not found.
 - Not-found on update is modeled as a success result with a null entity.
 
-## 4) Delete the user
+## 5) Delete the user
 
 ```graphql
 mutation DeleteUser($id: ID!) {
@@ -116,7 +183,7 @@ Important behavior:
 - Delete not-found returns `NotFoundError`.
 - Delete success returns the deleted row identity (`id` plus primary key fields).
 
-## 5) Recommended client handling pattern
+## 6) Recommended client handling pattern
 
 Use this sequence in clients:
 

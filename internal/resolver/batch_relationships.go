@@ -722,7 +722,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 			continue
 		}
 
-		rows, err := r.executor.QueryContext(p.Context, planned.SQL, planned.Args...)
+		rows, err := r.queryExecutorForContext(p.Context).QueryContext(p.Context, planned.SQL, planned.Args...)
 		if err != nil {
 			return nil, true, normalizeQueryError(err)
 		}

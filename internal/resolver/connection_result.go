@@ -18,7 +18,7 @@ type connectionResult struct {
 	plan     *planner.ConnectionPlan
 	hasNext  bool
 	hasPrev  bool
-	executor dbexec.QueryExecutor
+	executor queryContextExecutor
 	countCtx context.Context
 	// totalCount is lazily computed
 	totalCountVal *int
@@ -175,7 +175,7 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 		plan:          plan,
 		hasNext:       hasNext,
 		hasPrev:       hasPrev,
-		executor:      r.executor,
+		executor:      r.queryExecutorForContext(ctx),
 		countCtx:      countCtx,
 		aggregateVals: make(map[string]map[string]interface{}),
 	}

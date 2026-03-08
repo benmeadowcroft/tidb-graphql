@@ -1101,6 +1101,529 @@ func TestCreateResolver_InvalidInput_ValidationError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestNestedCreateInputType_IsolatedPerParentRelation(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "username", DataType: "varchar"},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "title", DataType: "varchar"},
+		},
+	}
+	comments := introspection.Table{
+		Name: "comments",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "user_id", DataType: "int", IsNullable: false},
+			{Name: "post_id", DataType: "int", IsNullable: false},
+			{Name: "body", DataType: "varchar"},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	renamePrimaryKeyID(&comments)
+
+	users.Relationships = []introspection.Relationship{
+		{
+			IsOneToMany:      true,
+			LocalColumns:     []string{"id"},
+			RemoteTable:      "comments",
+			RemoteColumns:    []string{"user_id"},
+			GraphQLFieldName: "comments",
+		},
+	}
+	posts.Relationships = []introspection.Relationship{
+		{
+			IsOneToMany:      true,
+			LocalColumns:     []string{"id"},
+			RemoteTable:      "comments",
+			RemoteColumns:    []string{"post_id"},
+			GraphQLFieldName: "comments",
+		},
+	}
+	comments.Relationships = []introspection.Relationship{
+		{
+			IsManyToOne:      true,
+			LocalColumns:     []string{"user_id"},
+			RemoteTable:      "users",
+			RemoteColumns:    []string{"id"},
+			GraphQLFieldName: "user",
+		},
+		{
+			IsManyToOne:      true,
+			LocalColumns:     []string{"post_id"},
+			RemoteTable:      "posts",
+			RemoteColumns:    []string{"id"},
+			GraphQLFieldName: "post",
+		},
+	}
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts, comments}}
+	r := NewResolver(nil, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	userNested := r.nestedCreateInputForRel(users, users.Relationships[0])
+	postNested := r.nestedCreateInputForRel(posts, posts.Relationships[0])
+	require.NotNil(t, userNested)
+	require.NotNil(t, postNested)
+	assert.NotEqual(t, userNested.Name(), postNested.Name())
+
+	userFields := userNested.Fields()
+	_, hasUserID := userFields["userId"]
+	_, hasPostID := userFields["postId"]
+	assert.False(t, hasUserID, "user_id should be omitted for users->comments nested input")
+	assert.True(t, hasPostID, "post_id should remain for users->comments nested input")
+
+	postFields := postNested.Fields()
+	_, hasUserID = postFields["userId"]
+	_, hasPostID = postFields["postId"]
+	assert.True(t, hasUserID, "user_id should remain for posts->comments nested input")
+	assert.False(t, hasPostID, "post_id should be omitted for posts->comments nested input")
+}
+
+func TestCreateResolver_ConnectMultipleStrategies_ValidationError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	categories := introspection.Table{
+		Name: "categories",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "name", DataType: "varchar", IsNullable: false},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "uq_categories_name", Unique: true, Columns: []string{"name"}},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "category_id", DataType: "int", IsNullable: false},
+			{Name: "title", DataType: "varchar", IsNullable: false},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsManyToOne:      true,
+				LocalColumns:     []string{"category_id"},
+				RemoteTable:      "categories",
+				RemoteColumns:    []string{"id"},
+				GraphQLFieldName: "category",
+			},
+		},
+	}
+	renamePrimaryKeyID(&categories)
+	renamePrimaryKeyID(&posts)
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{posts, categories}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	insertable := columnNameSet(r.mutationInsertableColumns(posts))
+	resolverFn := r.makeCreateResolver(posts, insertable, r.createSuccessType(posts, r.buildGraphQLType(posts)))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"input": map[string]interface{}{
+				"title": "Hello",
+				"categoryConnect": map[string]interface{}{
+					"id":     nodeid.Encode(introspection.GraphQLTypeName(categories), int64(1)),
+					"byName": map[string]interface{}{"name": "Electronics"},
+				},
+			},
+		},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "InputValidationError", payload["__typename"])
+	assert.Contains(t, payload["message"], "exactly one strategy")
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateResolver_ConnectIDCoercesNonString_ValidationError(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	categories := introspection.Table{
+		Name: "categories",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "name", DataType: "varchar", IsNullable: false},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "category_id", DataType: "int", IsNullable: false},
+			{Name: "title", DataType: "varchar", IsNullable: false},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsManyToOne:      true,
+				LocalColumns:     []string{"category_id"},
+				RemoteTable:      "categories",
+				RemoteColumns:    []string{"id"},
+				GraphQLFieldName: "category",
+			},
+		},
+	}
+	renamePrimaryKeyID(&categories)
+	renamePrimaryKeyID(&posts)
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{posts, categories}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	mock.ExpectBegin()
+	mock.ExpectRollback()
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	insertable := columnNameSet(r.mutationInsertableColumns(posts))
+	resolverFn := r.makeCreateResolver(posts, insertable, r.createSuccessType(posts, r.buildGraphQLType(posts)))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"input": map[string]interface{}{
+				"title": "Hello",
+				"categoryConnect": map[string]interface{}{
+					"id": int64(123),
+				},
+			},
+		},
+		Context: ctx,
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "InputValidationError", payload["__typename"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateMutation_FilteredFKConnectDoesNotExposeCreate(t *testing.T) {
+	categories := introspection.Table{
+		Name: "categories",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "name", DataType: "varchar", IsNullable: false},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "uq_categories_name", Unique: true, Columns: []string{"name"}},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "category_id", DataType: "int", IsNullable: false},
+			{Name: "title", DataType: "varchar", IsNullable: false},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsManyToOne:      true,
+				LocalColumns:     []string{"category_id"},
+				RemoteTable:      "categories",
+				RemoteColumns:    []string{"id"},
+				GraphQLFieldName: "category",
+			},
+		},
+	}
+	renamePrimaryKeyID(&categories)
+	renamePrimaryKeyID(&posts)
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{posts, categories}}
+	filters := schemafilter.Config{
+		DenyMutationColumns: map[string][]string{
+			"posts": {"category_id"},
+		},
+	}
+	r := NewResolver(nil, dbSchema, nil, 0, filters, naming.DefaultConfig())
+
+	schema, err := r.BuildGraphQLSchema()
+	require.NoError(t, err)
+	require.NotNil(t, schema.MutationType())
+
+	mutationFields := schema.MutationType().Fields()
+	_, hasCreatePost := mutationFields["createPost"]
+	_, hasCreateCategory := mutationFields["createCategory"]
+	assert.False(t, hasCreatePost, "createPost should be absent when required FK is deny-mutation")
+	assert.True(t, hasCreateCategory, "control mutation should remain present")
+}
+
+func TestCreateResolver_NestedUsesReferencedNonPKColumnValue(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	accounts := introspection.Table{
+		Name: "accounts",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "external_key", DataType: "varchar", IsNullable: false},
+			{Name: "name", DataType: "varchar", IsNullable: false},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "uq_accounts_external_key", Unique: true, Columns: []string{"external_key"}},
+		},
+	}
+	sessions := introspection.Table{
+		Name: "sessions",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "account_external_key", DataType: "varchar", IsNullable: false},
+			{Name: "token", DataType: "varchar", IsNullable: false},
+		},
+		Relationships: []introspection.Relationship{
+			{
+				IsManyToOne:      true,
+				LocalColumns:     []string{"account_external_key"},
+				RemoteTable:      "accounts",
+				RemoteColumns:    []string{"external_key"},
+				GraphQLFieldName: "account",
+			},
+		},
+	}
+	accounts.Relationships = []introspection.Relationship{
+		{
+			IsOneToMany:      true,
+			LocalColumns:     []string{"external_key"},
+			RemoteTable:      "sessions",
+			RemoteColumns:    []string{"account_external_key"},
+			GraphQLFieldName: "sessions",
+		},
+	}
+	renamePrimaryKeyID(&accounts)
+	renamePrimaryKeyID(&sessions)
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{accounts, sessions}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	insertable := columnNameSet(r.mutationInsertableColumns(accounts))
+
+	parentInput := map[string]interface{}{
+		"externalKey": "acct_1",
+		"name":        "Acme",
+	}
+	parentCols, parentVals, err := mapInputColumns(accounts, parentInput, insertable)
+	require.NoError(t, err)
+	parentInsert, err := planner.PlanInsert(accounts, parentCols, parentVals)
+	require.NoError(t, err)
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "createAccount"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{Name: &ast.Name{Value: "id"}},
+			&ast.Field{Name: &ast.Name{Value: "name"}},
+		}},
+	}
+	selected := planner.SelectedColumns(accounts, field, nil)
+	selected = planner.EnsureColumns(accounts, selected, []string{"external_key"})
+	selectPlan, err := planner.PlanTableByPK(accounts, selected, &accounts.Columns[0], int64(1))
+	require.NoError(t, err)
+
+	rowCols := make([]string, len(selected))
+	rowVals := make([]driver.Value, len(selected))
+	for i, col := range selected {
+		rowCols[i] = col.Name
+		switch col.Name {
+		case "id":
+			rowVals[i] = int64(1)
+		case "external_key":
+			rowVals[i] = "acct_1"
+		case "name":
+			rowVals[i] = "Acme"
+		default:
+			rowVals[i] = nil
+		}
+	}
+	selectRows := sqlmock.NewRows(rowCols).AddRow(rowVals...)
+
+	childInsert, err := planner.PlanInsert(sessions, []string{"token", "account_external_key"}, []interface{}{"tok_1", "acct_1"})
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(parentInsert.SQL)).
+		WithArgs(toDriverValues(parentInsert.Args)...).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	expectQuery(t, mock, selectPlan.SQL, selectPlan.Args, selectRows)
+	mock.ExpectExec(regexp.QuoteMeta(childInsert.SQL)).
+		WithArgs(toDriverValues(childInsert.Args)...).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	resolverFn := r.makeCreateResolver(accounts, insertable, r.createSuccessType(accounts, r.buildGraphQLType(accounts)))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"input": map[string]interface{}{
+				"externalKey": "acct_1",
+				"name":        "Acme",
+				"sessionsCreate": []interface{}{
+					map[string]interface{}{"token": "tok_1"},
+				},
+			},
+		},
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	account, ok := payload["account"].(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, 1, account["databaseId"])
+	assert.Equal(t, "Acme", account["name"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestCreateResolver_PureM2MConnect_InsertsJunctionRows(t *testing.T) {
+	db, mock := newMockDB(t)
+	defer db.Close()
+
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "username", DataType: "varchar", IsNullable: false},
+		},
+	}
+	groups := introspection.Table{
+		Name: "groups",
+		Columns: []introspection.Column{
+			{Name: "id", DataType: "int", IsPrimaryKey: true, IsAutoIncrement: true},
+			{Name: "name", DataType: "varchar", IsNullable: false},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+			{Name: "uq_groups_name", Unique: true, Columns: []string{"name"}},
+		},
+	}
+	userGroups := introspection.Table{
+		Name: "user_groups",
+		Columns: []introspection.Column{
+			{Name: "user_id", DataType: "int", IsPrimaryKey: true},
+			{Name: "group_id", DataType: "int", IsPrimaryKey: true},
+		},
+	}
+	users.Relationships = []introspection.Relationship{
+		{
+			IsManyToMany:            true,
+			LocalColumns:            []string{"id"},
+			RemoteTable:             "groups",
+			RemoteColumns:           []string{"id"},
+			JunctionTable:           "user_groups",
+			JunctionLocalFKColumns:  []string{"user_id"},
+			JunctionRemoteFKColumns: []string{"group_id"},
+			GraphQLFieldName:        "groups",
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&groups)
+
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, groups, userGroups}}
+	r := NewResolver(dbexec.NewStandardExecutor(db), dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	insertable := columnNameSet(r.mutationInsertableColumns(users))
+
+	parentInput := map[string]interface{}{"username": "alice"}
+	parentCols, parentVals, err := mapInputColumns(users, parentInput, insertable)
+	require.NoError(t, err)
+	parentInsert, err := planner.PlanInsert(users, parentCols, parentVals)
+	require.NoError(t, err)
+
+	field := &ast.Field{
+		Name: &ast.Name{Value: "createUser"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{Name: &ast.Name{Value: "id"}},
+			&ast.Field{Name: &ast.Name{Value: "username"}},
+		}},
+	}
+	selected := planner.SelectedColumns(users, field, nil)
+	selected = planner.EnsureColumns(users, selected, []string{"id"})
+	selectPlan, err := planner.PlanTableByPK(users, selected, &users.Columns[0], int64(1))
+	require.NoError(t, err)
+
+	selectRows := sqlmock.NewRows([]string{"id", "username"}).AddRow(1, "alice")
+	groupLookup, err := planner.PlanUniqueKeyLookup(groups, groups.Columns, groups.Indexes[1], map[string]interface{}{"name": "admins"})
+	require.NoError(t, err)
+	groupRows := sqlmock.NewRows([]string{"id", "name"}).AddRow(10, "admins")
+	junctionInsert, err := planner.PlanInsert(userGroups, []string{"user_id", "group_id"}, []interface{}{int64(1), int64(10)})
+	require.NoError(t, err)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(parentInsert.SQL)).
+		WithArgs(toDriverValues(parentInsert.Args)...).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	expectQuery(t, mock, selectPlan.SQL, selectPlan.Args, selectRows)
+	expectQuery(t, mock, groupLookup.SQL, groupLookup.Args, groupRows)
+	mock.ExpectExec(regexp.QuoteMeta(junctionInsert.SQL)).
+		WithArgs(toDriverValues(junctionInsert.Args)...).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	tx, err := dbexec.NewStandardExecutor(db).BeginTx(context.Background())
+	require.NoError(t, err)
+	mc := NewMutationContext(tx)
+	ctx := WithMutationContext(context.Background(), mc)
+
+	resolverFn := r.makeCreateResolver(users, insertable, r.createSuccessType(users, r.buildGraphQLType(users)))
+	result, err := resolverFn(graphql.ResolveParams{
+		Args: map[string]interface{}{
+			"input": map[string]interface{}{
+				"username": "alice",
+				"groupsConnect": []interface{}{
+					map[string]interface{}{
+						"byName": map[string]interface{}{"name": "admins"},
+					},
+				},
+			},
+		},
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	payload, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	user, ok := payload["user"].(map[string]interface{})
+	require.True(t, ok)
+	assert.EqualValues(t, 1, user["databaseId"])
+	assert.Equal(t, "alice", user["username"])
+
+	require.NoError(t, mc.Finalize())
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUpdateResolver_NotFound_SuccessWithNullEntity(t *testing.T) {
 	db, mock := newMockDB(t)
 	defer db.Close()
@@ -2865,6 +3388,78 @@ func TestOneToManyConnectionResolver_InvalidMapping(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid one-to-many mapping")
+}
+
+func TestOneToManyConnectionResolver_UsesMutationTx(t *testing.T) {
+	users := introspection.Table{
+		Name: "users",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+		},
+	}
+	posts := introspection.Table{
+		Name: "posts",
+		Columns: []introspection.Column{
+			{Name: "id", IsPrimaryKey: true},
+			{Name: "user_id"},
+		},
+		Indexes: []introspection.Index{
+			{Name: "PRIMARY", Unique: true, Columns: []string{"id"}},
+		},
+	}
+	renamePrimaryKeyID(&users)
+	renamePrimaryKeyID(&posts)
+	dbSchema := &introspection.Schema{Tables: []introspection.Table{users, posts}}
+
+	exec := &txAwareFakeExecutor{
+		txResponses: [][][]any{
+			{{int64(101)}},
+		},
+	}
+	r := NewResolver(exec, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	tx, err := exec.BeginTx(context.Background())
+	require.NoError(t, err)
+	ctx := WithMutationContext(context.Background(), NewMutationContext(tx))
+
+	rel := introspection.Relationship{
+		IsOneToMany:      true,
+		LocalColumns:     []string{"id"},
+		RemoteTable:      "posts",
+		RemoteColumns:    []string{"user_id"},
+		GraphQLFieldName: "posts",
+	}
+	field := &ast.Field{
+		Name: &ast.Name{Value: "posts"},
+		SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+			&ast.Field{
+				Name: &ast.Name{Value: "nodes"},
+				SelectionSet: &ast.SelectionSet{Selections: []ast.Selection{
+					&ast.Field{Name: &ast.Name{Value: "databaseId"}},
+				}},
+			},
+		}},
+	}
+
+	resolverFn := r.makeOneToManyConnectionResolver(users, rel)
+	result, err := resolverFn(graphql.ResolveParams{
+		Source:  map[string]interface{}{"databaseId": int64(1)},
+		Args:    map[string]interface{}{"first": 10},
+		Context: ctx,
+		Info: graphql.ResolveInfo{
+			FieldASTs: []*ast.Field{field},
+		},
+	})
+	require.NoError(t, err)
+
+	conn, ok := result.(map[string]interface{})
+	require.True(t, ok)
+	nodes, ok := conn["nodes"].([]map[string]interface{})
+	require.True(t, ok)
+	require.Len(t, nodes, 1)
+	assert.EqualValues(t, 101, nodes[0]["databaseId"])
+	assert.Equal(t, 0, exec.baseCalls)
+	assert.Equal(t, 1, exec.txCalls)
 }
 
 func TestTryBatchManyToOne_NoBatchState(t *testing.T) {

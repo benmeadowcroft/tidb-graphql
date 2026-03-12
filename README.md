@@ -83,6 +83,7 @@ Use one of these compose scenarios:
 | Scenario | Use when | Guide |
 |---|---|---|
 | `quickstart` | You want a complete local demo (TiDB + sample data + GraphQL). | [quickstart README](examples/compose/quickstart/README.md) |
+| `k8s-quickstart` | You want the same local demo running on Kubernetes, and using the TiDB Operator and local port-forwarding. | [quickstart Kubernetes README](examples/k8s/quickstart/README.md) |
 | `quickstart-db-zero` | You want the same quickstart flow but with a remote TiDB Zero database. | [quickstart-db-zero README](examples/compose/quickstart-db-zero/README.md) |
 | `remote-db` | You already have a running TiDB and only need GraphQL. | [remote-db README](examples/compose/remote-db/README.md) |
 | `oidc-roles` | You want local OIDC/JWKS + role-based database auth testing. | [oidc-roles README](examples/compose/oidc-roles/README.md) |

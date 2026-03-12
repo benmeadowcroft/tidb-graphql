@@ -1,0 +1,76 @@
+apiVersion: core.pingcap.com/v1alpha1
+kind: Cluster
+metadata:
+  name: quickstart
+  namespace: tidb-graphql-quickstart
+spec: {}
+---
+apiVersion: core.pingcap.com/v1alpha1
+kind: PDGroup
+metadata:
+  name: pd
+  namespace: tidb-graphql-quickstart
+  labels:
+    pingcap.com/group: pd
+    pingcap.com/component: pd
+    pingcap.com/cluster: quickstart
+spec:
+  cluster:
+    name: quickstart
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        owner: tidb-graphql-quickstart
+    spec:
+      version: v8.5.5
+      volumes:
+        - name: data
+          mounts:
+            - type: data
+          storage: "1Gi"
+---
+apiVersion: core.pingcap.com/v1alpha1
+kind: TiKVGroup
+metadata:
+  name: tikv
+  namespace: tidb-graphql-quickstart
+  labels:
+    pingcap.com/group: tikv
+    pingcap.com/component: tikv
+    pingcap.com/cluster: quickstart
+spec:
+  cluster:
+    name: quickstart
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        owner: tidb-graphql-quickstart
+    spec:
+      version: v8.5.5
+      volumes:
+        - name: data
+          mounts:
+            - type: data
+          storage: "10Gi"
+---
+apiVersion: core.pingcap.com/v1alpha1
+kind: TiDBGroup
+metadata:
+  name: tidb
+  namespace: tidb-graphql-quickstart
+  labels:
+    pingcap.com/group: tidb
+    pingcap.com/component: tidb
+    pingcap.com/cluster: quickstart
+spec:
+  cluster:
+    name: quickstart
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        owner: tidb-graphql-quickstart
+    spec:
+      version: v8.5.5

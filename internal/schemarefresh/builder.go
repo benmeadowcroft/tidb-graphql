@@ -22,11 +22,15 @@ type DatabaseBuildEntry struct {
 	// Name is the SQL TABLE_SCHEMA name (required).
 	Name string
 	// Namespace is the GraphQL namespace alias. Defaults to Name when empty.
-	// Used by Phase 3 namespace-aware naming; stored but not applied until then.
+	// When at least one entry sets a Namespace (or there are multiple entries),
+	// namespace-prefixed type names are generated: e.g. Shop_Order.
 	Namespace string
 	// Filters are per-database schema filter overrides.
 	// When nil the build-level GlobalFilters apply.
 	Filters *schemafilter.Config
+	// Naming holds per-database naming overrides (type_overrides, plural_overrides,
+	// singular_overrides). When nil the build-level Naming config applies.
+	Naming *naming.Config
 }
 
 // BuildSchemaConfig defines inputs for shared schema assembly.
@@ -150,6 +154,25 @@ func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig)
 	namer := naming.New(cfg.Naming, nil)
 	filtersPerDB := make(map[string]schemafilter.Config, len(cfg.Databases))
 
+	// Build namespace map and per-db naming map from the database entries.
+	// Namespace-prefixed type names are generated when there are multiple databases
+	// OR when any single database has an explicit Namespace set.
+	namespaceMap := make(map[string]string, len(cfg.Databases))
+	namingPerDB := make(map[string]naming.Config, len(cfg.Databases))
+	useNamespaces := len(cfg.Databases) > 1
+	for _, entry := range cfg.Databases {
+		ns := entry.Namespace
+		if ns == "" {
+			ns = entry.Name
+		} else {
+			useNamespaces = true // explicit namespace on a single-db entry triggers it too
+		}
+		namespaceMap[entry.Name] = ns
+		if entry.Naming != nil {
+			namingPerDB[entry.Name] = *entry.Naming
+		}
+	}
+
 	var allTables []introspection.Table
 	mergedJunctions := make(introspection.JunctionMap)
 
@@ -202,8 +225,13 @@ func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig)
 		return nil, fmt.Errorf("failed to resolve cross-database relationships: %w", err)
 	}
 
-	// 7. GraphQL type naming (namespace-aware naming applied in Phase 3).
-	schemanaming.Apply(merged, namer)
+	// 7. GraphQL type naming — namespace-aware when multiple databases are configured
+	// or when any entry carries an explicit Namespace alias.
+	if useNamespaces {
+		schemanaming.ApplyWithNamespaces(merged, namer, namespaceMap, namingPerDB)
+	} else {
+		schemanaming.Apply(merged, namer)
+	}
 
 	// 8. Build resolver + GraphQL schema.
 	res := resolver.NewResolver(cfg.Executor, merged, cfg.Limits, cfg.DefaultLimit, cfg.GlobalFilters, cfg.Naming)

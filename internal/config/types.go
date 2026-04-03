@@ -82,6 +82,10 @@ type DatabaseEntryConfig struct {
 	// Filters are per-database schema filter overrides.
 	// If nil, the top-level SchemaFilters apply.
 	Filters *schemafilter.Config `mapstructure:"schema_filters"`
+
+	// Naming holds per-database naming overrides (type_overrides, plural_overrides,
+	// singular_overrides). If nil, the top-level Naming config applies.
+	Naming *naming.Config `mapstructure:"naming"`
 }
 
 // EffectiveNamespace returns the GraphQL namespace alias, defaulting to Name.

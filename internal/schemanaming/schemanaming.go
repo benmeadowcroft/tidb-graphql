@@ -12,7 +12,29 @@ import (
 
 // Apply assigns GraphQL type/query/field names to the schema using the provided namer.
 // It resets collision state to ensure deterministic naming per schema build.
+// Single-database behaviour is unchanged from before Phase 3.
 func Apply(schema *introspection.Schema, namer *naming.Namer) {
+	applyCore(schema, namer, nil, nil)
+}
+
+// ApplyWithNamespaces is like Apply but enables multi-database namespace-prefixed naming.
+//
+// namespaceMap maps each SQL TABLE_SCHEMA name to its GraphQL namespace alias
+// (e.g. "ecommerce" -> "shop"). When the map is non-empty, type names are
+// prefixed: Shop_Order, Shop_OrderConnection, etc. Query field names are left
+// un-prefixed — they will be mounted on namespace wrapper objects in Phase 4.
+//
+// namingPerDB maps each database name to its own naming.Config override. Per-db
+// TypeOverrides, PluralOverrides, and SingularOverrides take precedence over the
+// global namer config for tables in that database, falling back to the global
+// config when no per-db entry exists.
+//
+// Passing nil for either map produces identical behaviour to Apply.
+func ApplyWithNamespaces(schema *introspection.Schema, namer *naming.Namer, namespaceMap map[string]string, namingPerDB map[string]naming.Config) {
+	applyCore(schema, namer, namespaceMap, namingPerDB)
+}
+
+func applyCore(schema *introspection.Schema, namer *naming.Namer, namespaceMap map[string]string, namingPerDB map[string]naming.Config) {
 	if schema == nil {
 		return
 	}
@@ -29,23 +51,63 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 	for ti := range schema.Tables {
 		table := &schema.Tables[ti]
 
-		overrideTypeName, hasTypeOverride := findTypeOverride(namer.Config().TypeOverrides, table.MapKey(), table.Name)
+		// Resolve the effective per-db namer for name transformation.
+		// Only transformation methods (Singularize, Pluralize, ToGraphQLTypeName)
+		// are used from this namer; collision registration always goes through the
+		// shared global namer / singularNamer so collision state is not fragmented.
+		effectiveNamer := namer
+		if namingPerDB != nil {
+			if dbCfg, ok := namingPerDB[table.Key.Database]; ok {
+				effectiveNamer = naming.New(dbCfg, nil)
+			}
+		}
+
+		// Compute namespace prefix (PascalCase), empty in single-db mode.
+		nsPrefix := resolveNamespacePrefix(namer, namespaceMap, table.Key.Database)
+
+		overrideTypeName, hasTypeOverride := findTypeOverride(
+			namer.Config().TypeOverrides, namingPerDB, table.Key.Database, table.MapKey(), table.Name,
+		)
+
 		var typeName string
-		if hasTypeOverride {
-			typeName = namer.RegisterTypeName(overrideTypeName, table.Name)
+		if nsPrefix != "" {
+			// Multi-db mode: use singular form with namespace prefix so that
+			// Shop_Order, Shop_OrderConnection, etc. all share the same base.
+			singularName := effectiveNamer.Singularize(table.Name)
+			var baseTypeName string
+			if hasTypeOverride {
+				baseTypeName = overrideTypeName
+			} else {
+				baseTypeName = namer.ToGraphQLTypeName(singularName)
+			}
+			fullTypeName := nsPrefix + "_" + baseTypeName
+			typeName = namer.RegisterTypeName(fullTypeName, table.Name)
+			// In multi-db mode both the plural-context type and the singular-context
+			// type converge to the same namespace-qualified singular name.
+			table.GraphQLTypeName = typeName
+			table.GraphQLSingleTypeName = typeName
 		} else {
-			typeName = namer.RegisterType(table.Name)
+			// Single-db mode: identical to the original Apply behaviour.
+			if hasTypeOverride {
+				typeName = namer.RegisterTypeName(overrideTypeName, table.Name)
+			} else {
+				typeName = namer.RegisterType(table.Name)
+			}
+			table.GraphQLTypeName = typeName
+
+			singularTableName := effectiveNamer.Singularize(table.Name)
+			if hasTypeOverride {
+				table.GraphQLSingleTypeName = singularNamer.RegisterTypeName(overrideTypeName, singularTableName)
+			} else {
+				table.GraphQLSingleTypeName = singularNamer.RegisterType(singularTableName)
+			}
 		}
-		table.GraphQLTypeName = typeName
-		pluralTableName := namer.Pluralize(table.Name)
+
+		pluralTableName := effectiveNamer.Pluralize(table.Name)
 		table.GraphQLQueryName = namer.RegisterQueryField(pluralTableName)
-		singularTableName := singularNamer.Singularize(table.Name)
+
+		singularTableName := effectiveNamer.Singularize(table.Name)
 		table.GraphQLSingleQueryName = singularNamer.RegisterQueryField(singularTableName)
-		if hasTypeOverride {
-			table.GraphQLSingleTypeName = singularNamer.RegisterTypeName(overrideTypeName, singularTableName)
-		} else {
-			table.GraphQLSingleTypeName = singularNamer.RegisterType(singularTableName)
-		}
 
 		for ci := range table.Columns {
 			col := &table.Columns[ci]
@@ -76,13 +138,26 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 			localCols := rel.EffectiveLocalColumns()
 			remoteCols := rel.EffectiveRemoteColumns()
 			source := fmt.Sprintf("%s:%s:%s", rel.RemoteTable, strings.Join(localCols, ","), strings.Join(remoteCols, ","))
-			// For collision suffix: ManyToOne uses "Ref", all others (OneToMany, ManyToMany, EdgeList) use "Rel"
+			// For collision suffix: ManyToOne uses "Ref", all others use "Rel".
 			useRefSuffix := rel.IsManyToOne
 			rel.GraphQLFieldName = namer.RegisterRelationshipField(typeName, baseName, source, useRefSuffix)
 		}
 	}
 
 	schema.NamesApplied = true
+}
+
+// resolveNamespacePrefix returns the PascalCase namespace prefix for a database,
+// or "" when the namespace map is nil/empty or the database has no entry.
+func resolveNamespacePrefix(namer *naming.Namer, namespaceMap map[string]string, database string) string {
+	if len(namespaceMap) == 0 || database == "" {
+		return ""
+	}
+	ns, ok := namespaceMap[database]
+	if !ok || ns == "" {
+		return ""
+	}
+	return namer.ToGraphQLTypeName(ns)
 }
 
 func hasColumnFieldName(columns []introspection.Column, name string, skipIndex int) bool {
@@ -113,19 +188,39 @@ func uniqueDatabaseIDName(columns []introspection.Column, skipIndex int) string 
 }
 
 // findTypeOverride looks up a GraphQL type override for a table.
-// It checks the fully-qualified mapKey first (e.g. "mydb.users" in multi-db
-// mode), then falls back to the bare table name, and finally does a
-// case-insensitive match. This allows users to write overrides as either
-// "mydb.users" (multi-db) or "users" (single-db) in their config.
-func findTypeOverride(overrides map[string]string, mapKey, tableName string) (string, bool) {
-	// Prefer exact match on the qualified key (dot-delimited).
+//
+// Lookup order:
+//  1. Per-db overrides (namingPerDB[database].TypeOverrides) — qualified key first,
+//     then case-insensitive bare table name.
+//  2. Global overrides — qualified key (mapKey) first, then case-insensitive
+//     bare table name.
+//
+// This lets users write dot-delimited overrides ("mydb.users") in multi-db mode
+// while keeping bare-name overrides ("users") working in single-db mode.
+func findTypeOverride(globalOverrides map[string]string, namingPerDB map[string]naming.Config, database, mapKey, tableName string) (string, bool) {
+	// 1. Per-db overrides take precedence.
+	if namingPerDB != nil && database != "" {
+		if dbCfg, ok := namingPerDB[database]; ok {
+			if mapKey != tableName {
+				if v, ok := dbCfg.TypeOverrides[mapKey]; ok {
+					return v, true
+				}
+			}
+			for key, value := range dbCfg.TypeOverrides {
+				if strings.EqualFold(key, tableName) {
+					return value, true
+				}
+			}
+		}
+	}
+
+	// 2. Global overrides.
 	if mapKey != tableName {
-		if v, ok := overrides[mapKey]; ok {
+		if v, ok := globalOverrides[mapKey]; ok {
 			return v, true
 		}
 	}
-	// Case-insensitive match on bare table name for backward compat.
-	for key, value := range overrides {
+	for key, value := range globalOverrides {
 		if strings.EqualFold(key, tableName) {
 			return value, true
 		}

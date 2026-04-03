@@ -29,7 +29,7 @@ func Apply(schema *introspection.Schema, namer *naming.Namer) {
 	for ti := range schema.Tables {
 		table := &schema.Tables[ti]
 
-		overrideTypeName, hasTypeOverride := findTypeOverride(namer.Config().TypeOverrides, table.Name)
+		overrideTypeName, hasTypeOverride := findTypeOverride(namer.Config().TypeOverrides, table.MapKey(), table.Name)
 		var typeName string
 		if hasTypeOverride {
 			typeName = namer.RegisterTypeName(overrideTypeName, table.Name)
@@ -112,7 +112,19 @@ func uniqueDatabaseIDName(columns []introspection.Column, skipIndex int) string 
 	return candidate
 }
 
-func findTypeOverride(overrides map[string]string, tableName string) (string, bool) {
+// findTypeOverride looks up a GraphQL type override for a table.
+// It checks the fully-qualified mapKey first (e.g. "mydb.users" in multi-db
+// mode), then falls back to the bare table name, and finally does a
+// case-insensitive match. This allows users to write overrides as either
+// "mydb.users" (multi-db) or "users" (single-db) in their config.
+func findTypeOverride(overrides map[string]string, mapKey, tableName string) (string, bool) {
+	// Prefer exact match on the qualified key (dot-delimited).
+	if mapKey != tableName {
+		if v, ok := overrides[mapKey]; ok {
+			return v, true
+		}
+	}
+	// Case-insensitive match on bare table name for backward compat.
 	for key, value := range overrides {
 		if strings.EqualFold(key, tableName) {
 			return value, true

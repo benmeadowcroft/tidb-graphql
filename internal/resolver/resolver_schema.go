@@ -20,7 +20,7 @@ func (r *Resolver) applyNaming() {
 }
 
 func (r *Resolver) singularQueryName(table introspection.Table) string {
-	key := table.Name
+	key := table.MapKey()
 	r.mu.RLock()
 	if cached, ok := r.singularQueryCache[key]; ok {
 		r.mu.RUnlock()
@@ -42,7 +42,7 @@ func (r *Resolver) singularQueryName(table introspection.Table) string {
 }
 
 func (r *Resolver) singularTypeName(table introspection.Table) string {
-	key := table.Name
+	key := table.MapKey()
 	r.mu.RLock()
 	if cached, ok := r.singularTypeCache[key]; ok {
 		r.mu.RUnlock()
@@ -426,14 +426,34 @@ func (r *Resolver) connectionFieldArgs(table introspection.Table) graphql.FieldC
 	return args
 }
 
-// findTable finds a table by name in the schema
+// findTable finds a table by bare name. In single-database mode this is
+// unambiguous. In multi-database mode, prefer findTableByKey when the fully-
+// qualified key is available.
 func (r *Resolver) findTable(tableName string) (introspection.Table, error) {
+	if r.tableIndex != nil {
+		if t, ok := r.tableIndex[tableName]; ok {
+			return *t, nil
+		}
+	}
+	// Fallback to linear scan (handles zero-Key tables or stale index)
 	for _, table := range r.dbSchema.Tables {
 		if table.Name == tableName {
 			return table, nil
 		}
 	}
 	return introspection.Table{}, fmt.Errorf("table not found: %s", tableName)
+}
+
+// findTableByKey finds a table by its fully-qualified TableKey.MapKey(). This
+// is the preferred lookup in multi-database mode where bare table names may
+// collide across databases.
+func (r *Resolver) findTableByKey(mapKey string) (introspection.Table, error) {
+	if r.tableIndex != nil {
+		if t, ok := r.tableIndex[mapKey]; ok {
+			return *t, nil
+		}
+	}
+	return introspection.Table{}, fmt.Errorf("table not found: %s", mapKey)
 }
 
 // buildAggregateFieldsType creates the aggregate fields container.

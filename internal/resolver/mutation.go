@@ -661,9 +661,15 @@ func (r *Resolver) m2mConnectSupported(parentTable introspection.Table, rel intr
 }
 
 func nestedCreateCacheKey(parentTable introspection.Table, rel introspection.Relationship) string {
+	// Use TableKey.MapKey() so that in multi-database mode tables with the same
+	// bare name in different databases produce distinct cache keys.
+	remoteKey := rel.RemoteTableKey.MapKey()
+	if remoteKey == "" {
+		remoteKey = rel.RemoteTable
+	}
 	return strings.Join([]string{
-		parentTable.Name,
-		rel.RemoteTable,
+		parentTable.MapKey(),
+		remoteKey,
 		rel.GraphQLFieldName,
 		strings.Join(rel.LocalColumns, ","),
 		strings.Join(rel.RemoteColumns, ","),

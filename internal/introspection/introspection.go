@@ -17,6 +17,7 @@ import (
 
 	"tidb-graphql/internal/naming"
 	"tidb-graphql/internal/sqltype"
+	"tidb-graphql/internal/tablekey"
 )
 
 // Column represents a database column
@@ -61,11 +62,12 @@ type Index struct {
 
 // ForeignKey represents a foreign key constraint on a column
 type ForeignKey struct {
-	ColumnName       string // e.g., "volume_id"
-	ReferencedTable  string // e.g., "volumes"
-	ReferencedColumn string // e.g., "id"
-	ConstraintName   string // e.g., "books_ibfk_1"
-	OrdinalPosition  int    // Column position within the FK constraint
+	ColumnName         string // e.g., "volume_id"
+	ReferencedTable    string // e.g., "volumes"
+	ReferencedColumn   string // e.g., "id"
+	ReferencedDatabase string // e.g., "other_db"; empty means same database
+	ConstraintName     string // e.g., "books_ibfk_1"
+	OrdinalPosition    int    // Column position within the FK constraint
 }
 
 // Relationship represents either direction of a FK relationship
@@ -74,16 +76,24 @@ type Relationship struct {
 	IsOneToMany  bool
 	IsManyToMany bool // Direct M2M through pure junction (junction hidden)
 	IsEdgeList   bool // M2M through attribute junction (edge type visible)
+	// IsCrossDatabase is true when the relationship crosses a database boundary.
+	// When true, certain mutation paths (nested creates, M2M connects) are blocked.
+	IsCrossDatabase bool
 	// LocalColumns/RemoteColumns are ordered positional mappings between local and remote keys.
 	LocalColumns  []string // For many-to-one: FK columns; for one-to-many: referenced key columns on local table
 	RemoteTable   string   // The related table name (for M2M: the other entity table, not junction)
 	RemoteColumns []string // For many-to-one: referenced columns; for one-to-many: FK columns in remote table
+	// RemoteTableKey is the fully-qualified key for the remote table. Set alongside RemoteTable.
+	// When Key.Database is empty the relationship is within the single implicit database.
+	RemoteTableKey tablekey.TableKey
 	// Junction key mappings are positional: JunctionLocalFKColumns[i] joins to LocalColumns[i],
 	// JunctionRemoteFKColumns[i] joins to RemoteColumns[i].
 	JunctionTable           string   // For M2M relationships: the intermediate junction table name
 	JunctionLocalFKColumns  []string // For M2M/Edge: FK columns in junction pointing to this table
 	JunctionRemoteFKColumns []string // For M2M/Edge: FK columns in junction pointing to remote table
-	GraphQLFieldName        string   // e.g., "volume" or "books" or "departmentEmployees"
+	// JunctionTableKey is the fully-qualified key for the junction table. Set alongside JunctionTable.
+	JunctionTableKey tablekey.TableKey
+	GraphQLFieldName string // e.g., "volume" or "books" or "departmentEmployees"
 }
 
 // JunctionType indicates how a junction table should be handled.
@@ -119,6 +129,11 @@ type JunctionMap map[string]JunctionConfig
 
 // Table represents a database table
 type Table struct {
+	// Key is the fully-qualified identity for this table.
+	// Key.Database is the physical SQL TABLE_SCHEMA; Key.Table is the SQL TABLE_NAME.
+	// In single-database mode Key.Database is empty and all Key methods fall back
+	// to the legacy bare-name behaviour.
+	Key     tablekey.TableKey
 	Name    string
 	IsView  bool
 	Comment string
@@ -217,6 +232,7 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 		}
 
 		schema.Tables = append(schema.Tables, Table{
+			Key:         tablekey.TableKey{Database: databaseName, Table: tableInfo.Name},
 			Name:        tableInfo.Name,
 			IsView:      tableInfo.IsView,
 			Comment:     tableInfo.Comment,
@@ -536,6 +552,7 @@ func getForeignKeys(ctx context.Context, db Queryer, databaseName, tableName str
 	query := `
 		SELECT
 			COLUMN_NAME,
+			REFERENCED_TABLE_SCHEMA,
 			REFERENCED_TABLE_NAME,
 			REFERENCED_COLUMN_NAME,
 			CONSTRAINT_NAME,
@@ -559,10 +576,17 @@ func getForeignKeys(ctx context.Context, db Queryer, databaseName, tableName str
 	var foreignKeys []ForeignKey
 	for rows.Next() {
 		var fk ForeignKey
-		if err := rows.Scan(&fk.ColumnName, &fk.ReferencedTable,
+		var referencedSchema sql.NullString
+		if err := rows.Scan(&fk.ColumnName, &referencedSchema, &fk.ReferencedTable,
 			&fk.ReferencedColumn, &fk.ConstraintName, &fk.OrdinalPosition); err != nil {
 			recordSpanError(span, err)
 			return nil, err
+		}
+		// ReferencedDatabase is populated when the FK crosses a database boundary.
+		// When the referenced schema equals the current database it is left empty so
+		// that single-database code paths continue to work without change.
+		if referencedSchema.Valid && referencedSchema.String != databaseName {
+			fk.ReferencedDatabase = referencedSchema.String
 		}
 		foreignKeys = append(foreignKeys, fk)
 	}

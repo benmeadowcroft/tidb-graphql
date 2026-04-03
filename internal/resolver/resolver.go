@@ -60,6 +60,11 @@ type Resolver struct {
 	setFilterCache         map[string]*graphql.InputObject
 	vectorEdgeCache        map[string]*graphql.Object
 	vectorConnCache        map[string]*graphql.Object
+	// tableIndex provides O(1) table lookup by TableKey.MapKey().
+	// Built once when the schema is loaded; keyed both by MapKey() (e.g.
+	// "mydb.users" in multi-db mode) and by bare table name (for single-db
+	// compat). In single-db mode the two are identical.
+	tableIndex             map[string]*introspection.Table
 	singularQueryCache     map[string]string
 	singularTypeCache      map[string]string
 	singularNamer          *naming.Namer
@@ -127,6 +132,7 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 	return &Resolver{
 		executor:           executor,
 		dbSchema:           dbSchema,
+		tableIndex:         buildTableIndex(dbSchema),
 		typeCache:          make(map[string]*graphql.Object),
 		orderByClauseCache: make(map[string]*graphql.InputObject),
 		whereCache:         make(map[string]*graphql.InputObject),
@@ -160,6 +166,34 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 			RequireIndex: true,
 		}),
 	}
+}
+
+// buildTableIndex builds an O(1) lookup table keyed by TableKey.MapKey()
+// (and, for backward compat, also by bare table name when the two differ).
+// Returns nil when schema is nil.
+func buildTableIndex(schema *introspection.Schema) map[string]*introspection.Table {
+	if schema == nil {
+		return nil
+	}
+	index := make(map[string]*introspection.Table, len(schema.Tables)*2)
+	for i := range schema.Tables {
+		t := &schema.Tables[i]
+		// Use Table.MapKey() which falls back to t.Name when Key is zero so that
+		// tables created without an explicit Key (e.g. in tests) are still indexed
+		// by their bare name rather than by "".
+		mapKey := t.MapKey()
+		index[mapKey] = t
+		// When in multi-db mode (mapKey == "db.table"), also index by bare name for
+		// single-db compat callers that look up by plain table name.
+		// In single-db mode mapKey == t.Name so this is a no-op.
+		if mapKey != t.Name {
+			// Only set bare name if not already occupied (first writer wins).
+			if _, exists := index[t.Name]; !exists {
+				index[t.Name] = t
+			}
+		}
+	}
+	return index
 }
 
 // SetVectorSearchConfig overrides vector-search generation/runtime behavior.
@@ -854,6 +888,17 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 		}
 
+		// Look up junction table as an introspection.Table for qualified SQL support.
+		// Fall back to a minimal table if not found (e.g. pure junctions not in Tables).
+		junctionKey := rel.JunctionTableKey.MapKey()
+		if junctionKey == "" {
+			junctionKey = rel.JunctionTable
+		}
+		junctionTableObj, _ := r.findTableByKey(junctionKey)
+		if junctionTableObj.Name == "" {
+			junctionTableObj = introspection.Table{Name: rel.JunctionTable}
+		}
+
 		field := firstFieldAST(p.Info.FieldASTs)
 		if field == nil {
 			return nil, fmt.Errorf("missing field AST")
@@ -869,7 +914,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 
 		plan, err := planner.PlanManyToManyConnection(
 			relatedTable,
-			rel.JunctionTable,
+			junctionTableObj,
 			rel.EffectiveJunctionLocalFKColumns(),
 			rel.EffectiveJunctionRemoteFKColumns(),
 			rel.EffectiveRemoteColumns(),

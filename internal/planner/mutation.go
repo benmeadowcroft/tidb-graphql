@@ -12,7 +12,7 @@ import (
 // PlanInsert builds SQL for inserting a single row with the provided columns.
 func PlanInsert(table introspection.Table, columns []string, values []interface{}) (SQLQuery, error) {
 	if len(columns) == 0 {
-		query := fmt.Sprintf("INSERT INTO %s () VALUES ()", sqlutil.QuoteIdentifier(table.Name))
+		query := fmt.Sprintf("INSERT INTO %s () VALUES ()", table.SQLFrom())
 		return SQLQuery{SQL: query, Args: nil}, nil
 	}
 
@@ -21,7 +21,7 @@ func PlanInsert(table introspection.Table, columns []string, values []interface{
 		quotedCols[i] = sqlutil.QuoteIdentifier(col)
 	}
 
-	builder := sq.Insert(sqlutil.QuoteIdentifier(table.Name)).
+	builder := sq.Insert(table.SQLFrom()).
 		Columns(quotedCols...).
 		Values(values...).
 		PlaceholderFormat(sq.Question)
@@ -44,7 +44,7 @@ func PlanUpdate(table introspection.Table, set map[string]interface{}, pkValues 
 		return SQLQuery{}, err
 	}
 
-	update := sq.Update(sqlutil.QuoteIdentifier(table.Name))
+	update := sq.Update(table.SQLFrom())
 	setMap := make(map[string]interface{}, len(set))
 	for col, val := range set {
 		setMap[sqlutil.QuoteIdentifier(col)] = val
@@ -71,7 +71,7 @@ func PlanDelete(table introspection.Table, pkValues map[string]interface{}) (SQL
 		return SQLQuery{}, err
 	}
 
-	deleteBuilder := sq.Delete(sqlutil.QuoteIdentifier(table.Name))
+	deleteBuilder := sq.Delete(table.SQLFrom())
 	where := sq.Eq{}
 	for col, val := range pkValues {
 		where[sqlutil.QuoteIdentifier(col)] = val

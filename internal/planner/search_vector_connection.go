@@ -341,7 +341,7 @@ func buildVectorConnectionSQL(
 			fmt.Sprintf("%s(%s, ?) AS %s", distanceFunction, sqlutil.QuoteIdentifier(vectorColumn.Name), sqlutil.QuoteIdentifier(vectorDistanceAlias)),
 			searchInput.distanceArg,
 		).
-		From(sqlutil.QuoteIdentifier(table.Name))
+		From(table.SQLFrom())
 	if whereClause != nil && whereClause.Condition != nil {
 		inner = inner.Where(whereClause.Condition)
 	}

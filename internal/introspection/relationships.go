@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"tidb-graphql/internal/naming"
+	"tidb-graphql/internal/tablekey"
 )
 
 // buildRelationships creates bidirectional relationship metadata from foreign keys.
@@ -51,19 +52,28 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 		)
 	}
 
-	// Count FKs per (source_table, target_table) pair to determine naming strategy
+	// Count FKs per (source_table, target_table) pair to determine naming strategy.
 	// When multiple FK constraints from the same table point to the same target,
 	// we need to use FK column names to disambiguate.
-	fkCount := make(map[string]map[string]int) // source → target → count
+	// Keys use TableKey.MapKey() to avoid collisions when two databases share table names.
+	fkCount := make(map[string]map[string]int) // source MapKey → target MapKey → count
 	for _, table := range schema.Tables {
 		if table.IsView {
 			continue
 		}
+		srcKey := table.MapKey()
 		for _, fk := range ForeignKeyConstraints(table) {
-			if fkCount[table.Name] == nil {
-				fkCount[table.Name] = make(map[string]int)
+			if fkCount[srcKey] == nil {
+				fkCount[srcKey] = make(map[string]int)
 			}
-			fkCount[table.Name][fk.ReferencedTable]++
+			// Build the target key: same database unless this is a cross-database FK.
+			var dstKey string
+			if fk.ReferencedDatabase != "" {
+				dstKey = tablekey.TableKey{Database: fk.ReferencedDatabase, Table: fk.ReferencedTable}.MapKey()
+			} else {
+				dstKey = tablekey.TableKey{Database: table.Key.Database, Table: fk.ReferencedTable}.MapKey()
+			}
+			fkCount[srcKey][dstKey]++
 		}
 	}
 
@@ -96,11 +106,18 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			}
 			localColumns := append([]string(nil), fk.ColumnNames...)
 			remoteColumns := append([]string(nil), fk.ReferencedColumns...)
+			// Determine the effective database for the remote table.
+			remoteDB := table.Key.Database
+			if fk.ReferencedDatabase != "" {
+				remoteDB = fk.ReferencedDatabase
+			}
 			rel := Relationship{
-				IsManyToOne:      true,
-				LocalColumns:     localColumns,
-				RemoteTable:      fk.ReferencedTable,
-				RemoteColumns:    remoteColumns,
+				IsManyToOne:     true,
+				IsCrossDatabase: fk.ReferencedDatabase != "",
+				LocalColumns:    localColumns,
+				RemoteTable:     fk.ReferencedTable,
+				RemoteColumns:   remoteColumns,
+				RemoteTableKey:  tablekey.TableKey{Database: remoteDB, Table: fk.ReferencedTable},
 				GraphQLFieldName: fieldName,
 			}
 			table.Relationships = append(table.Relationships, rel)
@@ -130,17 +147,22 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			}
 
 			for _, fk := range ForeignKeyConstraints(*otherTable) {
-				if fk.ReferencedTable == table.Name {
+				// For intra-database one-to-many: only consider FKs pointing at this table within the same database.
+				// Cross-database one-to-many relationships are handled by ResolveCrossDatabaseRelationships.
+				if fk.ReferencedTable == table.Name && fk.ReferencedDatabase == "" {
 					if len(fk.ColumnNames) != 1 || len(fk.ReferencedColumns) != 1 {
 						warnCompositeSkip("one_to_many", otherTable.Name, fk.ConstraintName, fk.ColumnNames, table.Name, fk.ReferencedColumns, "composite_one_to_many_not_supported_in_phase")
 						continue
 					}
-					isOnlyFK := fkCount[otherTable.Name][table.Name] == 1
+					srcKey := otherTable.MapKey()
+					dstKey := tablekey.TableKey{Database: otherTable.Key.Database, Table: fk.ReferencedTable}.MapKey()
+					isOnlyFK := fkCount[srcKey][dstKey] == 1
 					rel := Relationship{
 						IsOneToMany:      true,
 						LocalColumns:     append([]string(nil), fk.ReferencedColumns...),
 						RemoteTable:      otherTable.Name,
 						RemoteColumns:    append([]string(nil), fk.ColumnNames...),
+						RemoteTableKey:   tablekey.TableKey{Database: otherTable.Key.Database, Table: otherTable.Name},
 						GraphQLFieldName: namer.OneToManyFieldName(otherTable.Name, fk.ColumnNames[0], isOnlyFK),
 					}
 					table.Relationships = append(table.Relationships, rel)
@@ -149,15 +171,25 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 		}
 	}
 
-	// Third pass: Create M2M relationships for junction tables
-	tableByName := make(map[string]*Table)
+	// Third pass: Create M2M relationships for junction tables.
+	// tableByKey is keyed by Table.MapKey() (which falls back to table.Name
+	// when Key is zero) to avoid collisions when two databases share table names.
+	tableByKey := make(map[string]*Table)
 	for i := range schema.Tables {
-		tableByName[schema.Tables[i].Name] = &schema.Tables[i]
+		tableByKey[schema.Tables[i].MapKey()] = &schema.Tables[i]
 	}
 
 	for _, jc := range junctions {
-		leftTable := tableByName[jc.LeftFK.ReferencedTable]
-		rightTable := tableByName[jc.RightFK.ReferencedTable]
+		// Junctions are always intra-database; find tables using same-db key.
+		// Derive the database from the junction table itself.
+		junctionKey := tablekey.TableKey{Table: jc.Table}
+		if jt, ok := tableByKey[jc.Table]; ok {
+			junctionKey = jt.Key
+		}
+		leftKey := tablekey.TableKey{Database: junctionKey.Database, Table: jc.LeftFK.ReferencedTable}.MapKey()
+		rightKey := tablekey.TableKey{Database: junctionKey.Database, Table: jc.RightFK.ReferencedTable}.MapKey()
+		leftTable := tableByKey[leftKey]
+		rightTable := tableByKey[rightKey]
 		if leftTable == nil || rightTable == nil {
 			continue
 		}
@@ -189,7 +221,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), leftPKNames...),
 				RemoteTable:             rightTable.Name,
 				RemoteColumns:           append([]string(nil), rightPKNames...),
+				RemoteTableKey:          rightTable.Key,
 				JunctionTable:           jc.Table,
+				JunctionTableKey:        junctionKey,
 				JunctionLocalFKColumns:  append([]string(nil), leftJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), rightJunctionCols...),
 				GraphQLFieldName:        leftFieldName,
@@ -200,7 +234,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), rightPKNames...),
 				RemoteTable:             leftTable.Name,
 				RemoteColumns:           append([]string(nil), leftPKNames...),
+				RemoteTableKey:          leftTable.Key,
 				JunctionTable:           jc.Table,
+				JunctionTableKey:        junctionKey,
 				JunctionLocalFKColumns:  append([]string(nil), rightJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), leftJunctionCols...),
 				GraphQLFieldName:        rightFieldName,
@@ -221,7 +257,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), leftPKNames...),
 				RemoteTable:             jc.Table, // Points to junction table for edge type
 				RemoteColumns:           append([]string(nil), leftJunctionCols...),
+				RemoteTableKey:          junctionKey,
 				JunctionTable:           jc.Table,
+				JunctionTableKey:        junctionKey,
 				JunctionLocalFKColumns:  append([]string(nil), leftJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), rightJunctionCols...),
 				GraphQLFieldName:        edgeFieldName,
@@ -232,7 +270,9 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 				LocalColumns:            append([]string(nil), rightPKNames...),
 				RemoteTable:             jc.Table, // Points to junction table for edge type
 				RemoteColumns:           append([]string(nil), rightJunctionCols...),
+				RemoteTableKey:          junctionKey,
 				JunctionTable:           jc.Table,
+				JunctionTableKey:        junctionKey,
 				JunctionLocalFKColumns:  append([]string(nil), rightJunctionCols...),
 				JunctionRemoteFKColumns: append([]string(nil), leftJunctionCols...),
 				GraphQLFieldName:        edgeFieldName,

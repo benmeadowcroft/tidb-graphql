@@ -255,7 +255,7 @@ func TestPlanManyToManyBatch(t *testing.T) {
 	}
 
 	planned, err := PlanManyToManyBatch(
-		"user_tags",
+		introspection.Table{Name: "user_tags"},
 		table,
 		[]string{"user_id"},
 		[]string{"tag_id"},

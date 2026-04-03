@@ -244,6 +244,20 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 	}
 
+	// Look up the junction table as an introspection.Table (needed for qualified SQL).
+	// Prefer the fully-qualified key set by relationship building; fall back to
+	// the string name for backward compatibility.
+	// If the junction table is not in the schema (e.g. pure junction not in Tables),
+	// create a minimal table with just the name so SQL remains correct for single-db.
+	junctionTableKey := rel.JunctionTableKey.MapKey()
+	if junctionTableKey == "" {
+		junctionTableKey = rel.JunctionTable
+	}
+	junctionTableObj, _ := r.findTableByKey(junctionTableKey)
+	if junctionTableObj.Name == "" {
+		junctionTableObj = introspection.Table{Name: rel.JunctionTable}
+	}
+
 	pkCols := introspection.PrimaryKeyColumns(relatedTable)
 	if len(pkCols) == 0 {
 		if metrics != nil {
@@ -376,18 +390,18 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		partial, err := runBatchConnectionChunks(
 			p.Context, r, bp, len(chunk), metrics,
 			func() (planner.SQLQuery, error) {
-				return planner.PlanManyToManyConnectionBatch(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, selection, chunk, first, orderBy, whereClause)
+				return planner.PlanManyToManyConnectionBatch(relatedTable, junctionTableObj, junctionLocalColumns, junctionRemoteColumns, remoteColumns, selection, chunk, first, orderBy, whereClause)
 			},
 			func(results []map[string]interface{}) map[string][]map[string]interface{} {
 				return groupByAliases(results, parentAliases)
 			},
 			func(parentID string) (planner.SQLQuery, planner.SQLQuery, error) {
 				tuple := parentValueByKey[parentID]
-				count, err := planner.BuildManyToManyCountSQL(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
+				count, err := planner.BuildManyToManyCountSQL(relatedTable, junctionTableObj, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
 				if err != nil {
 					return planner.SQLQuery{}, planner.SQLQuery{}, err
 				}
-				agg, err := planner.BuildManyToManyAggregateBaseSQL(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
+				agg, err := planner.BuildManyToManyAggregateBaseSQL(relatedTable, junctionTableObj, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
 				return count, agg, err
 			},
 		)

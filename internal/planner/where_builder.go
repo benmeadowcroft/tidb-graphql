@@ -379,11 +379,17 @@ func buildRelationshipSubquerySQL(
 		}
 		return fmt.Sprintf("%s.%s", sqlutil.QuoteIdentifier(alias), sqlutil.QuoteIdentifier(col))
 	}
-	quotedFrom := func(tableName, alias string) string {
+	// quotedFromTable emits the SQL FROM reference for a table with an optional alias.
+	// Uses table.SQLFrom() so that in multi-database mode the output is
+	// `database`.`table` rather than just `table`.
+	// In single-database mode the output is identical to the old
+	// sqlutil.QuoteIdentifier(table.Name) form.
+	quotedFromTable := func(t introspection.Table, alias string) string {
+		qualified := t.SQLFrom()
 		if alias == "" {
-			return sqlutil.QuoteIdentifier(tableName)
+			return qualified
 		}
-		return fmt.Sprintf("%s AS %s", sqlutil.QuoteIdentifier(tableName), sqlutil.QuoteIdentifier(alias))
+		return fmt.Sprintf("%s AS %s", qualified, sqlutil.QuoteIdentifier(alias))
 	}
 
 	joinPairs := func(leftAlias string, leftCols []string, rightAlias string, rightCols []string) ([]string, error) {
@@ -425,7 +431,7 @@ func buildRelationshipSubquerySQL(
 			state.addUsedColumn(table.Name, col)
 		}
 
-		builder := sq.Select("1").From(quotedFrom(remoteTable.Name, remoteAlias))
+		builder := sq.Select("1").From(quotedFromTable(remoteTable, remoteAlias))
 		for _, pair := range corrPairs {
 			builder = builder.Where(sq.Expr(pair))
 		}
@@ -457,7 +463,7 @@ func buildRelationshipSubquerySQL(
 			state.addUsedColumn(table.Name, col)
 		}
 
-		builder := sq.Select("1").From(quotedFrom(remoteTable.Name, remoteAlias))
+		builder := sq.Select("1").From(quotedFromTable(remoteTable, remoteAlias))
 		for _, pair := range corrPairs {
 			builder = builder.Where(sq.Expr(pair))
 		}
@@ -490,7 +496,7 @@ func buildRelationshipSubquerySQL(
 			state.addUsedColumn(table.Name, col)
 		}
 
-		builder := sq.Select("1").From(quotedFrom(junctionTable.Name, junctionAlias))
+		builder := sq.Select("1").From(quotedFromTable(junctionTable, junctionAlias))
 		for _, pair := range corrPairs {
 			builder = builder.Where(sq.Expr(pair))
 		}
@@ -548,8 +554,8 @@ func buildRelationshipSubquerySQL(
 		}
 
 		builder := sq.Select("1").
-			From(quotedFrom(junctionTable.Name, junctionAlias)).
-			Join(fmt.Sprintf("%s ON %s", quotedFrom(remoteTable.Name, remoteAlias), strings.Join(joinConditions, " AND ")))
+			From(quotedFromTable(junctionTable, junctionAlias)).
+			Join(fmt.Sprintf("%s ON %s", quotedFromTable(remoteTable, remoteAlias), strings.Join(joinConditions, " AND ")))
 		for _, pair := range corrPairs {
 			builder = builder.Where(sq.Expr(pair))
 		}

@@ -7,10 +7,11 @@ import (
 
 // ForeignKeyConstraint groups per-column KEY_COLUMN_USAGE rows into an ordered FK constraint mapping.
 type ForeignKeyConstraint struct {
-	ConstraintName    string
-	ReferencedTable   string
-	ColumnNames       []string
-	ReferencedColumns []string
+	ConstraintName     string
+	ReferencedTable    string
+	ReferencedDatabase string // Non-empty when the FK crosses a database boundary
+	ColumnNames        []string
+	ReferencedColumns  []string
 }
 
 // ForeignKeyConstraints returns FK constraints for a table with deterministic ordering.
@@ -63,8 +64,9 @@ func ForeignKeyConstraints(table Table) []ForeignKeyConstraint {
 		group, ok := grouped[item.key]
 		if !ok {
 			group = &ForeignKeyConstraint{
-				ConstraintName:  item.fk.ConstraintName,
-				ReferencedTable: item.fk.ReferencedTable,
+				ConstraintName:     item.fk.ConstraintName,
+				ReferencedTable:    item.fk.ReferencedTable,
+				ReferencedDatabase: item.fk.ReferencedDatabase,
 			}
 			grouped[item.key] = group
 			if _, exists := keySeen[item.key]; !exists {

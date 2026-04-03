@@ -97,6 +97,24 @@ func (d *DatabaseConfig) EffectiveDatabaseName() (name string, source string, er
 	return resolveEffectiveDatabaseName(d.Database, d.ConnectionString, d.MyCnfFile)
 }
 
+// EffectiveDatabaseNames returns the SQL TABLE_SCHEMA names to expose via GraphQL.
+// When Databases is populated (new config style), it returns the Names from that slice.
+// Otherwise it returns a single-element slice containing the legacy Database field,
+// which is always normalised by Load/Validate before callers see it.
+func (d *DatabaseConfig) EffectiveDatabaseNames() []string {
+	if len(d.Databases) > 0 {
+		names := make([]string, len(d.Databases))
+		for i, entry := range d.Databases {
+			names[i] = entry.Name
+		}
+		return names
+	}
+	if d.Database != "" {
+		return []string{d.Database}
+	}
+	return nil
+}
+
 func resolveEffectiveDatabaseName(databaseName string, connectionString string, myCnfFile string) (name string, source string, err error) {
 	configDatabase := strings.TrimSpace(databaseName)
 	dsn := strings.TrimSpace(connectionString)

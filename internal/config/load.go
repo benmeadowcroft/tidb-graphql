@@ -68,6 +68,7 @@ func Load() (*Config, error) {
 	// --- Flags binding (highest normal priority) ---
 	bindChangedFlagsToViper(v)
 	databaseNameExplicit := databaseNameExplicitlyConfigured(v)
+	databasesConfigured := databasesExplicitlyConfigured(v)
 	if err := validateSingleStdinFileSource(v); err != nil {
 		return nil, err
 	}
@@ -142,31 +143,35 @@ func Load() (*Config, error) {
 	}
 
 	// --- Effective database normalization ---
-	// If DSN is set and database.database was not explicitly configured, treat the
-	// default placeholder as unset so DSN can become the canonical database target.
-	if strings.TrimSpace(v.GetString("database.dsn")) != "" &&
-		!databaseNameExplicit &&
-		strings.TrimSpace(v.GetString("database.database")) == defaultDatabaseName {
-		v.Set("database.database", "")
-	}
+	// Skipped when database.databases is explicitly configured: the Databases
+	// array takes precedence and validate() will sync Database from Databases[0].
+	if !databasesConfigured {
+		// If DSN is set and database.database was not explicitly configured, treat the
+		// default placeholder as unset so DSN can become the canonical database target.
+		if strings.TrimSpace(v.GetString("database.dsn")) != "" &&
+			!databaseNameExplicit &&
+			strings.TrimSpace(v.GetString("database.database")) == defaultDatabaseName {
+			v.Set("database.database", "")
+		}
 
-	// In my.cnf mode, force explicit database when not provided by user nor file.
-	if strings.TrimSpace(v.GetString("database.mycnf_file")) != "" &&
-		!databaseNameExplicit &&
-		!myCnfHasDatabase &&
-		strings.TrimSpace(v.GetString("database.database")) == defaultDatabaseName {
-		v.Set("database.database", "")
-	}
+		// In my.cnf mode, force explicit database when not provided by user nor file.
+		if strings.TrimSpace(v.GetString("database.mycnf_file")) != "" &&
+			!databaseNameExplicit &&
+			!myCnfHasDatabase &&
+			strings.TrimSpace(v.GetString("database.database")) == defaultDatabaseName {
+			v.Set("database.database", "")
+		}
 
-	effectiveDatabase, _, err := resolveEffectiveDatabaseName(
-		v.GetString("database.database"),
-		v.GetString("database.dsn"),
-		v.GetString("database.mycnf_file"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve effective database name: %w", err)
+		effectiveDatabase, _, err := resolveEffectiveDatabaseName(
+			v.GetString("database.database"),
+			v.GetString("database.dsn"),
+			v.GetString("database.mycnf_file"),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve effective database name: %w", err)
+		}
+		v.Set("database.database", effectiveDatabase)
 	}
-	v.Set("database.database", effectiveDatabase)
 
 	// --- Unmarshal (strict) ---
 	var cfg Config
@@ -674,6 +679,13 @@ func databaseNameExplicitlyConfigured(v *viper.Viper) bool {
 		return true
 	}
 	return v.InConfig("database.database")
+}
+
+func databasesExplicitlyConfigured(v *viper.Viper) bool {
+	if _, ok := os.LookupEnv("TIGQL_DATABASE_DATABASES"); ok {
+		return true
+	}
+	return v.InConfig("database.databases")
 }
 
 func stringToStringSliceHookFunc(sep string) mapstructure.DecodeHookFunc {

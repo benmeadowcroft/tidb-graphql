@@ -34,7 +34,7 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 			return fields
 		}
 	}
-	if !schemafilter.MutationTableAllowed(table.Name, r.filters) {
+	if !schemafilter.MutationTableAllowed(table.Name, r.mutationFiltersFor(table)) {
 		return fields
 	}
 
@@ -99,7 +99,7 @@ func (r *Resolver) mutationInsertableColumns(table introspection.Table) []intros
 		if col.IsGenerated {
 			continue
 		}
-		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.filters) {
+		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.mutationFiltersFor(table)) {
 			continue
 		}
 		cols = append(cols, col)
@@ -113,7 +113,7 @@ func (r *Resolver) mutationUpdatableColumns(table introspection.Table) []introsp
 		if col.IsPrimaryKey || col.IsGenerated {
 			continue
 		}
-		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.filters) {
+		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.mutationFiltersFor(table)) {
 			continue
 		}
 		cols = append(cols, col)
@@ -307,11 +307,17 @@ func (r *Resolver) buildCreateMutationPlan(table introspection.Table) createMuta
 			}
 			plan.connectFields[rel.GraphQLFieldName+"Connect"] = rel
 		case rel.IsOneToMany || rel.IsEdgeList:
+			if rel.IsCrossDatabase {
+				continue // cross-database nested create not supported
+			}
 			if r.nestedCreateInputForRel(table, rel) == nil {
 				continue
 			}
 			plan.nestedFields[rel.GraphQLFieldName+"Create"] = rel
 		case rel.IsManyToMany:
+			if rel.IsCrossDatabase {
+				continue // cross-database M2M connect not supported
+			}
 			if !r.m2mConnectSupported(table, rel) {
 				continue
 			}
@@ -458,11 +464,14 @@ func (r *Resolver) connectInputForRel(rel introspection.Relationship) *graphql.I
 // FK columns on the child table, mirroring the pattern used in createInputType.
 // Returns nil if the remote table is not mutation-allowed or produces no fields.
 func (r *Resolver) nestedCreateInputForRel(parentTable introspection.Table, rel introspection.Relationship) *graphql.InputObject {
+	if rel.IsCrossDatabase {
+		return nil // cross-database nested create not supported
+	}
 	remoteTable, err := r.findTable(rel.RemoteTable)
 	if err != nil {
 		return nil
 	}
-	if !schemafilter.MutationTableAllowed(remoteTable.Name, r.filters) {
+	if !schemafilter.MutationTableAllowed(remoteTable.Name, r.mutationFiltersFor(remoteTable)) {
 		return nil
 	}
 
@@ -630,7 +639,7 @@ func (r *Resolver) localColumnsMutationAllowed(table introspection.Table, cols [
 			continue
 		}
 		seen = true
-		if !schemafilter.MutationColumnAllowed(table.Name, colName, r.filters) {
+		if !schemafilter.MutationColumnAllowed(table.Name, colName, r.mutationFiltersFor(table)) {
 			return false
 		}
 	}
@@ -641,10 +650,14 @@ func (r *Resolver) m2mConnectSupported(parentTable introspection.Table, rel intr
 	if !rel.IsManyToMany {
 		return false
 	}
+	if rel.IsCrossDatabase {
+		return false // cross-database M2M connect not supported
+	}
 	if r.connectInputForRel(rel) == nil {
 		return false
 	}
-	if !schemafilter.MutationTableAllowed(rel.JunctionTable, r.filters) {
+	junctionTableObj := introspection.Table{Name: rel.JunctionTable, Key: rel.JunctionTableKey}
+	if !schemafilter.MutationTableAllowed(rel.JunctionTable, r.mutationFiltersFor(junctionTableObj)) {
 		return false
 	}
 	junctionTable, err := r.findTable(rel.JunctionTable)

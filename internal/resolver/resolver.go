@@ -88,6 +88,10 @@ type Resolver struct {
 	limits                 *planner.PlanLimits
 	defaultLimit           int
 	filters                schemafilter.Config
+	// filtersPerDB holds per-database schema filter overrides used in multi-db mode.
+	// When non-empty, mutationFiltersFor looks up the filter config by Key.Database
+	// before falling back to filters.
+	filtersPerDB           map[string]schemafilter.Config
 	vectorSearch           VectorSearchConfig
 	mu                     sync.RWMutex
 }
@@ -166,6 +170,24 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 			RequireIndex: true,
 		}),
 	}
+}
+
+// SetFiltersPerDB installs per-database schema filter overrides used in multi-db mode.
+// Must be called before BuildGraphQLSchema when using BuildMultiDatabaseSchema.
+func (r *Resolver) SetFiltersPerDB(m map[string]schemafilter.Config) {
+	r.filtersPerDB = m
+}
+
+// mutationFiltersFor returns the schemafilter.Config applicable to the given table.
+// In multi-db mode it consults filtersPerDB keyed by the table's physical database name;
+// falls back to the global filters for single-db or when no per-db entry exists.
+func (r *Resolver) mutationFiltersFor(t introspection.Table) schemafilter.Config {
+	if len(r.filtersPerDB) > 0 && t.Key.Database != "" {
+		if cfg, ok := r.filtersPerDB[t.Key.Database]; ok {
+			return cfg
+		}
+	}
+	return r.filters
 }
 
 // buildTableIndex builds an O(1) lookup table keyed by TableKey.MapKey()

@@ -16,6 +16,19 @@ import (
 	"github.com/graphql-go/graphql"
 )
 
+// DatabaseBuildEntry describes one database schema to include in a multi-database
+// schema build. It contains schema-level behaviour only — no connection settings.
+type DatabaseBuildEntry struct {
+	// Name is the SQL TABLE_SCHEMA name (required).
+	Name string
+	// Namespace is the GraphQL namespace alias. Defaults to Name when empty.
+	// Used by Phase 3 namespace-aware naming; stored but not applied until then.
+	Namespace string
+	// Filters are per-database schema filter overrides.
+	// When nil the build-level GlobalFilters apply.
+	Filters *schemafilter.Config
+}
+
 // BuildSchemaConfig defines inputs for shared schema assembly.
 type BuildSchemaConfig struct {
 	Queryer                introspection.Queryer
@@ -85,6 +98,129 @@ func BuildSchema(ctx context.Context, cfg BuildSchemaConfig) (*BuildSchemaResult
 
 	return &BuildSchemaResult{
 		DBSchema:      dbSchema,
+		GraphQLSchema: graphqlSchema,
+	}, nil
+}
+
+// BuildMultiDatabaseConfig defines inputs for multi-database schema assembly.
+type BuildMultiDatabaseConfig struct {
+	Queryer                introspection.Queryer
+	Executor               dbexec.QueryExecutor
+	// Databases lists the SQL schemas to introspect (at least one required).
+	Databases              []DatabaseBuildEntry
+	// GlobalFilters are the default schema filters applied to every database
+	// that does not provide its own DatabaseBuildEntry.Filters override.
+	GlobalFilters          schemafilter.Config
+	// Type mapping overrides applied to every database.
+	UUIDColumns            map[string][]string
+	TinyInt1BooleanColumns map[string][]string
+	TinyInt1IntColumns     map[string][]string
+	Naming                 naming.Config
+	Limits                 *planner.PlanLimits
+	DefaultLimit           int
+	VectorRequireIndex     bool
+	VectorMaxTopK          int
+}
+
+// BuildMultiDatabaseSchema introspects each database, merges the schemas, resolves
+// cross-database relationships, and builds a unified GraphQL schema.
+//
+// Pipeline per database:
+//  1. IntrospectDatabaseContext — tables get Key.Database set to entry.Name.
+//  2. Per-db filter application (falls back to GlobalFilters).
+//  3. Type override application (UUID, tinyint(1)).
+//  4. Intra-db junction classification + relationship building.
+//
+// After all databases are processed:
+//  5. Schemas are merged into a single introspection.Schema.
+//  6. ResolveCrossDatabaseRelationships adds cross-db one-to-many relationships.
+//  7. schemanaming.Apply names GraphQL types (namespace-aware naming in Phase 3).
+//  8. A Resolver is built with per-db filter overrides and a GraphQL schema produced.
+func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig) (*BuildSchemaResult, error) {
+	if cfg.Queryer == nil {
+		return nil, fmt.Errorf("schema builder requires an introspection queryer")
+	}
+	if cfg.Executor == nil {
+		return nil, fmt.Errorf("schema builder requires a query executor")
+	}
+	if len(cfg.Databases) == 0 {
+		return nil, fmt.Errorf("schema builder requires at least one database entry")
+	}
+
+	namer := naming.New(cfg.Naming, nil)
+	filtersPerDB := make(map[string]schemafilter.Config, len(cfg.Databases))
+
+	var allTables []introspection.Table
+	mergedJunctions := make(introspection.JunctionMap)
+
+	for _, entry := range cfg.Databases {
+		// 1. Introspect — tables will have Key.Database = entry.Name.
+		dbSchema, err := introspection.IntrospectDatabaseContext(ctx, cfg.Queryer, entry.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to introspect database %q: %w", entry.Name, err)
+		}
+
+		// 2. Per-db filters, falling back to global.
+		filters := cfg.GlobalFilters
+		if entry.Filters != nil {
+			filters = *entry.Filters
+		}
+		schemafilter.Apply(ctx, dbSchema, filters)
+		filtersPerDB[entry.Name] = filters
+
+		// 3. Type overrides.
+		if err := introspection.ApplyTinyInt1TypeOverrides(dbSchema, cfg.TinyInt1BooleanColumns, cfg.TinyInt1IntColumns); err != nil {
+			return nil, fmt.Errorf("failed to apply tinyint(1) type mappings for %q: %w", entry.Name, err)
+		}
+		if err := introspection.ApplyUUIDTypeOverrides(dbSchema, cfg.UUIDColumns); err != nil {
+			return nil, fmt.Errorf("failed to apply UUID type mappings for %q: %w", entry.Name, err)
+		}
+
+		// 4. Intra-db junction classification + relationship building.
+		// Cross-db FKs produce many-to-one relationships (IsCrossDatabase=true);
+		// their reverse one-to-many relationships are added in step 6.
+		junctions := junction.ClassifyJunctions(dbSchema)
+		dbSchema.Junctions = junctions.ToIntrospectionMap()
+		if err := introspection.RebuildRelationshipsWithJunctions(ctx, dbSchema, namer, dbSchema.Junctions); err != nil {
+			return nil, fmt.Errorf("failed to rebuild relationships for %q: %w", entry.Name, err)
+		}
+
+		allTables = append(allTables, dbSchema.Tables...)
+		for k, v := range dbSchema.Junctions {
+			mergedJunctions[k] = v
+		}
+	}
+
+	// 5. Merge.
+	merged := &introspection.Schema{
+		Tables:    allTables,
+		Junctions: mergedJunctions,
+	}
+
+	// 6. Cross-database one-to-many relationships.
+	if err := introspection.ResolveCrossDatabaseRelationships(merged, namer); err != nil {
+		return nil, fmt.Errorf("failed to resolve cross-database relationships: %w", err)
+	}
+
+	// 7. GraphQL type naming (namespace-aware naming applied in Phase 3).
+	schemanaming.Apply(merged, namer)
+
+	// 8. Build resolver + GraphQL schema.
+	res := resolver.NewResolver(cfg.Executor, merged, cfg.Limits, cfg.DefaultLimit, cfg.GlobalFilters, cfg.Naming)
+	res.SetFiltersPerDB(filtersPerDB)
+	if cfg.VectorRequireIndex || cfg.VectorMaxTopK > 0 {
+		res.SetVectorSearchConfig(resolver.VectorSearchConfig{
+			RequireIndex: cfg.VectorRequireIndex,
+			MaxTopK:      cfg.VectorMaxTopK,
+		})
+	}
+	graphqlSchema, err := res.BuildGraphQLSchema()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build GraphQL schema: %w", err)
+	}
+
+	return &BuildSchemaResult{
+		DBSchema:      merged,
 		GraphQLSchema: graphqlSchema,
 	}, nil
 }

@@ -282,3 +282,75 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 
 	return nil
 }
+
+// ResolveCrossDatabaseRelationships adds one-to-many relationships across database
+// boundaries in a merged schema. It must be called after all per-database
+// introspection and relationship building is complete.
+//
+// During per-database relationship building, many-to-one relationships are already
+// created for cross-database FKs (IsCrossDatabase=true). This function adds the
+// reverse one-to-many relationships on the referenced tables — but only when the
+// referenced database is present in the merged schema (i.e. a configured database).
+// FKs referencing unconfigured databases are silently skipped.
+//
+// Composite FK one-to-many are skipped, matching the intra-database limitation.
+func ResolveCrossDatabaseRelationships(schema *Schema, namer *naming.Namer) error {
+	// Build a full tableIndex across all databases, keyed by TableKey.MapKey().
+	tableIndex := make(map[string]*Table)
+	for i := range schema.Tables {
+		tableIndex[schema.Tables[i].MapKey()] = &schema.Tables[i]
+	}
+
+	// Count cross-db FKs per (source, referenced) pair for naming disambiguation.
+	// isOnlyFK is true when there's exactly one FK from the source table to the
+	// referenced table, allowing the pluralised table name to be used directly.
+	fkCount := make(map[string]map[string]int) // srcMapKey -> dstMapKey -> count
+	for _, table := range schema.Tables {
+		srcKey := table.MapKey()
+		for _, fk := range ForeignKeyConstraints(table) {
+			if fk.ReferencedDatabase == "" {
+				continue
+			}
+			dstKey := tablekey.TableKey{Database: fk.ReferencedDatabase, Table: fk.ReferencedTable}.MapKey()
+			if fkCount[srcKey] == nil {
+				fkCount[srcKey] = make(map[string]int)
+			}
+			fkCount[srcKey][dstKey]++
+		}
+	}
+
+	// Add O2M reverse relationships on the referenced (remote) tables.
+	for i := range schema.Tables {
+		table := &schema.Tables[i]
+		for _, fk := range ForeignKeyConstraints(*table) {
+			if fk.ReferencedDatabase == "" {
+				continue // intra-db, already handled by buildRelationships
+			}
+			if len(fk.ColumnNames) != 1 || len(fk.ReferencedColumns) != 1 {
+				// Composite cross-db FK one-to-many not yet supported.
+				continue
+			}
+
+			refKey := tablekey.TableKey{Database: fk.ReferencedDatabase, Table: fk.ReferencedTable}.MapKey()
+			refTable := tableIndex[refKey]
+			if refTable == nil {
+				// Referenced database is not in the configured set; skip silently.
+				continue
+			}
+
+			srcKey := table.MapKey()
+			isOnlyFK := fkCount[srcKey][refKey] == 1
+			refTable.Relationships = append(refTable.Relationships, Relationship{
+				IsOneToMany:      true,
+				IsCrossDatabase:  true,
+				LocalColumns:     append([]string(nil), fk.ReferencedColumns...),
+				RemoteTable:      table.Name,
+				RemoteColumns:    append([]string(nil), fk.ColumnNames...),
+				RemoteTableKey:   table.Key,
+				GraphQLFieldName: namer.OneToManyFieldName(table.Name, fk.ColumnNames[0], isOnlyFK),
+			})
+		}
+	}
+
+	return nil
+}

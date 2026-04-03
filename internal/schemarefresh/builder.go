@@ -236,6 +236,9 @@ func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig)
 	// 8. Build resolver + GraphQL schema.
 	res := resolver.NewResolver(cfg.Executor, merged, cfg.Limits, cfg.DefaultLimit, cfg.GlobalFilters, cfg.Naming)
 	res.SetFiltersPerDB(filtersPerDB)
+	if useNamespaces {
+		res.SetNamespaceMap(namespaceMap)
+	}
 	if cfg.VectorRequireIndex || cfg.VectorMaxTopK > 0 {
 		res.SetVectorSearchConfig(resolver.VectorSearchConfig{
 			RequireIndex: cfg.VectorRequireIndex,

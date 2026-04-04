@@ -220,6 +220,110 @@ func TestComputeFingerprint_FallsBackToLightweight(t *testing.T) {
 	}
 }
 
+func TestIsMultiDB(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []DatabaseBuildEntry
+		want    bool
+	}{
+		{
+			name:    "no entries — single-db mode",
+			entries: nil,
+			want:    false,
+		},
+		{
+			name:    "one entry, no namespace — single-db mode",
+			entries: []DatabaseBuildEntry{{Name: "mydb"}},
+			want:    false,
+		},
+		{
+			name:    "one entry with explicit namespace — multi-db mode",
+			entries: []DatabaseBuildEntry{{Name: "mydb", Namespace: "shop"}},
+			want:    true,
+		},
+		{
+			name:    "two entries — multi-db mode",
+			entries: []DatabaseBuildEntry{{Name: "shop"}, {Name: "auth"}},
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Manager{databaseEntries: tt.entries}
+			if got := m.isMultiDB(); got != tt.want {
+				t.Errorf("isMultiDB() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewManager_MultiDB_UsesMultiDatabaseEntries(t *testing.T) {
+	// Verifies that NewManager stores DatabaseEntries and exposes isMultiDB correctly
+	// when two database entries are provided via Config.
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	fixture := structuralFingerprintFixture{
+		tables: [][]string{
+			{"shop", "orders", "BASE TABLE"},
+			{"auth", "users", "BASE TABLE"},
+		},
+		columns: [][]string{
+			{"shop", "orders", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+			{"auth", "users", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+		},
+		primaryKeys: [][]string{
+			{"shop", "orders", "id", "1"},
+			{"auth", "users", "id", "1"},
+		},
+		foreignKeys: [][]string{},
+		indexes: [][]string{
+			{"shop", "orders", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+			{"auth", "users", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+		},
+	}
+	expectTiDBStructuralFingerprintQueries(mock, []string{"shop", "auth"}, fixture)
+
+	// BuildMultiDatabaseSchema calls IntrospectDatabaseContext for each db.
+	for _, dbName := range []string{"shop", "auth"} {
+		mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
+			WithArgs(dbName).
+			WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"}))
+	}
+
+	entries := []DatabaseBuildEntry{
+		{Name: "shop"},
+		{Name: "auth"},
+	}
+	manager, err := NewManager(context.Background(), Config{
+		DB:              db,
+		DatabaseName:    "shop",
+		Databases:       []string{"shop", "auth"},
+		DatabaseEntries: entries,
+		Logger:          testLogger(),
+		MinInterval:     time.Second,
+		MaxInterval:     2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	if !manager.isMultiDB() {
+		t.Error("expected isMultiDB()=true for two-entry config")
+	}
+	if len(manager.databaseEntries) != 2 {
+		t.Errorf("expected 2 databaseEntries, got %d", len(manager.databaseEntries))
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestComputeFingerprint_MultiDatabase(t *testing.T) {
 	// Verifies that in multi-db mode the fingerprint queries use IN(?,?) and that
 	// rows from different databases are both included in the hash.

@@ -50,6 +50,11 @@ type Config struct {
 	// mode. When non-empty it takes precedence over DatabaseName for fingerprinting;
 	// DatabaseName is still used for backward-compat single-db introspection.
 	Databases              []string
+	// DatabaseEntries carries the full per-database build configuration for
+	// multi-database mode. When len > 1 (or when one entry has a non-empty Namespace),
+	// BuildMultiDatabaseSchema is used instead of BuildSchema.
+	// Leave nil/empty for single-database mode.
+	DatabaseEntries        []DatabaseBuildEntry
 	Limits                 *planner.PlanLimits
 	DefaultLimit           int
 	Logger                 *logging.Logger
@@ -77,6 +82,10 @@ type Manager struct {
 	// databases is the authoritative list of database names used for fingerprinting.
 	// Derived from Config.Databases when set, otherwise falls back to [databaseName].
 	databases              []string
+	// databaseEntries holds per-database build configuration for multi-db mode.
+	// When len > 1 (or a single entry has a non-empty Namespace), BuildMultiDatabaseSchema
+	// is used instead of BuildSchema.
+	databaseEntries        []DatabaseBuildEntry
 	limits                 *planner.PlanLimits
 	defaultLimit           int
 	logger                 *logging.Logger
@@ -164,6 +173,7 @@ func NewManager(ctx context.Context, cfg Config) (*Manager, error) {
 		db:                     cfg.DB,
 		databaseName:           cfg.DatabaseName,
 		databases:              databases,
+		databaseEntries:        append([]DatabaseBuildEntry(nil), cfg.DatabaseEntries...),
 		limits:                 cfg.Limits,
 		defaultLimit:           cfg.DefaultLimit,
 		logger:                 componentLogger,
@@ -539,6 +549,20 @@ func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint fingerprintD
 	return state, nil
 }
 
+// isMultiDB reports whether the manager is operating in multi-database mode.
+// Multi-db mode is active when at least two DatabaseEntries are configured OR
+// when a single entry carries an explicit Namespace (signalling intent to use
+// namespace-prefixed type names even for one database).
+func (m *Manager) isMultiDB() bool {
+	if len(m.databaseEntries) > 1 {
+		return true
+	}
+	if len(m.databaseEntries) == 1 && m.databaseEntries[0].Namespace != "" {
+		return true
+	}
+	return false
+}
+
 func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, role string, fingerprint string, fingerprintMode string, queryer introspection.Queryer) (_ *Snapshot, err error) {
 	start := time.Now()
 	roleName := strings.TrimSpace(role)
@@ -569,20 +593,38 @@ func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, role string, fin
 	}
 
 	m.logger.Info("introspecting database schema")
-	buildResult, err := BuildSchema(ctx, BuildSchemaConfig{
-		Queryer:                queryer,
-		Executor:               executor,
-		DatabaseName:           m.databaseName,
-		Filters:                m.filters,
-		UUIDColumns:            m.uuidColumns,
-		TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
-		TinyInt1IntColumns:     m.tinyInt1IntColumns,
-		Naming:                 m.namingConfig,
-		Limits:                 m.limits,
-		DefaultLimit:           m.defaultLimit,
-		VectorRequireIndex:     m.vectorRequireIndex,
-		VectorMaxTopK:          m.vectorMaxTopK,
-	})
+	var buildResult *BuildSchemaResult
+	if m.isMultiDB() {
+		buildResult, err = BuildMultiDatabaseSchema(ctx, BuildMultiDatabaseConfig{
+			Queryer:                queryer,
+			Executor:               executor,
+			Databases:              m.databaseEntries,
+			GlobalFilters:          m.filters,
+			UUIDColumns:            m.uuidColumns,
+			TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
+			TinyInt1IntColumns:     m.tinyInt1IntColumns,
+			Naming:                 m.namingConfig,
+			Limits:                 m.limits,
+			DefaultLimit:           m.defaultLimit,
+			VectorRequireIndex:     m.vectorRequireIndex,
+			VectorMaxTopK:          m.vectorMaxTopK,
+		})
+	} else {
+		buildResult, err = BuildSchema(ctx, BuildSchemaConfig{
+			Queryer:                queryer,
+			Executor:               executor,
+			DatabaseName:           m.databaseName,
+			Filters:                m.filters,
+			UUIDColumns:            m.uuidColumns,
+			TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
+			TinyInt1IntColumns:     m.tinyInt1IntColumns,
+			Naming:                 m.namingConfig,
+			Limits:                 m.limits,
+			DefaultLimit:           m.defaultLimit,
+			VectorRequireIndex:     m.vectorRequireIndex,
+			VectorMaxTopK:          m.vectorMaxTopK,
+		})
+	}
 	if err != nil {
 		return nil, err
 	}

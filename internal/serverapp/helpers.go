@@ -489,10 +489,23 @@ func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging
 			return role.Role, ok && role.Validated
 		}
 	}
+
+	// Convert config database entries to schema builder entries.
+	var dbEntries []schemarefresh.DatabaseBuildEntry
+	for _, entry := range cfg.Database.Databases {
+		dbEntries = append(dbEntries, schemarefresh.DatabaseBuildEntry{
+			Name:      entry.Name,
+			Namespace: entry.Namespace,
+			Filters:   entry.Filters,
+			Naming:    entry.Naming,
+		})
+	}
+
 	manager, err := schemarefresh.NewManager(ctx, schemarefresh.Config{
 		DB:                     db,
 		DatabaseName:           effectiveDatabase,
 		Databases:              cfg.Database.EffectiveDatabaseNames(),
+		DatabaseEntries:        dbEntries,
 		Limits:                 limits,
 		DefaultLimit:           cfg.Server.GraphQLDefaultLimit,
 		Logger:                 logger,

@@ -71,39 +71,48 @@ func rowsFromStrings(columns []string, values [][]string) *sqlmock.Rows {
 	return rows
 }
 
-func expectTiDBStructuralFingerprintQueries(mock sqlmock.Sqlmock, databaseName string, fixture structuralFingerprintFixture) {
+// expectTiDBStructuralFingerprintQueries registers sqlmock expectations for the
+// five structural fingerprint queries. databaseNames is the list of schemas passed
+// as IN-clause arguments; for single-db tests pass a one-element slice.
+// Fixture rows must already include TABLE_SCHEMA as their first column.
+func expectTiDBStructuralFingerprintQueries(mock sqlmock.Sqlmock, databaseNames []string, fixture structuralFingerprintFixture) {
+	args := make([]driver.Value, len(databaseNames))
+	for i, n := range databaseNames {
+		args[i] = n
+	}
+
 	mock.ExpectQuery("TABLE_TYPE IN \\('BASE TABLE', 'VIEW'\\)").
-		WithArgs(databaseName).
+		WithArgs(args...).
 		WillReturnRows(rowsFromStrings(
-			[]string{"TABLE_NAME", "TABLE_TYPE"},
+			[]string{"TABLE_SCHEMA", "TABLE_NAME", "TABLE_TYPE"},
 			fixture.tables,
 		))
 
 	mock.ExpectQuery("FROM INFORMATION_SCHEMA.COLUMNS").
-		WithArgs(databaseName).
+		WithArgs(args...).
 		WillReturnRows(rowsFromStrings(
-			[]string{"TABLE_NAME", "COLUMN_NAME", "ORDINAL_POSITION", "DATA_TYPE", "COLUMN_TYPE", "IS_NULLABLE", "COLUMN_DEFAULT", "EXTRA"},
+			[]string{"TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "ORDINAL_POSITION", "DATA_TYPE", "COLUMN_TYPE", "IS_NULLABLE", "COLUMN_DEFAULT", "EXTRA"},
 			fixture.columns,
 		))
 
 	mock.ExpectQuery("CONSTRAINT_NAME = 'PRIMARY'").
-		WithArgs(databaseName).
+		WithArgs(args...).
 		WillReturnRows(rowsFromStrings(
-			[]string{"TABLE_NAME", "COLUMN_NAME", "ORDINAL_POSITION"},
+			[]string{"TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "ORDINAL_POSITION"},
 			fixture.primaryKeys,
 		))
 
 	mock.ExpectQuery("REFERENCED_TABLE_NAME IS NOT NULL").
-		WithArgs(databaseName).
+		WithArgs(args...).
 		WillReturnRows(rowsFromStrings(
-			[]string{"TABLE_NAME", "CONSTRAINT_NAME", "COLUMN_NAME", "REFERENCED_TABLE_NAME", "REFERENCED_COLUMN_NAME", "ORDINAL_POSITION", "POSITION_IN_UNIQUE_CONSTRAINT"},
+			[]string{"TABLE_SCHEMA", "TABLE_NAME", "CONSTRAINT_NAME", "COLUMN_NAME", "REFERENCED_TABLE_NAME", "REFERENCED_COLUMN_NAME", "ORDINAL_POSITION", "POSITION_IN_UNIQUE_CONSTRAINT"},
 			fixture.foreignKeys,
 		))
 
 	mock.ExpectQuery("FROM INFORMATION_SCHEMA.STATISTICS").
-		WithArgs(databaseName).
+		WithArgs(args...).
 		WillReturnRows(rowsFromStrings(
-			[]string{"TABLE_NAME", "INDEX_NAME", "NON_UNIQUE", "SEQ_IN_INDEX", "COLUMN_NAME", "COLLATION", "SUB_PART", "NULLABLE", "INDEX_TYPE"},
+			[]string{"TABLE_SCHEMA", "TABLE_NAME", "INDEX_NAME", "NON_UNIQUE", "SEQ_IN_INDEX", "COLUMN_NAME", "COLLATION", "SUB_PART", "NULLABLE", "INDEX_TYPE"},
 			fixture.indexes,
 		))
 }
@@ -120,32 +129,34 @@ func TestComputeFingerprint(t *testing.T) {
 	}
 	defer db.Close()
 
+	// Rows now include TABLE_SCHEMA as the first column.
 	fixture := structuralFingerprintFixture{
 		tables: [][]string{
-			{"alpha", "BASE TABLE"},
-			{"v_alpha", "VIEW"},
+			{"testdb", "alpha", "BASE TABLE"},
+			{"testdb", "v_alpha", "VIEW"},
 		},
 		columns: [][]string{
-			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
-			{"alpha", "name", "2", "varchar", "varchar(255)", "NO", "", ""},
-			{"v_alpha", "id", "1", "bigint", "bigint(20)", "NO", "", ""},
+			{"testdb", "alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+			{"testdb", "alpha", "name", "2", "varchar", "varchar(255)", "NO", "", ""},
+			{"testdb", "v_alpha", "id", "1", "bigint", "bigint(20)", "NO", "", ""},
 		},
 		primaryKeys: [][]string{
-			{"alpha", "id", "1"},
+			{"testdb", "alpha", "id", "1"},
 		},
 		foreignKeys: [][]string{
-			{"alpha", "fk_alpha_parent", "parent_id", "parent", "id", "1", "1"},
+			{"testdb", "alpha", "fk_alpha_parent", "parent_id", "parent", "id", "1", "1"},
 		},
 		indexes: [][]string{
-			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
-			{"alpha", "idx_name", "1", "1", "name", "A", "", "YES", "BTREE"},
+			{"testdb", "alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+			{"testdb", "alpha", "idx_name", "1", "1", "name", "A", "", "YES", "BTREE"},
 		},
 	}
-	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
+	expectTiDBStructuralFingerprintQueries(mock, []string{"testdb"}, fixture)
 
 	manager := &Manager{
 		db:           db,
 		databaseName: "testdb",
+		databases:    []string{"testdb"},
 		logger:       testLogger(),
 	}
 
@@ -176,18 +187,19 @@ func TestComputeFingerprint_FallsBackToLightweight(t *testing.T) {
 		WillReturnError(fmt.Errorf("structural query unsupported"))
 
 	lightweightRows := [][]string{
-		{"alpha", "2025-02-01 12:00:00", "2025-02-01 12:05:00"},
+		{"testdb", "alpha", "2025-02-01 12:00:00", "2025-02-01 12:05:00"},
 	}
 	mock.ExpectQuery("CREATE_TIME").
 		WithArgs("testdb").
 		WillReturnRows(rowsFromStrings(
-			[]string{"TABLE_NAME", "CREATE_TIME", "UPDATE_TIME"},
+			[]string{"TABLE_SCHEMA", "TABLE_NAME", "CREATE_TIME", "UPDATE_TIME"},
 			lightweightRows,
 		))
 
 	manager := &Manager{
 		db:           db,
 		databaseName: "testdb",
+		databases:    []string{"testdb"},
 		logger:       testLogger(),
 	}
 
@@ -205,6 +217,157 @@ func TestComputeFingerprint_FallsBackToLightweight(t *testing.T) {
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestComputeFingerprint_MultiDatabase(t *testing.T) {
+	// Verifies that in multi-db mode the fingerprint queries use IN(?,?) and that
+	// rows from different databases are both included in the hash.
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	// Rows span two databases; TABLE_SCHEMA is the first column.
+	fixture := structuralFingerprintFixture{
+		tables: [][]string{
+			{"shop", "orders", "BASE TABLE"},
+			{"auth", "users", "BASE TABLE"},
+		},
+		columns: [][]string{
+			{"shop", "orders", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+			{"auth", "users", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+		},
+		primaryKeys: [][]string{
+			{"shop", "orders", "id", "1"},
+			{"auth", "users", "id", "1"},
+		},
+		foreignKeys: [][]string{},
+		indexes: [][]string{
+			{"shop", "orders", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+			{"auth", "users", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+		},
+	}
+	expectTiDBStructuralFingerprintQueries(mock, []string{"shop", "auth"}, fixture)
+
+	manager := &Manager{
+		db:           db,
+		databaseName: "shop",
+		databases:    []string{"shop", "auth"},
+		logger:       testLogger(),
+	}
+
+	fingerprint, err := manager.computeFingerprint(t.Context())
+	if err != nil {
+		t.Fatalf("computeFingerprint failed: %v", err)
+	}
+
+	expected := expectedStructuralFingerprint(fixture)
+	if fingerprint != expected {
+		t.Fatalf("fingerprint mismatch:\n got  %s\n want %s", fingerprint, expected)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestComputeFingerprint_MultiDatabase_LightweightFallback(t *testing.T) {
+	// Verifies lightweight fallback also covers all configured databases.
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("failed to create sqlmock: %v", err)
+	}
+	defer db.Close()
+
+	// First structural query fails → triggers lightweight fallback.
+	mock.ExpectQuery("TABLE_TYPE IN \\('BASE TABLE', 'VIEW'\\)").
+		WithArgs("shop", "auth").
+		WillReturnError(fmt.Errorf("structural query unsupported"))
+
+	lightweightRows := [][]string{
+		{"auth", "users", "2025-01-01 00:00:00", "2025-01-02 00:00:00"},
+		{"shop", "orders", "2025-01-01 00:00:00", ""},
+	}
+	mock.ExpectQuery("CREATE_TIME").
+		WithArgs("shop", "auth").
+		WillReturnRows(rowsFromStrings(
+			[]string{"TABLE_SCHEMA", "TABLE_NAME", "CREATE_TIME", "UPDATE_TIME"},
+			lightweightRows,
+		))
+
+	manager := &Manager{
+		db:           db,
+		databaseName: "shop",
+		databases:    []string{"shop", "auth"},
+		logger:       testLogger(),
+	}
+
+	details, err := manager.computeFingerprintDetails(t.Context())
+	if err != nil {
+		t.Fatalf("computeFingerprintDetails failed: %v", err)
+	}
+	if details.Mode != fingerprintModeTiDBLightweight {
+		t.Fatalf("expected lightweight mode, got %q", details.Mode)
+	}
+	expected := expectedLightweightFingerprint(lightweightRows)
+	if details.Value != expected {
+		t.Fatalf("fingerprint mismatch:\n got  %s\n want %s", details.Value, expected)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestSchemaInClause(t *testing.T) {
+	tests := []struct {
+		name         string
+		databaseName string
+		databases    []string
+		wantClause   string
+		wantArgs     []any
+	}{
+		{
+			name:         "single database from databases slice",
+			databaseName: "mydb",
+			databases:    []string{"mydb"},
+			wantClause:   "?",
+			wantArgs:     []any{"mydb"},
+		},
+		{
+			name:         "multiple databases",
+			databaseName: "shop",
+			databases:    []string{"shop", "auth"},
+			wantClause:   "?,?",
+			wantArgs:     []any{"shop", "auth"},
+		},
+		{
+			name:         "fallback to databaseName when databases empty",
+			databaseName: "fallback",
+			databases:    nil,
+			wantClause:   "?",
+			wantArgs:     []any{"fallback"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Manager{databaseName: tt.databaseName, databases: tt.databases}
+			clause, args := m.schemaInClause()
+			if clause != tt.wantClause {
+				t.Errorf("clause: got %q want %q", clause, tt.wantClause)
+			}
+			if len(args) != len(tt.wantArgs) {
+				t.Fatalf("args len: got %d want %d", len(args), len(tt.wantArgs))
+			}
+			for i := range args {
+				if args[i] != tt.wantArgs[i] {
+					t.Errorf("args[%d]: got %v want %v", i, args[i], tt.wantArgs[i])
+				}
+			}
+		})
 	}
 }
 
@@ -227,25 +390,26 @@ func TestRefreshOnce_NoChange_BacksOff(t *testing.T) {
 
 	fixture := structuralFingerprintFixture{
 		tables: [][]string{
-			{"alpha", "BASE TABLE"},
+			{"testdb", "alpha", "BASE TABLE"},
 		},
 		columns: [][]string{
-			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+			{"testdb", "alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
 		},
 		primaryKeys: [][]string{
-			{"alpha", "id", "1"},
+			{"testdb", "alpha", "id", "1"},
 		},
 		foreignKeys: [][]string{},
 		indexes: [][]string{
-			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+			{"testdb", "alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
 		},
 	}
 	expected := expectedStructuralFingerprint(fixture)
-	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
+	expectTiDBStructuralFingerprintQueries(mock, []string{"testdb"}, fixture)
 
 	manager := &Manager{
 		db:           db,
 		databaseName: "testdb",
+		databases:    []string{"testdb"},
 		logger:       testLogger(),
 		minInterval:  10 * time.Second,
 		maxInterval:  time.Minute,
@@ -300,21 +464,21 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 
 	fixture := structuralFingerprintFixture{
 		tables: [][]string{
-			{"alpha", "BASE TABLE"},
+			{"testdb", "alpha", "BASE TABLE"},
 		},
 		columns: [][]string{
-			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+			{"testdb", "alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
 		},
 		primaryKeys: [][]string{
-			{"alpha", "id", "1"},
+			{"testdb", "alpha", "id", "1"},
 		},
 		foreignKeys: [][]string{},
 		indexes: [][]string{
-			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+			{"testdb", "alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
 		},
 	}
 	expected := expectedStructuralFingerprint(fixture)
-	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
+	expectTiDBStructuralFingerprintQueries(mock, []string{"testdb"}, fixture)
 
 	// Introspection getTables query.
 	mockTables := sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"})
@@ -325,6 +489,7 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 	manager := &Manager{
 		db:           db,
 		databaseName: "testdb",
+		databases:    []string{"testdb"},
 		logger:       testLogger(),
 		minInterval:  5 * time.Second,
 		maxInterval:  time.Minute,
@@ -609,6 +774,7 @@ func TestRefreshNowContext_ForwardsContextToMetrics(t *testing.T) {
 	manager := &Manager{
 		db:              db,
 		databaseName:    "testdb",
+		databases:       []string{"testdb"},
 		logger:          testLogger(),
 		recordRefreshFn: metricsRecorder.RecordRefresh,
 	}
@@ -686,6 +852,7 @@ func TestBuildSnapshotSet_EmitsSnapshotSpanPerRole(t *testing.T) {
 	manager := &Manager{
 		db:           db,
 		databaseName: "testdb",
+		databases:    []string{"testdb"},
 		logger:       testLogger(),
 		roleSchemas:  []string{"viewer"},
 		executor:     dbexec.NewStandardExecutor(db),
@@ -765,20 +932,20 @@ func TestNewManager_EmitsStartupRefreshSpan(t *testing.T) {
 
 	fixture := structuralFingerprintFixture{
 		tables: [][]string{
-			{"alpha", "BASE TABLE"},
+			{"testdb", "alpha", "BASE TABLE"},
 		},
 		columns: [][]string{
-			{"alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
+			{"testdb", "alpha", "id", "1", "bigint", "bigint(20)", "NO", "", "auto_increment"},
 		},
 		primaryKeys: [][]string{
-			{"alpha", "id", "1"},
+			{"testdb", "alpha", "id", "1"},
 		},
 		foreignKeys: [][]string{},
 		indexes: [][]string{
-			{"alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
+			{"testdb", "alpha", "PRIMARY", "0", "1", "id", "A", "", "", "BTREE"},
 		},
 	}
-	expectTiDBStructuralFingerprintQueries(mock, "testdb", fixture)
+	expectTiDBStructuralFingerprintQueries(mock, []string{"testdb"}, fixture)
 	mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
 		WithArgs("testdb").
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME", "TABLE_TYPE", "TABLE_COMMENT"}))

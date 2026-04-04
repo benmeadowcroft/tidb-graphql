@@ -492,6 +492,7 @@ func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging
 	manager, err := schemarefresh.NewManager(ctx, schemarefresh.Config{
 		DB:                     db,
 		DatabaseName:           effectiveDatabase,
+		Databases:              cfg.Database.EffectiveDatabaseNames(),
 		Limits:                 limits,
 		DefaultLimit:           cfg.Server.GraphQLDefaultLimit,
 		Logger:                 logger,

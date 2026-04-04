@@ -265,7 +265,7 @@ func TestValidateRoleBasedAuthPrivileges(t *testing.T) {
 			}
 			mock.ExpectQuery("SHOW GRANTS FOR CURRENT_USER").WillReturnRows(rows)
 
-			result, err := ValidateRoleBasedAuthPrivileges(context.Background(), db, tt.targetDatabase)
+			result, err := ValidateRoleBasedAuthPrivileges(context.Background(), db, []string{tt.targetDatabase})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -278,6 +278,69 @@ func TestValidateRoleBasedAuthPrivileges(t *testing.T) {
 				t.Errorf("expected HasBroadPrivileges=%v, got %v", tt.expectBroad, result.HasBroadPrivileges)
 			}
 
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("unfulfilled expectations: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRoleBasedAuthPrivileges_MultiDB(t *testing.T) {
+	tests := []struct {
+		name            string
+		targetDatabases []string
+		grants          []string
+		expectValid     bool
+	}{
+		{
+			name:            "no SELECT on any configured db - valid",
+			targetDatabases: []string{"shop", "analytics"},
+			grants: []string{
+				"GRANT USAGE ON *.* TO 'testuser'@'%'",
+				"GRANT `app_viewer`@`%` TO 'testuser'@'%'",
+			},
+			expectValid: true,
+		},
+		{
+			name:            "SELECT on second configured db - invalid",
+			targetDatabases: []string{"shop", "analytics"},
+			grants: []string{
+				"GRANT SELECT ON `analytics`.* TO 'testuser'@'%'",
+			},
+			expectValid: false,
+		},
+		{
+			name:            "SELECT on unconfigured db - valid",
+			targetDatabases: []string{"shop", "analytics"},
+			grants: []string{
+				"GRANT SELECT ON `other`.* TO 'testuser'@'%'",
+			},
+			expectValid: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("failed to create mock db: %v", err)
+			}
+			defer db.Close()
+
+			rows := sqlmock.NewRows([]string{"grant"})
+			for _, grant := range tt.grants {
+				rows.AddRow(grant)
+			}
+			mock.ExpectQuery("SHOW GRANTS FOR CURRENT_USER").WillReturnRows(rows)
+
+			result, err := ValidateRoleBasedAuthPrivileges(context.Background(), db, tt.targetDatabases)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Valid != tt.expectValid {
+				t.Errorf("expected Valid=%v, got %v (broad=%v, grants=%v)",
+					tt.expectValid, result.Valid, result.BroadPrivileges, tt.grants)
+			}
 			if err := mock.ExpectationsWereMet(); err != nil {
 				t.Errorf("unfulfilled expectations: %v", err)
 			}

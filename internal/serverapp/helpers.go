@@ -228,7 +228,7 @@ func connectDB(cfg *config.Config, logger *logging.Logger) (*sql.DB, interface{ 
 	return db, nil, nil
 }
 
-func configureDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string, databaseSource string, dsnPresent bool) error {
+func configureDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string, databases []string, databaseSource string, dsnPresent bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -236,7 +236,7 @@ func configureDatabase(ctx context.Context, cfg *config.Config, logger *logging.
 	db.SetMaxIdleConns(cfg.Database.Pool.MaxIdle)
 	db.SetConnMaxLifetime(cfg.Database.Pool.MaxLifetime)
 
-	if err := waitForDatabase(ctx, cfg, logger, db, effectiveDatabase); err != nil {
+	if err := waitForDatabase(ctx, cfg, logger, db, effectiveDatabase, databases); err != nil {
 		return err
 	}
 
@@ -251,7 +251,7 @@ func configureDatabase(ctx context.Context, cfg *config.Config, logger *logging.
 	return nil
 }
 
-func waitForDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string) error {
+func waitForDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string, databases []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -261,7 +261,7 @@ func waitForDatabase(ctx context.Context, cfg *config.Config, logger *logging.Lo
 	// Helper to attempt connection
 	tryConnect := func() error {
 		if cfg.Server.Auth.DBRoleEnabled {
-			return verifyRoleDatabaseAccess(ctx, cfg, db, effectiveDatabase)
+			return verifyRoleDatabaseAccess(ctx, cfg, db, databases)
 		}
 		return db.PingContext(ctx)
 	}
@@ -304,7 +304,10 @@ func waitForDatabase(ctx context.Context, cfg *config.Config, logger *logging.Lo
 	}
 }
 
-func verifyRoleDatabaseAccess(ctx context.Context, cfg *config.Config, db *sql.DB, effectiveDatabase string) error {
+// verifyRoleDatabaseAccess verifies that the current user can access each of the
+// provided databases using the configured introspection role. In single-database
+// mode databases contains one entry; in multi-database mode it contains all of them.
+func verifyRoleDatabaseAccess(ctx context.Context, cfg *config.Config, db *sql.DB, databases []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -327,15 +330,25 @@ func verifyRoleDatabaseAccess(ctx context.Context, cfg *config.Config, db *sql.D
 		}
 	}
 
-	if effectiveDatabase != "" {
-		useSQL := fmt.Sprintf("USE %s", sqlutil.QuoteIdentifier(effectiveDatabase))
+	// Verify access to each configured database.
+	for _, dbName := range databases {
+		if dbName == "" {
+			continue
+		}
+		useSQL := fmt.Sprintf("USE %s", sqlutil.QuoteIdentifier(dbName))
 		if _, err := conn.ExecContext(ctx, useSQL); err != nil {
-			return fmt.Errorf("failed to select database %s: %w", effectiveDatabase, err)
+			return fmt.Errorf("failed to select database %s: %w", dbName, err)
+		}
+		if _, err := conn.ExecContext(ctx, "SELECT 1"); err != nil {
+			return fmt.Errorf("failed to validate database access for %s: %w", dbName, err)
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, "SELECT 1"); err != nil {
-		return fmt.Errorf("failed to validate database access: %w", err)
+	// Fallback when no explicit databases provided: just ping.
+	if len(databases) == 0 {
+		if _, err := conn.ExecContext(ctx, "SELECT 1"); err != nil {
+			return fmt.Errorf("failed to validate database access: %w", err)
+		}
 	}
 
 	return nil
@@ -422,11 +435,13 @@ func matchesAnyRolePattern(role string, patterns []string) bool {
 	return false
 }
 
-func validateDBRolePrivileges(ctx context.Context, db *sql.DB, targetDatabase string, logger *logging.Logger) error {
+// validateDBRolePrivileges validates that the connecting user's privileges are
+// compatible with role-based authorization for all of the given target databases.
+func validateDBRolePrivileges(ctx context.Context, db *sql.DB, targetDatabases []string, logger *logging.Logger) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	result, err := introspection.ValidateRoleBasedAuthPrivileges(ctx, db, targetDatabase)
+	result, err := introspection.ValidateRoleBasedAuthPrivileges(ctx, db, targetDatabases)
 	if err != nil {
 		logger.Error("failed to validate database user privileges", slog.String("error", err.Error()))
 		return err
@@ -448,6 +463,10 @@ func validateDBRolePrivileges(ctx context.Context, db *sql.DB, targetDatabase st
 func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string, effectiveDatabase string) dbexec.QueryExecutor {
 	queryExecutor := dbexec.QueryExecutor(dbexec.NewStandardExecutor(db))
 	if cfg.Server.Auth.DBRoleEnabled {
+		// Multi-db mode: more than one database configured. In this case all table
+		// references are fully qualified so a USE statement before each query is
+		// unnecessary (and would be ambiguous).
+		multiDB := len(cfg.Database.Databases) > 1
 		queryExecutor = dbexec.NewRoleExecutor(dbexec.RoleExecutorConfig{
 			DB:           db,
 			DatabaseName: effectiveDatabase,
@@ -456,6 +475,7 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string,
 				return role.Role, ok && role.Validated
 			},
 			AllowedRoles: availableRoles,
+			MultiDB:      multiDB,
 		})
 	}
 	return queryExecutor

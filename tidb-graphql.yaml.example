@@ -22,6 +22,31 @@ database:
   # password_file: "" # Path to file containing the password (use @- for stdin)
   database: test
 
+  # Multi-database mode (optional)
+  # When `databases` is set it takes precedence over `database` for schema introspection.
+  # The connection (host/port/user/DSN) is shared across all listed databases — the SQL
+  # user must have SELECT on every database listed here.
+  #
+  # Each entry produces a namespace on the root Query and Mutation types, e.g.:
+  #   query { shop { orders { nodes { id } } } }
+  #
+  # databases:
+  #   - name: shop           # SQL TABLE_SCHEMA name (required)
+  #     namespace: shop      # GraphQL namespace alias (defaults to name when omitted)
+  #     # Per-database schema filter overrides (same structure as top-level schema_filters)
+  #     schema_filters:
+  #       deny_tables: ["*_staging"]
+  #       deny_mutation_tables: ["audit_*"]
+  #     # Per-database naming overrides (same structure as top-level naming)
+  #     naming:
+  #       type_overrides:
+  #         order_items: OrderLine
+  #
+  #   - name: auth
+  #     namespace: auth
+  #     schema_filters:
+  #       allow_tables: ["users", "sessions", "roles"]
+
   # TLS configuration for database connections
   tls:
     # mode: off            # TLS mode: off, skip-verify, verify-ca, verify-full

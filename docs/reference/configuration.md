@@ -46,11 +46,78 @@ You can configure the database connection using either:
 When `dsn` is set, it overrides the discrete connection fields below for connection details.
 `database.mycnf_file` is an alternative to DSN and is mutually exclusive with `dsn`/`dsn_file`.
 
+### Multiple databases
+
+`database.databases` (list of objects, default: empty) — Multi-database mode. When set, the server introspects every listed SQL schema and merges them into a single GraphQL API. Each entry is a `DatabaseEntryConfig` object:
+
+- `databases[].name` (string, **required**) — The SQL `TABLE_SCHEMA` name. The connecting SQL user must have `SELECT` on this database.
+- `databases[].namespace` (string, default: same as `name`) — The GraphQL namespace alias. Every table in this database gets type names prefixed with the PascalCase namespace (e.g. namespace `shop` → type `Shop_Order`), and a `shop` field appears on the root `Query` and `Mutation` types.
+- `databases[].schema_filters` (object, default: inherit top-level `schema_filters`) — Per-database schema filter overrides. Same structure as the top-level [`schema_filters`](#schema_filters) section.
+- `databases[].naming` (object, default: inherit top-level `naming`) — Per-database naming overrides. Same structure as the top-level [`naming`](#naming) section.
+
+When `databases` is set:
+- `database.database` (or the database in the DSN) must still be provided; it is used as the primary connection database and the first target for startup health checks.
+- The database connection (host, port, user, DSN) is shared across all listed databases.
+- All table references in generated SQL use fully-qualified names (`schema`.`table`), so no `USE` statement is issued per query.
+- Schema refresh fingerprinting covers all configured databases.
+- Cross-database foreign key relationships are exposed as read-only many-to-one fields; nested create and many-to-many operations across databases are blocked.
+
+Validation rules for `databases`:
+- Every entry must have a non-empty `name`.
+- Names must not contain dots (`.`).
+- Names must be unique across entries (case-insensitive).
+- Effective namespace values must be unique across entries (case-insensitive).
+
+Example:
+
+```yaml
+database:
+  host: tidb.example.com
+  port: 4000
+  user: graphql_app
+  password_file: /run/secrets/db_password
+  database: shop  # primary connection database; also introspected as the first entry
+
+  databases:
+    - name: shop
+      namespace: shop
+      schema_filters:
+        deny_tables: ["*_staging"]
+        deny_mutation_tables: ["audit_*"]
+      naming:
+        type_overrides:
+          order_items: OrderLine
+
+    - name: auth
+      namespace: auth
+      schema_filters:
+        allow_tables: ["users", "sessions", "roles"]
+```
+
+This produces a GraphQL schema where each namespace is a field on the root:
+
+```graphql
+type Query {
+  shop: Shop_Query!
+  auth: Auth_Query!
+  node(id: ID!): Node
+}
+
+type Shop_Query {
+  orders(first: Int, ...): Shop_OrderConnection!
+  order(id: ID!): Shop_Order
+}
+
+type Auth_Query {
+  users(first: Int, ...): Auth_UserConnection!
+}
+```
+
 ### Effective database resolution
 
-`tidb-graphql` computes one canonical target database used by:
-- schema introspection/refresh
-- role-aware `USE <database>` behavior
+`tidb-graphql` computes one canonical target database used for:
+- the primary connection `USE <database>` at startup
+- role-aware database access verification
 
 Resolution rules:
 1. If `database.database` is set, it is the canonical target.
@@ -58,6 +125,8 @@ Resolution rules:
 3. Otherwise, if `mycnf_file` contains `database=...` (usually in `[client]`), that database is canonical.
 4. If both are set and differ, startup fails with a validation error.
 5. If neither provides a database name, startup fails with a validation error.
+
+When `database.databases` is set, `database.database` (or the DSN database) still identifies the primary connection database. In multi-db mode, `USE` is not issued before each query; instead all SQL references are fully qualified.
 
 This prevents connecting to one database via DSN while introspecting a different one.
 

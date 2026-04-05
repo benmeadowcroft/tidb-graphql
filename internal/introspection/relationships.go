@@ -111,9 +111,14 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			if fk.ReferencedDatabase != "" {
 				remoteDB = fk.ReferencedDatabase
 			}
+			// A FK is cross-database only when REFERENCED_TABLE_SCHEMA differs from the
+			// source table's own database. When both are introspected from the same database
+			// (single-db mode or intra-db FK in multi-db mode), REFERENCED_TABLE_SCHEMA
+			// equals the source database name and the FK is intra-database.
+			isCrossDatabase := fk.ReferencedDatabase != "" && fk.ReferencedDatabase != table.Key.Database
 			rel := Relationship{
 				IsManyToOne:     true,
-				IsCrossDatabase: fk.ReferencedDatabase != "",
+				IsCrossDatabase: isCrossDatabase,
 				LocalColumns:    localColumns,
 				RemoteTable:     fk.ReferencedTable,
 				RemoteColumns:   remoteColumns,
@@ -149,7 +154,11 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			for _, fk := range ForeignKeyConstraints(*otherTable) {
 				// For intra-database one-to-many: only consider FKs pointing at this table within the same database.
 				// Cross-database one-to-many relationships are handled by ResolveCrossDatabaseRelationships.
-				if fk.ReferencedTable == table.Name && fk.ReferencedDatabase == "" {
+				// A FK is intra-database when ReferencedDatabase is empty (pre-Phase-2A introspection)
+				// OR when ReferencedDatabase equals the source table's own database (post-Phase-2A, where
+				// REFERENCED_TABLE_SCHEMA is always populated, even for same-database references).
+				isIntraDB := fk.ReferencedDatabase == "" || fk.ReferencedDatabase == otherTable.Key.Database
+				if fk.ReferencedTable == table.Name && isIntraDB {
 					if len(fk.ColumnNames) != 1 || len(fk.ReferencedColumns) != 1 {
 						warnCompositeSkip("one_to_many", otherTable.Name, fk.ConstraintName, fk.ColumnNames, table.Name, fk.ReferencedColumns, "composite_one_to_many_not_supported_in_phase")
 						continue
@@ -172,11 +181,23 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 	}
 
 	// Third pass: Create M2M relationships for junction tables.
-	// tableByKey is keyed by Table.MapKey() (which falls back to table.Name
-	// when Key is zero) to avoid collisions when two databases share table names.
-	tableByKey := make(map[string]*Table)
+	// tableByKey is keyed primarily by Table.MapKey() to avoid collisions when two
+	// databases share table names. It is also indexed by bare table name as a fallback
+	// so that junction lookups using jc.Table (bare name from JunctionMap) still
+	// resolve correctly after the Phase 0 migration to qualified keys.
+	tableByKey := make(map[string]*Table, len(schema.Tables)*2)
 	for i := range schema.Tables {
-		tableByKey[schema.Tables[i].MapKey()] = &schema.Tables[i]
+		t := &schema.Tables[i]
+		mapKey := t.MapKey()
+		tableByKey[mapKey] = t
+		// Also index by bare name when the qualified key differs (single-db mode with
+		// Key.Database set, or multi-db where two databases may share names — first
+		// writer wins for the bare-name slot).
+		if mapKey != t.Name {
+			if _, exists := tableByKey[t.Name]; !exists {
+				tableByKey[t.Name] = t
+			}
+		}
 	}
 
 	for _, jc := range junctions {
@@ -308,7 +329,8 @@ func ResolveCrossDatabaseRelationships(schema *Schema, namer *naming.Namer) erro
 	for _, table := range schema.Tables {
 		srcKey := table.MapKey()
 		for _, fk := range ForeignKeyConstraints(table) {
-			if fk.ReferencedDatabase == "" {
+			// Only count genuine cross-database FKs (same fix as the skip guard below).
+			if fk.ReferencedDatabase == "" || fk.ReferencedDatabase == table.Key.Database {
 				continue
 			}
 			dstKey := tablekey.TableKey{Database: fk.ReferencedDatabase, Table: fk.ReferencedTable}.MapKey()
@@ -323,7 +345,11 @@ func ResolveCrossDatabaseRelationships(schema *Schema, namer *naming.Namer) erro
 	for i := range schema.Tables {
 		table := &schema.Tables[i]
 		for _, fk := range ForeignKeyConstraints(*table) {
-			if fk.ReferencedDatabase == "" {
+			// Skip intra-database FKs — they are handled by buildRelationships.
+			// ReferencedDatabase may be empty (pre-Phase-2A introspection) or equal to the
+			// source table's own database (post-Phase-2A, where REFERENCED_TABLE_SCHEMA is
+			// always populated by the FK query even for same-database references).
+			if fk.ReferencedDatabase == "" || fk.ReferencedDatabase == table.Key.Database {
 				continue // intra-db, already handled by buildRelationships
 			}
 			if len(fk.ColumnNames) != 1 || len(fk.ReferencedColumns) != 1 {

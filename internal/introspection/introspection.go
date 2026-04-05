@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -195,7 +196,7 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 			return nil, fmt.Errorf("failed to get columns for %s: %w", tableInfo.Name, err)
 		}
 		if !tableInfo.IsView {
-			columns = applyAutoRandomColumns(ctx, db, tableInfo.Name, columns)
+			columns = applyAutoRandomColumns(ctx, db, databaseName, tableInfo.Name, columns)
 		}
 
 		var primaryKeys []string
@@ -213,6 +214,9 @@ func IntrospectDatabaseContext(ctx context.Context, db Queryer, databaseName str
 				recordSpanError(span, err)
 				return nil, fmt.Errorf("failed to get foreign keys for table %s: %w", tableInfo.Name, err)
 			}
+			// Supplement cross-database FKs from SHOW CREATE TABLE when
+			// INFORMATION_SCHEMA.KEY_COLUMN_USAGE does not report them (TiDB limitation).
+			foreignKeys = supplementCrossDBForeignKeys(ctx, db, databaseName, tableInfo.Name, foreignKeys)
 
 			indexes, err = getIndexes(ctx, db, databaseName, tableInfo.Name)
 			if err != nil {
@@ -423,14 +427,14 @@ func getColumns(ctx context.Context, db Queryer, databaseName, tableName string)
 	return columns, nil
 }
 
-func applyAutoRandomColumns(ctx context.Context, db Queryer, tableName string, columns []Column) []Column {
+func applyAutoRandomColumns(ctx context.Context, db Queryer, databaseName, tableName string, columns []Column) []Column {
 	for _, col := range columns {
 		if col.IsAutoRandom {
 			return columns
 		}
 	}
 
-	createSQL, err := getCreateTableSQL(ctx, db, tableName)
+	createSQL, err := getCreateTableSQL(ctx, db, databaseName, tableName)
 	if err != nil {
 		slog.Default().Warn("failed to load create table statement", slog.String("table", tableName), slog.String("error", err.Error()))
 		return columns
@@ -449,8 +453,8 @@ func applyAutoRandomColumns(ctx context.Context, db Queryer, tableName string, c
 	return columns
 }
 
-func getCreateTableSQL(ctx context.Context, db Queryer, tableName string) (string, error) {
-	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", tableName)
+func getCreateTableSQL(ctx context.Context, db Queryer, databaseName, tableName string) (string, error) {
+	query := fmt.Sprintf("SHOW CREATE TABLE `%s`.`%s`", databaseName, tableName)
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return "", err
@@ -498,6 +502,122 @@ func extractAutoRandomColumns(createSQL string) map[string]bool {
 		autoCols[colName] = true
 	}
 	return autoCols
+}
+
+// crossDBFKRegex matches a cross-database FOREIGN KEY definition inside SHOW CREATE TABLE output.
+// It requires the REFERENCES target to be qualified as `db`.`table` (two backtick-quoted
+// identifiers separated by a dot with no space), which distinguishes cross-database FKs
+// from intra-database ones (which use the unqualified form `table`).
+//
+// TiDB's INFORMATION_SCHEMA.KEY_COLUMN_USAGE does not always include cross-database FK
+// references; this regex provides a fallback parse of SHOW CREATE TABLE output.
+var crossDBFKRegex = regexp.MustCompile(
+	"CONSTRAINT\\s+`([^`]+)`\\s+FOREIGN KEY\\s+\\(([^)]+)\\)\\s+REFERENCES\\s+`([^`]+)`\\.`([^`]+)`\\s+\\(([^)]+)\\)",
+)
+
+// stripBackticks removes wrapping backticks from a single identifier string.
+func stripBackticks(s string) string {
+	s = strings.TrimSpace(s)
+	return strings.Trim(s, "`")
+}
+
+// parseFKColumnList splits a parenthesised FK column list (e.g. "`col1`,`col2`") into
+// individual column names with backticks removed.
+func parseFKColumnList(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if name := stripBackticks(p); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// extractCrossDBForeignKeysFromCreateSQL parses cross-database FK constraints from a
+// SHOW CREATE TABLE statement. TiDB may not report cross-database FKs via
+// INFORMATION_SCHEMA.KEY_COLUMN_USAGE; this function provides a supplementary source.
+//
+// Only FKs that reference a different database (qualified as `db`.`table` in the REFERENCES
+// clause) are returned. FKs referencing the currentDatabase are skipped.
+func extractCrossDBForeignKeysFromCreateSQL(createSQL, currentDatabase string) []ForeignKey {
+	matches := crossDBFKRegex.FindAllStringSubmatch(createSQL, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	var fks []ForeignKey
+	for _, m := range matches {
+		constraintName := m[1]
+		localCols := parseFKColumnList(m[2])
+		referencedDB := stripBackticks(m[3])
+		referencedTable := stripBackticks(m[4])
+		referencedCols := parseFKColumnList(m[5])
+
+		// Sanity check: only cross-db references.
+		if referencedDB == "" || referencedDB == currentDatabase {
+			continue
+		}
+		if len(localCols) == 0 || len(localCols) != len(referencedCols) {
+			continue
+		}
+		for i, localCol := range localCols {
+			fks = append(fks, ForeignKey{
+				ColumnName:         localCol,
+				ReferencedDatabase: referencedDB,
+				ReferencedTable:    referencedTable,
+				ReferencedColumn:   referencedCols[i],
+				ConstraintName:     constraintName,
+				OrdinalPosition:    i + 1,
+			})
+		}
+	}
+	return fks
+}
+
+// supplementCrossDBForeignKeys appends cross-database FK rows obtained by parsing
+// SHOW CREATE TABLE when they are absent from the provided INFORMATION_SCHEMA rows.
+//
+// TiDB does not always surface cross-database FK references in
+// INFORMATION_SCHEMA.KEY_COLUMN_USAGE. Any constraint not already present (by name)
+// in existing is appended.
+func supplementCrossDBForeignKeys(ctx context.Context, db Queryer, databaseName, tableName string, existing []ForeignKey) []ForeignKey {
+	// Skip tables with no FKs at all — they cannot have cross-db FK references.
+	if len(existing) == 0 {
+		return existing
+	}
+
+	createSQL, err := getCreateTableSQL(ctx, db, databaseName, tableName)
+	if err != nil {
+		// Not fatal — views or missing privileges may cause this to fail.
+		return existing
+	}
+
+	crossDBFKs := extractCrossDBForeignKeysFromCreateSQL(createSQL, databaseName)
+	if len(crossDBFKs) == 0 {
+		return existing
+	}
+
+	// Build index of known constraint names to avoid duplicates.
+	known := make(map[string]struct{}, len(existing))
+	for _, fk := range existing {
+		known[fk.ConstraintName] = struct{}{}
+	}
+
+	for _, fk := range crossDBFKs {
+		if _, exists := known[fk.ConstraintName]; exists {
+			continue
+		}
+		slog.Default().Debug("supplemented cross-database FK from SHOW CREATE TABLE",
+			"database", databaseName,
+			"table", tableName,
+			"constraint", fk.ConstraintName,
+			"referenced_database", fk.ReferencedDatabase,
+			"referenced_table", fk.ReferencedTable,
+		)
+		existing = append(existing, fk)
+		known[fk.ConstraintName] = struct{}{}
+	}
+	return existing
 }
 
 func getPrimaryKeys(ctx context.Context, db Queryer, databaseName, tableName string) ([]string, error) {
@@ -588,6 +708,15 @@ func getForeignKeys(ctx context.Context, db Queryer, databaseName, tableName str
 		if referencedSchema.Valid && referencedSchema.String != databaseName {
 			fk.ReferencedDatabase = referencedSchema.String
 		}
+		slog.Default().Debug("introspected foreign key",
+			"database", databaseName,
+			"table", tableName,
+			"constraint", fk.ConstraintName,
+			"column", fk.ColumnName,
+			"referenced_database", fk.ReferencedDatabase,
+			"referenced_table", fk.ReferencedTable,
+			"referenced_column", fk.ReferencedColumn,
+		)
 		foreignKeys = append(foreignKeys, fk)
 	}
 

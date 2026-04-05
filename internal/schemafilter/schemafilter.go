@@ -140,6 +140,14 @@ func filterForeignKeys(fks []introspection.ForeignKey, allowedColumns map[string
 		if !allowedColumns[fk.ColumnName] {
 			continue
 		}
+		// Cross-database FKs reference a table in another database; that table is
+		// not present in allowedTables (which is scoped to the current database).
+		// Skip the remote-table/column checks — ResolveCrossDatabaseRelationships
+		// will validate the reference after the full schema merge.
+		if fk.ReferencedDatabase != "" {
+			filtered = append(filtered, fk)
+			continue
+		}
 		if !allowedTables[fk.ReferencedTable] {
 			continue
 		}

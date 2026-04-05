@@ -581,11 +581,6 @@ func extractCrossDBForeignKeysFromCreateSQL(createSQL, currentDatabase string) [
 // INFORMATION_SCHEMA.KEY_COLUMN_USAGE. Any constraint not already present (by name)
 // in existing is appended.
 func supplementCrossDBForeignKeys(ctx context.Context, db Queryer, databaseName, tableName string, existing []ForeignKey) []ForeignKey {
-	// Skip tables with no FKs at all — they cannot have cross-db FK references.
-	if len(existing) == 0 {
-		return existing
-	}
-
 	createSQL, err := getCreateTableSQL(ctx, db, databaseName, tableName)
 	if err != nil {
 		// Not fatal — views or missing privileges may cause this to fail.

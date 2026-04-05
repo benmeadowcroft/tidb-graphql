@@ -383,6 +383,9 @@ func validateDatabasesArray(result *ValidationResult, d *DatabaseConfig) {
 		if entry.Filters != nil {
 			validateSchemaFilters(result, *entry.Filters)
 		}
+		if entry.Naming != nil {
+			validateNamingConfig(result, *entry.Naming)
+		}
 	}
 }
 

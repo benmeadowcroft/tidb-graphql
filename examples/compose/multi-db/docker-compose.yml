@@ -1,0 +1,76 @@
+# Multi-database demo: tutorial store + shipping databases joined via GraphQL namespaces.
+#
+# Usage:
+#   docker compose -f examples/compose/multi-db/docker-compose.yml up
+#
+# GraphiQL interactive explorer: http://localhost:8080/graphql
+# TiDB MySQL protocol:           localhost:4000
+#
+# The GraphQL schema exposes two namespaces on the root Query and Mutation types:
+#   store    — tidb_graphql_tutorial (users, products, orders, …)
+#   shipping — tidb_graphql_shipping (carriers, shipments, shipment_tracking)
+#
+# A cross-database FK (shipments.order_id → tidb_graphql_tutorial.orders.id) is
+# automatically detected and surfaces as a traversable relationship in both
+# directions without any extra configuration.
+
+services:
+  tidb:
+    image: pingcap/tidb:v8.5.5
+    command:
+      - "--config=/tidb.toml"
+    volumes:
+      # Reuse the same TiDB config as the quickstart scenario.
+      - ../quickstart/config/tidb/tidb.toml:/tidb.toml:ro
+      - tidb-data:/tmp/tidb
+    ports:
+      - "4000:4000"
+      - "10080:10080"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:10080/status"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  seed-tutorial:
+    image: mysql:8
+    depends_on:
+      tidb:
+        condition: service_healthy
+    volumes:
+      - ../../../docs/tutorials/sample-data.sql:/seed/sample-data.sql:ro
+      - ../../../docs/tutorials/sample-data-vectors.sql:/seed/sample-data-vectors.sql:ro
+      - ../../../docs/tutorials/sample-data-multi-db.sql:/seed/sample-data-multi-db.sql:ro
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - |
+        until mysqladmin --protocol=TCP --host=tidb --port=4000 --user=root ping --silent; do
+          sleep 1
+        done
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data.sql
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data-vectors.sql
+        mysql --protocol=TCP --host=tidb --port=4000 --user=root < /seed/sample-data-multi-db.sql
+    restart: "no"
+
+  tidb-graphql:
+    image: ${TIGQL_IMAGE:-ghcr.io/benmeadowcroft/tidb-graphql:main}
+    build:
+      context: ../../../
+      dockerfile: Containerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+    volumes:
+      - ./config/tidb-graphql/tidb-graphql.example.yaml:/etc/tidb-graphql/tidb-graphql.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      tidb:
+        condition: service_healthy
+      seed-tutorial:
+        condition: service_completed_successfully
+
+volumes:
+  tidb-data:

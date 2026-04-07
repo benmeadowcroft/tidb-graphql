@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -88,6 +90,11 @@ func startTestApp(t *testing.T, port int, extraEnv ...string) (*serverapp.App, <
 
 	env := mergeEnv(baseServerEnv(), append([]string{fmt.Sprintf("TIGQL_SERVER_PORT=%d", port)}, extraEnv...)...)
 	cfg := buildTestConfigFromEnv(port, env)
+	return startTestAppWithConfig(t, cfg)
+}
+
+func startTestAppWithConfig(t *testing.T, cfg *config.Config) (*serverapp.App, <-chan error, func()) {
+	t.Helper()
 
 	validationResult := cfg.Validate()
 	require.False(t, validationResult.HasErrors(), "test app config should validate: %v", validationResult.Errors)
@@ -105,7 +112,7 @@ func startTestApp(t *testing.T, port int, extraEnv ...string) (*serverapp.App, <
 	serverErrors, err := app.Start()
 	require.NoError(t, err)
 
-	waitForHealthy(t, port, serverErrors)
+	waitForHealthy(t, cfg.Server.Port, serverErrors)
 
 	cleanup := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
@@ -115,6 +122,37 @@ func startTestApp(t *testing.T, port int, extraEnv ...string) (*serverapp.App, <
 	t.Cleanup(cleanup)
 
 	return app, serverErrors, cleanup
+}
+
+func buildBaseTestConfig(port int) *config.Config {
+	return buildTestConfigFromEnv(port, append(baseServerEnv(), fmt.Sprintf("TIGQL_SERVER_PORT=%d", port)))
+}
+
+func executeGraphQLHTTP(t *testing.T, port int, query string) map[string]interface{} {
+	t.Helper()
+
+	payload, err := json.Marshal(map[string]string{"query": query})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d/graphql", port), bytes.NewReader(payload))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "unexpected GraphQL HTTP status: %s", string(body))
+
+	var decoded struct {
+		Data   map[string]interface{}   `json:"data"`
+		Errors []map[string]interface{} `json:"errors"`
+	}
+	require.NoError(t, json.Unmarshal(body, &decoded), "failed to parse GraphQL response: %s", string(body))
+	require.Empty(t, decoded.Errors, "GraphQL returned errors: %s", string(body))
+	return decoded.Data
 }
 
 func waitForHealthyWithLogs(t *testing.T, port int, stdout, stderr *bytes.Buffer, env []string) {

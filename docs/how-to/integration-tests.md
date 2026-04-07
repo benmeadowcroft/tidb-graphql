@@ -4,12 +4,16 @@ Goal: run the integration suite against TiDB Cloud.
 
 ## 1) Create `.env.test`
 
-Follow `tests/README.md` and add your TiDB Cloud credentials.
+Copy the example file and fill in your database credentials:
+
+```bash
+cp .env.test.example .env.test
+```
 
 ## 2) Run the tests
 
 ```bash
-go test ./tests/integration/...
+make test-integration
 ```
 
 ## 3) Troubleshoot quickly
@@ -27,7 +31,7 @@ Role-based authorization integration tests create a temporary runtime user to en
 - `GRANT OPTION`
 - `CREATE/DROP DATABASE`
 
-Other integration tests are unchanged and continue to use the single admin account.
+Other integration tests use the same admin credentials from `.env.test`. Some tests also create multiple temporary databases to exercise multi-database schema assembly and cross-database relationships.
 
 The role-based tests also create a dedicated introspection role and set it only while building the schema, so runtime queries remain constrained to request roles. The runtime connection is opened against `information_schema` and the executor switches databases with `USE <db>` during query execution.
 

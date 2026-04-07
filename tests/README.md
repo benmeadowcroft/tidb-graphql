@@ -6,18 +6,9 @@ This directory contains integration tests for the TiDB GraphQL project.
 
 ```
 tests/
-├── fixtures/                       # Test data and schemas
-│   ├── scripture_schema.sql       # Multi-level FK relationships
-│   ├── scripture_seed.sql         # Seed data for scripture schema
-│   ├── simple_schema.sql          # Basic test schema
-│   └── simple_seed.sql            # Seed data for simple schema
-│   ├── schema_refresh_v1.sql      # Base schema for refresh tests
-│   └── schema_refresh_v2.sql      # ALTER schema for refresh tests
-├── integration/                    # Integration test files
-│   └── auth_test.go                # JWT auth integration tests
-├── integration/                    # Integration test files
-│   └── introspection_test.go      # Database introspection tests
-└── README.md                       # This file
+├── fixtures/           # SQL schemas and seed data used by integration tests
+├── integration/        # Integration test files
+└── README.md           # This file
 ```
 
 ## Quick Start
@@ -37,7 +28,7 @@ Integration tests require TiDB Cloud Serverless credentials.
 1. **Setup credentials:**
 
    ```bash
-   cp ../.env.test.example ../.env.test
+   cp .env.test.example .env.test
    # Edit .env.test with your TiDB Cloud credentials
    ```
 
@@ -61,6 +52,8 @@ The `internal/testutil/tidbcloud` package provides utilities for integration tes
 - **`LoadSchema(t, path)`** - Loads SQL schema from file
 - **`LoadFixtures(t, path)`** - Loads seed data from file
 - **Automatic cleanup** - Test databases are dropped after each test
+
+Some integration tests create multiple temporary databases in the same test run to exercise multi-database configuration, namespace wrappers, cross-database relationships, and schema refresh behavior.
 
 ## Role-Based Authorization Integration Tests
 

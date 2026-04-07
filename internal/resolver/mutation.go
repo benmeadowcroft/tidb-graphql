@@ -30,11 +30,11 @@ func (r *Resolver) addTableMutations(fields graphql.Fields, table introspection.
 		return fields
 	}
 	if r.dbSchema != nil {
-		if jc, ok := r.dbSchema.Junctions[table.Name]; ok && jc.Type == introspection.JunctionTypePure {
+		if jc, ok := r.junctionConfigForTable(table); ok && jc.Type == introspection.JunctionTypePure {
 			return fields
 		}
 	}
-	if !schemafilter.MutationTableAllowed(table.Name, r.filters) {
+	if !schemafilter.MutationTableAllowed(table.Name, r.mutationFiltersFor(table)) {
 		return fields
 	}
 
@@ -99,7 +99,7 @@ func (r *Resolver) mutationInsertableColumns(table introspection.Table) []intros
 		if col.IsGenerated {
 			continue
 		}
-		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.filters) {
+		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.mutationFiltersFor(table)) {
 			continue
 		}
 		cols = append(cols, col)
@@ -113,7 +113,7 @@ func (r *Resolver) mutationUpdatableColumns(table introspection.Table) []introsp
 		if col.IsPrimaryKey || col.IsGenerated {
 			continue
 		}
-		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.filters) {
+		if !schemafilter.MutationColumnAllowed(table.Name, col.Name, r.mutationFiltersFor(table)) {
 			continue
 		}
 		cols = append(cols, col)
@@ -307,11 +307,17 @@ func (r *Resolver) buildCreateMutationPlan(table introspection.Table) createMuta
 			}
 			plan.connectFields[rel.GraphQLFieldName+"Connect"] = rel
 		case rel.IsOneToMany || rel.IsEdgeList:
+			if rel.IsCrossDatabase {
+				continue // cross-database nested create not supported
+			}
 			if r.nestedCreateInputForRel(table, rel) == nil {
 				continue
 			}
 			plan.nestedFields[rel.GraphQLFieldName+"Create"] = rel
 		case rel.IsManyToMany:
+			if rel.IsCrossDatabase {
+				continue // cross-database M2M connect not supported
+			}
 			if !r.m2mConnectSupported(table, rel) {
 				continue
 			}
@@ -391,7 +397,7 @@ func (r *Resolver) connectByUniqueInput(remoteTable introspection.Table, idx int
 // The input accepts either id (node ID) or one of the unique-index sub-objects.
 // Returns nil if the remote table has no eligible connect strategies.
 func (r *Resolver) connectInputForRel(rel introspection.Relationship) *graphql.InputObject {
-	remoteTable, err := r.findTable(rel.RemoteTable)
+	remoteTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil
 	}
@@ -458,11 +464,14 @@ func (r *Resolver) connectInputForRel(rel introspection.Relationship) *graphql.I
 // FK columns on the child table, mirroring the pattern used in createInputType.
 // Returns nil if the remote table is not mutation-allowed or produces no fields.
 func (r *Resolver) nestedCreateInputForRel(parentTable introspection.Table, rel introspection.Relationship) *graphql.InputObject {
-	remoteTable, err := r.findTable(rel.RemoteTable)
+	if rel.IsCrossDatabase {
+		return nil // cross-database nested create not supported
+	}
+	remoteTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil
 	}
-	if !schemafilter.MutationTableAllowed(remoteTable.Name, r.filters) {
+	if !schemafilter.MutationTableAllowed(remoteTable.Name, r.mutationFiltersFor(remoteTable)) {
 		return nil
 	}
 
@@ -630,7 +639,7 @@ func (r *Resolver) localColumnsMutationAllowed(table introspection.Table, cols [
 			continue
 		}
 		seen = true
-		if !schemafilter.MutationColumnAllowed(table.Name, colName, r.filters) {
+		if !schemafilter.MutationColumnAllowed(table.Name, colName, r.mutationFiltersFor(table)) {
 			return false
 		}
 	}
@@ -641,13 +650,17 @@ func (r *Resolver) m2mConnectSupported(parentTable introspection.Table, rel intr
 	if !rel.IsManyToMany {
 		return false
 	}
+	if rel.IsCrossDatabase {
+		return false // cross-database M2M connect not supported
+	}
 	if r.connectInputForRel(rel) == nil {
 		return false
 	}
-	if !schemafilter.MutationTableAllowed(rel.JunctionTable, r.filters) {
+	junctionTableObj := introspection.Table{Name: rel.JunctionTable, Key: rel.JunctionTableKey}
+	if !schemafilter.MutationTableAllowed(rel.JunctionTable, r.mutationFiltersFor(junctionTableObj)) {
 		return false
 	}
-	junctionTable, err := r.findTable(rel.JunctionTable)
+	junctionTable, err := r.findRelationshipJunctionTable(rel)
 	if err != nil {
 		return false
 	}
@@ -661,9 +674,15 @@ func (r *Resolver) m2mConnectSupported(parentTable introspection.Table, rel intr
 }
 
 func nestedCreateCacheKey(parentTable introspection.Table, rel introspection.Relationship) string {
+	// Use TableKey.MapKey() so that in multi-database mode tables with the same
+	// bare name in different databases produce distinct cache keys.
+	remoteKey := rel.RemoteTableKey.MapKey()
+	if remoteKey == "" {
+		remoteKey = rel.RemoteTable
+	}
 	return strings.Join([]string{
-		parentTable.Name,
-		rel.RemoteTable,
+		parentTable.MapKey(),
+		remoteKey,
 		rel.GraphQLFieldName,
 		strings.Join(rel.LocalColumns, ","),
 		strings.Join(rel.RemoteColumns, ","),
@@ -1252,7 +1271,11 @@ func (r *Resolver) makeCreateResolver(table introspection.Table, insertable map[
 			if err := validateScalarVsConnectXOR(partitioned.scalars, table, rel.LocalColumns, fieldName); err != nil {
 				return nil, err
 			}
-			fkValues, err := r.resolveConnectField(p.Context, mc.Tx(), rel.RemoteTable, rel.LocalColumns, rel.RemoteColumns, connectSub)
+			remoteTable, err := r.findRelationshipRemoteTable(rel)
+			if err != nil {
+				return nil, err
+			}
+			fkValues, err := r.resolveConnectField(p.Context, mc.Tx(), remoteTable, rel.LocalColumns, rel.RemoteColumns, connectSub)
 			if err != nil {
 				return nil, err
 			}
@@ -1573,15 +1596,12 @@ func (r *Resolver) selectRowByPKWithRequiredColumns(p graphql.ResolveParams, tab
 func (r *Resolver) resolveConnectField(
 	ctx context.Context,
 	tx dbexec.TxExecutor,
-	remoteTableName string,
+	remoteTable introspection.Table,
 	localCols []string,
 	remoteCols []string,
 	connectInput map[string]interface{},
 ) (map[string]interface{}, error) {
-	remoteTable, err := r.findTable(remoteTableName)
-	if err != nil {
-		return nil, newMutationError("referenced table not found: "+remoteTableName, "invalid_input", 0)
-	}
+	remoteTableName := remoteTable.Name
 	if len(localCols) == 0 || len(localCols) != len(remoteCols) {
 		return nil, fmt.Errorf("invalid relationship mapping for connect to %s", remoteTableName)
 	}
@@ -1774,7 +1794,7 @@ func (r *Resolver) executeNestedCreate(
 	parentRow map[string]interface{},
 	childRows []map[string]interface{},
 ) error {
-	remoteTable, err := r.findTable(rel.RemoteTable)
+	remoteTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return err
 	}
@@ -1840,7 +1860,11 @@ func (r *Resolver) executeNestedCreate(
 			if err := validateScalarVsConnectXOR(partitioned.scalars, remoteTable, childRel.LocalColumns, fieldName); err != nil {
 				return err
 			}
-			fkValues, err := r.resolveConnectField(ctx, tx, childRel.RemoteTable, childRel.LocalColumns, childRel.RemoteColumns, connectSub)
+			childRemoteTable, err := r.findRelationshipRemoteTable(childRel)
+			if err != nil {
+				return err
+			}
+			fkValues, err := r.resolveConnectField(ctx, tx, childRemoteTable, childRel.LocalColumns, childRel.RemoteColumns, connectSub)
 			if err != nil {
 				return err
 			}
@@ -1888,7 +1912,7 @@ func (r *Resolver) executeM2MConnect(
 		return fmt.Errorf("invalid many-to-many remote mapping for %s", rel.GraphQLFieldName)
 	}
 
-	junctionTable, err := r.findTable(rel.JunctionTable)
+	junctionTable, err := r.findRelationshipJunctionTable(rel)
 	if err != nil {
 		return err
 	}
@@ -1911,7 +1935,11 @@ func (r *Resolver) executeM2MConnect(
 		// mapRemoteToLocalFK maps each remote PK column to itself. The returned
 		// remoteValues is therefore keyed by rel.RemoteColumns (DB column names),
 		// which is exactly what the junction insert loop below expects.
-		remoteValues, err := r.resolveConnectField(ctx, tx, rel.RemoteTable, rel.RemoteColumns, rel.RemoteColumns, connectInput)
+		remoteTable, err := r.findRelationshipRemoteTable(rel)
+		if err != nil {
+			return err
+		}
+		remoteValues, err := r.resolveConnectField(ctx, tx, remoteTable, rel.RemoteColumns, rel.RemoteColumns, connectInput)
 		if err != nil {
 			return err
 		}

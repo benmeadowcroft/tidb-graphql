@@ -60,31 +60,44 @@ type Resolver struct {
 	setFilterCache         map[string]*graphql.InputObject
 	vectorEdgeCache        map[string]*graphql.Object
 	vectorConnCache        map[string]*graphql.Object
-	singularQueryCache     map[string]string
-	singularTypeCache      map[string]string
-	singularNamer          *naming.Namer
-	orderDirection         *graphql.Enum
-	orderByPolicy          *graphql.Enum
-	nonNegativeInt         *graphql.Scalar
-	bigIntType             *graphql.Scalar
-	decimalType            *graphql.Scalar
-	jsonType               *graphql.Scalar
-	dateType               *graphql.Scalar
-	timeType               *graphql.Scalar
-	yearType               *graphql.Scalar
-	bytesType              *graphql.Scalar
-	uuidType               *graphql.Scalar
-	vectorType             *graphql.Scalar
-	nodeInterface          *graphql.Interface
-	pageInfoType           *graphql.Object
-	vectorDistance         *graphql.Enum
-	edgeCache              map[string]*graphql.Object
-	connectionCache        map[string]*graphql.Object
-	limits                 *planner.PlanLimits
-	defaultLimit           int
-	filters                schemafilter.Config
-	vectorSearch           VectorSearchConfig
-	mu                     sync.RWMutex
+	// tableIndex provides O(1) table lookup by TableKey.MapKey().
+	// Built once when the schema is loaded; keyed both by MapKey() (e.g.
+	// "mydb.users" in multi-db mode) and by bare table name (for single-db
+	// compat). In single-db mode the two are identical.
+	tableIndex         map[string]*introspection.Table
+	singularQueryCache map[string]string
+	singularTypeCache  map[string]string
+	singularNamer      *naming.Namer
+	orderDirection     *graphql.Enum
+	orderByPolicy      *graphql.Enum
+	nonNegativeInt     *graphql.Scalar
+	bigIntType         *graphql.Scalar
+	decimalType        *graphql.Scalar
+	jsonType           *graphql.Scalar
+	dateType           *graphql.Scalar
+	timeType           *graphql.Scalar
+	yearType           *graphql.Scalar
+	bytesType          *graphql.Scalar
+	uuidType           *graphql.Scalar
+	vectorType         *graphql.Scalar
+	nodeInterface      *graphql.Interface
+	pageInfoType       *graphql.Object
+	vectorDistance     *graphql.Enum
+	edgeCache          map[string]*graphql.Object
+	connectionCache    map[string]*graphql.Object
+	limits             *planner.PlanLimits
+	defaultLimit       int
+	filters            schemafilter.Config
+	// filtersPerDB holds per-database schema filter overrides used in multi-db mode.
+	// When non-empty, mutationFiltersFor looks up the filter config by Key.Database
+	// before falling back to filters.
+	filtersPerDB map[string]schemafilter.Config
+	// namespaceMap maps each physical SQL database name to its GraphQL namespace alias.
+	// It is applied only when namespacedRoot is true.
+	namespaceMap   map[string]string
+	namespacedRoot bool
+	vectorSearch   VectorSearchConfig
+	mu             sync.RWMutex
 }
 
 // VectorSearchConfig controls generated vector-search fields.
@@ -92,6 +105,15 @@ type VectorSearchConfig struct {
 	RequireIndex bool
 	MaxTopK      int
 	DefaultFirst int
+}
+
+// ResolverConfig controls immutable resolver behaviour selected at construction time.
+type ResolverConfig struct {
+	Filters        schemafilter.Config
+	FiltersPerDB   map[string]schemafilter.Config
+	NamespaceMap   map[string]string
+	NamespacedRoot bool
+	Naming         naming.Config
 }
 
 var staticMutationTypeNames = map[string]bool{
@@ -117,16 +139,37 @@ func normalizeVectorSearchConfig(cfg VectorSearchConfig) VectorSearchConfig {
 	return cfg
 }
 
-// NewResolver creates a new resolver with the given executor, schema, and optional limits.
-// The executor handles SQL query execution, dbSchema provides the database structure,
-// and limits (if non-nil) enforces query depth, complexity, and row count constraints.
-func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int, filters schemafilter.Config, namingConfig naming.Config) *Resolver {
+func cloneSchemaFilterMap(src map[string]schemafilter.Config) map[string]schemafilter.Config {
+	if len(src) == 0 {
+		return nil
+	}
+	clone := make(map[string]schemafilter.Config, len(src))
+	for key, value := range src {
+		clone[key] = value
+	}
+	return clone
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(src))
+	for key, value := range src {
+		clone[key] = value
+	}
+	return clone
+}
+
+// NewResolverWithConfig creates a new resolver with immutable resolver configuration.
+func NewResolverWithConfig(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int, cfg ResolverConfig) *Resolver {
 	if defaultLimit <= 0 {
 		defaultLimit = planner.DefaultListLimit
 	}
 	return &Resolver{
 		executor:           executor,
 		dbSchema:           dbSchema,
+		tableIndex:         buildTableIndex(dbSchema),
 		typeCache:          make(map[string]*graphql.Object),
 		orderByClauseCache: make(map[string]*graphql.InputObject),
 		whereCache:         make(map[string]*graphql.InputObject),
@@ -150,16 +193,67 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		vectorConnCache:    make(map[string]*graphql.Object),
 		singularQueryCache: make(map[string]string),
 		singularTypeCache:  make(map[string]string),
-		singularNamer:      naming.New(namingConfig, nil),
+		singularNamer:      naming.New(cfg.Naming, nil),
 		edgeCache:          make(map[string]*graphql.Object),
 		connectionCache:    make(map[string]*graphql.Object),
 		limits:             limits,
 		defaultLimit:       defaultLimit,
-		filters:            filters,
+		filters:            cfg.Filters,
+		filtersPerDB:       cloneSchemaFilterMap(cfg.FiltersPerDB),
+		namespaceMap:       cloneStringMap(cfg.NamespaceMap),
+		namespacedRoot:     cfg.NamespacedRoot,
 		vectorSearch: normalizeVectorSearchConfig(VectorSearchConfig{
 			RequireIndex: true,
 		}),
 	}
+}
+
+// NewResolver creates a resolver with default flat-root behaviour.
+func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int, filters schemafilter.Config, namingConfig naming.Config) *Resolver {
+	return NewResolverWithConfig(executor, dbSchema, limits, defaultLimit, ResolverConfig{
+		Filters: filters,
+		Naming:  namingConfig,
+	})
+}
+
+// mutationFiltersFor returns the schemafilter.Config applicable to the given table.
+// In multi-db mode it consults filtersPerDB keyed by the table's physical database name;
+// falls back to the global filters for single-db or when no per-db entry exists.
+func (r *Resolver) mutationFiltersFor(t introspection.Table) schemafilter.Config {
+	if len(r.filtersPerDB) > 0 && t.Key.Database != "" {
+		if cfg, ok := r.filtersPerDB[t.Key.Database]; ok {
+			return cfg
+		}
+	}
+	return r.filters
+}
+
+// buildTableIndex builds an O(1) lookup table keyed by TableKey.MapKey()
+// (and, for backward compat, also by bare table name when the two differ).
+// Returns nil when schema is nil.
+func buildTableIndex(schema *introspection.Schema) map[string]*introspection.Table {
+	if schema == nil {
+		return nil
+	}
+	index := make(map[string]*introspection.Table, len(schema.Tables)*2)
+	for i := range schema.Tables {
+		t := &schema.Tables[i]
+		// Use Table.MapKey() which falls back to t.Name when Key is zero so that
+		// tables created without an explicit Key (e.g. in tests) are still indexed
+		// by their bare name rather than by "".
+		mapKey := t.MapKey()
+		index[mapKey] = t
+		// When in multi-db mode (mapKey == "db.table"), also index by bare name for
+		// single-db compat callers that look up by plain table name.
+		// In single-db mode mapKey == t.Name so this is a no-op.
+		if mapKey != t.Name {
+			// Only set bare name if not already occupied (first writer wins).
+			if _, exists := index[t.Name]; !exists {
+				index[t.Name] = t
+			}
+		}
+	}
+	return index
 }
 
 // SetVectorSearchConfig overrides vector-search generation/runtime behavior.
@@ -167,6 +261,52 @@ func (r *Resolver) SetVectorSearchConfig(cfg VectorSearchConfig) {
 	r.mu.Lock()
 	r.vectorSearch = normalizeVectorSearchConfig(cfg)
 	r.mu.Unlock()
+}
+
+type rootFieldGroup struct {
+	nsPascal string
+	nsAlias  string
+	dbName   string
+	wrapper  bool
+	tables   []introspection.Table
+}
+
+func (r *Resolver) buildRootFieldGroups() ([]rootFieldGroup, error) {
+	if !r.namespacedRoot {
+		return []rootFieldGroup{{
+			tables: append([]introspection.Table(nil), r.dbSchema.Tables...),
+		}}, nil
+	}
+
+	seen := make(map[string]int)
+	var groups []rootFieldGroup
+	for _, table := range r.dbSchema.Tables {
+		dbName := table.Key.Database
+		nsAlias, ok := r.namespaceMap[dbName]
+		if !ok || nsAlias == "" {
+			nsAlias = dbName
+		}
+		nsPascal := r.singularNamer.ToGraphQLTypeName(nsAlias)
+		if nsPascal == "" {
+			nsPascal = nsAlias
+		}
+		idx, exists := seen[nsPascal]
+		if exists && groups[idx].dbName != dbName {
+			return nil, fmt.Errorf("databases %q and %q both normalize to the GraphQL namespace %q", groups[idx].dbName, dbName, nsPascal)
+		}
+		if !exists {
+			idx = len(groups)
+			groups = append(groups, rootFieldGroup{
+				nsPascal: nsPascal,
+				nsAlias:  nsAlias,
+				dbName:   dbName,
+				wrapper:  true,
+			})
+			seen[nsPascal] = idx
+		}
+		groups[idx].tables = append(groups[idx].tables, table)
+	}
+	return groups, nil
 }
 
 // BuildGraphQLSchema constructs an executable GraphQL schema from the database schema.
@@ -178,24 +318,91 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 		return graphql.Schema{}, err
 	}
 
-	queryFields := graphql.Fields{}
-
-	for _, table := range r.dbSchema.Tables {
-		queryFields = r.addTableQueries(queryFields, table)
+	groups, err := r.buildRootFieldGroups()
+	if err != nil {
+		return graphql.Schema{}, err
 	}
 
-	// If no tables exist, add a placeholder query to satisfy GraphQL requirements
-	if len(queryFields) == 0 {
-		queryFields["_schema"] = &graphql.Field{
+	rootQueryFields := graphql.Fields{}
+	rootMutationFields := graphql.Fields{}
+
+	for _, group := range groups {
+		groupQueryFields := graphql.Fields{}
+		for _, table := range group.tables {
+			groupQueryFields = r.addTableQueries(groupQueryFields, table)
+		}
+
+		groupMutationFields := graphql.Fields{}
+		for _, table := range group.tables {
+			groupMutationFields = r.addTableMutations(groupMutationFields, table)
+		}
+
+		if !group.wrapper {
+			for name, field := range groupQueryFields {
+				rootQueryFields[name] = field
+			}
+			for name, field := range groupMutationFields {
+				rootMutationFields[name] = field
+			}
+			continue
+		}
+
+		if len(groupQueryFields) == 0 {
+			groupQueryFields["_schema"] = &graphql.Field{
+				Type: graphql.String,
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					return "No tables found in namespace", nil
+				},
+			}
+		}
+
+		nsQueryObj := graphql.NewObject(graphql.ObjectConfig{
+			Name:   group.nsPascal + "_Query",
+			Fields: groupQueryFields,
+		})
+		nsFieldName := r.singularNamer.ToGraphQLFieldName(group.nsAlias)
+		if nsFieldName == "" {
+			nsFieldName = group.nsAlias
+		}
+		rootQueryFields[nsFieldName] = &graphql.Field{
+			Type: graphql.NewNonNull(nsQueryObj),
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				return struct{}{}, nil
+			},
+			Description: "Queries for the " + group.nsAlias + " database namespace.",
+		}
+
+		if len(groupMutationFields) > 0 {
+			nsMutationObj := graphql.NewObject(graphql.ObjectConfig{
+				Name:   group.nsPascal + "_Mutation",
+				Fields: groupMutationFields,
+			})
+			rootMutationFields[nsFieldName] = &graphql.Field{
+				Type: graphql.NewNonNull(nsMutationObj),
+				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+					return struct{}{}, nil
+				},
+				Description: "Mutations for the " + group.nsAlias + " database namespace.",
+			}
+		}
+	}
+
+	// If no tables exist, add a placeholder query to satisfy GraphQL requirements.
+	if len(rootQueryFields) == 0 {
+		placeholder := "No tables found in database"
+		if r.namespacedRoot {
+			placeholder = "No namespaces configured"
+		}
+		rootQueryFields["_schema"] = &graphql.Field{
 			Type: graphql.String,
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				return "No tables found in database", nil
+				return placeholder, nil
 			},
 			Description: "Placeholder field when database has no tables",
 		}
 	}
 	if r.hasNodeTypes() {
-		queryFields["node"] = &graphql.Field{
+		rootQueryFields["node"] = &graphql.Field{
 			Type: r.nodeInterfaceType(),
 			Args: graphql.FieldConfigArgument{
 				"id": &graphql.ArgumentConfig{
@@ -206,23 +413,16 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 		}
 	}
 
-	rootQuery := graphql.ObjectConfig{
-		Name:   "Query",
-		Fields: queryFields,
-	}
-
-	mutationFields := graphql.Fields{}
-	for _, table := range r.dbSchema.Tables {
-		mutationFields = r.addTableMutations(mutationFields, table)
-	}
-
 	schemaConfig := graphql.SchemaConfig{
-		Query: graphql.NewObject(rootQuery),
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name:   "Query",
+			Fields: rootQueryFields,
+		}),
 	}
-	if len(mutationFields) > 0 {
+	if len(rootMutationFields) > 0 {
 		schemaConfig.Mutation = graphql.NewObject(graphql.ObjectConfig{
 			Name:   "Mutation",
-			Fields: mutationFields,
+			Fields: rootMutationFields,
 		})
 	}
 	if types := r.schemaTypes(); len(types) > 0 {
@@ -787,7 +987,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			}
 		}
 
-		relatedTable, err := r.findTable(rel.RemoteTable)
+		relatedTable, err := r.findRelationshipRemoteTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 		}
@@ -849,9 +1049,16 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			}
 		}
 
-		relatedTable, err := r.findTable(rel.RemoteTable)
+		relatedTable, err := r.findRelationshipRemoteTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+		}
+
+		// Look up junction table as an introspection.Table for qualified SQL support.
+		// Fall back to a minimal table if not found (e.g. pure junctions not in Tables).
+		junctionTableObj, err := r.findRelationshipJunctionTable(rel)
+		if err != nil {
+			junctionTableObj = introspection.Table{Name: rel.JunctionTable, Key: rel.JunctionTableKey}
 		}
 
 		field := firstFieldAST(p.Info.FieldASTs)
@@ -869,7 +1076,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 
 		plan, err := planner.PlanManyToManyConnection(
 			relatedTable,
-			rel.JunctionTable,
+			junctionTableObj,
 			rel.EffectiveJunctionLocalFKColumns(),
 			rel.EffectiveJunctionRemoteFKColumns(),
 			rel.EffectiveRemoteColumns(),
@@ -921,7 +1128,7 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 			}
 		}
 
-		junctionTable, err := r.findTable(rel.JunctionTable)
+		junctionTable, err := r.findRelationshipJunctionTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
 		}
@@ -1052,9 +1259,9 @@ func (r *Resolver) addRelationshipWhereFields(fields graphql.InputObjectConfigFi
 		var err error
 		switch {
 		case rel.IsEdgeList:
-			relatedTable, err = r.findTable(rel.JunctionTable)
+			relatedTable, err = r.findRelationshipJunctionTable(rel)
 		default:
-			relatedTable, err = r.findTable(rel.RemoteTable)
+			relatedTable, err = r.findRelationshipRemoteTable(rel)
 		}
 		if err != nil {
 			continue
@@ -2150,7 +2357,7 @@ func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspe
 		}
 
 		// Query the related table
-		relatedTable, err := r.findTable(rel.RemoteTable)
+		relatedTable, err := r.findRelationshipRemoteTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 		}

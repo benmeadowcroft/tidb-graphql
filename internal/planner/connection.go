@@ -267,7 +267,7 @@ func PlanOneToManyConnection(
 
 	// Build root SQL with FK + seek
 	builder := sq.Select(columnNames(table, ca.selected)...).
-		From(sqlutil.QuoteIdentifier(table.Name)).
+		From(table.SQLFrom()).
 		Where(fkCondition)
 
 	if ca.whereClause != nil && ca.whereClause.Condition != nil {
@@ -305,7 +305,7 @@ func PlanOneToManyConnection(
 // PlanManyToManyConnection plans a connection for a many-to-many relationship.
 func PlanManyToManyConnection(
 	targetTable introspection.Table,
-	junctionTable string,
+	junctionTable introspection.Table,
 	junctionLocalFKColumns []string,
 	junctionRemoteFKColumns []string,
 	targetPKColumns []string,
@@ -328,8 +328,8 @@ func PlanManyToManyConnection(
 		return nil, err
 	}
 
-	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
-	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
+	quotedTarget := targetTable.SQLFrom()
+	quotedJunction := junctionTable.SQLFrom()
 	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
 		return nil, fmt.Errorf("many-to-many local FK mapping width mismatch")
 	}
@@ -419,7 +419,7 @@ func PlanEdgeListConnection(
 		return nil, fmt.Errorf("edge-list local key filter is empty")
 	}
 	builder := sq.Select(columnNames(junctionTable, ca.selected)...).
-		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
+		From(junctionTable.SQLFrom()).
 		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if ca.whereClause != nil && ca.whereClause.Condition != nil {
@@ -471,7 +471,7 @@ func BuildOneToManyCountSQL(
 // BuildManyToManyCountSQL builds the count query for a many-to-many connection.
 func BuildManyToManyCountSQL(
 	targetTable introspection.Table,
-	junctionTable string,
+	junctionTable introspection.Table,
 	junctionLocalFKColumns []string,
 	junctionRemoteFKColumns []string,
 	targetPKColumns []string,
@@ -496,15 +496,15 @@ func BuildManyToManyCountSQL(
 // BuildManyToManyAggregateBaseSQL builds the base rowset query for many-to-many aggregates.
 func BuildManyToManyAggregateBaseSQL(
 	targetTable introspection.Table,
-	junctionTable string,
+	junctionTable introspection.Table,
 	junctionLocalFKColumns []string,
 	junctionRemoteFKColumns []string,
 	targetPKColumns []string,
 	fkValues []interface{},
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
-	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
-	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
+	quotedTarget := targetTable.SQLFrom()
+	quotedJunction := junctionTable.SQLFrom()
 	if len(junctionLocalFKColumns) == 0 || len(junctionLocalFKColumns) != len(fkValues) {
 		return SQLQuery{}, fmt.Errorf("many-to-many aggregate local key mapping width mismatch")
 	}
@@ -568,7 +568,7 @@ func BuildOneToManyAggregateBaseSQL(
 	whereClause *WhereClause,
 ) (SQLQuery, error) {
 	builder := sq.Select("*").
-		From(sqlutil.QuoteIdentifier(table.Name)).
+		From(table.SQLFrom()).
 		Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumn): fkValue})
 
 	if whereClause != nil && whereClause.Condition != nil {
@@ -603,7 +603,7 @@ func BuildEdgeListAggregateBaseSQL(
 		return SQLQuery{}, fmt.Errorf("edge-list aggregate local key filter is empty")
 	}
 	builder := sq.Select("*").
-		From(sqlutil.QuoteIdentifier(junctionTable.Name)).
+		From(junctionTable.SQLFrom()).
 		Where(sq.Expr(whereSQL, whereArgs...))
 
 	if whereClause != nil && whereClause.Condition != nil {
@@ -711,7 +711,7 @@ func PlanOneToManyConnectionBatch(
 // It uses offset=0 and limit=first+1 to allow per-parent hasNextPage detection.
 func PlanManyToManyConnectionBatch(
 	targetTable introspection.Table,
-	junctionTable string,
+	junctionTable introspection.Table,
 	junctionLocalFKColumns []string,
 	junctionRemoteFKColumns []string,
 	targetPKColumns []string,
@@ -983,7 +983,7 @@ func CursorColumns(table introspection.Table, orderBy *OrderBy) []introspection.
 
 func buildConnectionSQL(table introspection.Table, columns []introspection.Column, where *WhereClause, seek sq.Sqlizer, orderBy *OrderBy, limit int) (SQLQuery, error) {
 	builder := sq.Select(columnNames(table, columns)...).
-		From(sqlutil.QuoteIdentifier(table.Name))
+		From(table.SQLFrom())
 
 	if where != nil && where.Condition != nil {
 		builder = builder.Where(where.Condition)
@@ -1013,7 +1013,7 @@ func buildCountSQL(table introspection.Table, where *WhereClause) (SQLQuery, err
 
 func buildRootAggregateBaseSQL(table introspection.Table, where *WhereClause) (SQLQuery, error) {
 	builder := sq.Select("*").
-		From(sqlutil.QuoteIdentifier(table.Name))
+		From(table.SQLFrom())
 
 	if where != nil && where.Condition != nil {
 		builder = builder.Where(where.Condition)

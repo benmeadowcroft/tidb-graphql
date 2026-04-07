@@ -392,6 +392,17 @@ func TestConfig_Validate(t *testing.T) {
 		assert.False(t, result.HasErrors())
 	})
 
+	t.Run("database namespaces must stay distinct after GraphQL normalization", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Database.Databases = []DatabaseEntryConfig{
+			{Name: "shop", Namespace: "my_app"},
+			{Name: "auth", Namespace: "MyApp"},
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "same GraphQL namespace")
+	})
+
 	t.Run("rate limit disabled with values warns", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Server.RateLimitEnabled = false
@@ -771,6 +782,34 @@ func TestDatabaseConfig_EffectiveDatabaseName(t *testing.T) {
 	}
 }
 
+func TestDatabaseConfig_SchemaEntries(t *testing.T) {
+	t.Run("legacy database synthesizes a single schema entry", func(t *testing.T) {
+		cfg := DatabaseConfig{Database: "appdb"}
+		entries := cfg.SchemaEntries()
+		if assert.Len(t, entries, 1) {
+			assert.Equal(t, "appdb", entries[0].Name)
+			assert.Equal(t, []string{"appdb"}, cfg.SchemaDatabaseNames())
+		}
+	})
+
+	t.Run("configured databases remain canonical", func(t *testing.T) {
+		cfg := DatabaseConfig{
+			Databases: []DatabaseEntryConfig{
+				{Name: "shop", Namespace: "shop"},
+				{Name: "auth"},
+			},
+		}
+		entries := cfg.SchemaEntries()
+		if assert.Len(t, entries, 2) {
+			assert.Equal(t, "shop", entries[0].Name)
+			assert.Equal(t, "auth", entries[1].Name)
+		}
+		entries[0].Name = "mutated"
+		assert.Equal(t, "shop", cfg.Databases[0].Name)
+		assert.Equal(t, []string{"shop", "auth"}, cfg.SchemaDatabaseNames())
+	})
+}
+
 func TestConfigValidate_DatabaseResolution(t *testing.T) {
 	t.Run("dsn with matching database passes", func(t *testing.T) {
 		cfg := &Config{
@@ -793,6 +832,9 @@ func TestConfigValidate_DatabaseResolution(t *testing.T) {
 		result := cfg.Validate()
 		assert.False(t, result.HasErrors())
 		assert.Equal(t, "match_db", cfg.Database.Database)
+		if assert.Len(t, cfg.Database.Databases, 1) {
+			assert.Equal(t, "match_db", cfg.Database.Databases[0].Name)
+		}
 	})
 
 	t.Run("dsn mismatch with database errors", func(t *testing.T) {

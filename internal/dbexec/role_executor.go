@@ -14,6 +14,11 @@ type RoleExecutor struct {
 	databaseName string
 	roleFromCtx  func(context.Context) (string, bool)
 	allowedRoles map[string]struct{}
+	// multiDB disables the USE <database> statement before each query.
+	// In multi-database mode all table references are fully qualified
+	// (e.g. `shop`.`orders`) so a USE statement is unnecessary and can
+	// interfere with cross-database queries.
+	multiDB bool
 }
 
 // RoleExecutorConfig controls role execution behavior.
@@ -22,6 +27,10 @@ type RoleExecutorConfig struct {
 	DatabaseName string
 	RoleFromCtx  func(context.Context) (string, bool)
 	AllowedRoles []string
+	// MultiDB disables the USE <database> statement before each query.
+	// Set this when multiple databases are configured and all table references
+	// are fully qualified with their schema prefix.
+	MultiDB bool
 }
 
 // NewRoleExecutor creates an executor that applies SET ROLE before each query.
@@ -36,6 +45,7 @@ func NewRoleExecutor(cfg RoleExecutorConfig) *RoleExecutor {
 		databaseName: cfg.DatabaseName,
 		roleFromCtx:  cfg.RoleFromCtx,
 		allowedRoles: allowed,
+		multiDB:      cfg.MultiDB,
 	}
 }
 
@@ -116,6 +126,10 @@ func (e *RoleExecutor) prepareRoleConn(ctx context.Context) (*sql.Conn, func(), 
 }
 
 func (e *RoleExecutor) useDatabase(ctx context.Context, conn *sql.Conn) error {
+	// In multi-db mode all queries use fully-qualified table names so no USE is needed.
+	if e.multiDB {
+		return nil
+	}
 	if e.databaseName == "" {
 		return nil
 	}

@@ -1,0 +1,28 @@
+database:
+  host: tidb
+  port: 4000
+  user: root
+
+  # Multi-database mode: list every SQL database to include in the GraphQL schema.
+  # Each entry produces a namespace field on the root Query and Mutation types.
+  # Cross-database foreign keys are detected automatically — no extra config needed.
+  databases:
+    - name: tidb_graphql_tutorial
+      namespace: store        # query { store { orders { ... } } }
+    - name: tidb_graphql_shipping
+      namespace: shipping     # query { shipping { shipments { ... } } }
+
+server:
+  port: 8080
+  graphiql_enabled: true
+  tls_mode: off
+  admin:
+    schema_reload_enabled: true
+    auth_token: multi-db-admin-token
+  search:
+    vector_require_index: false
+
+observability:
+  environment: development
+  logging:
+    format: text

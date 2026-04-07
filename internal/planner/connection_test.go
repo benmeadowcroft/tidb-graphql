@@ -411,7 +411,7 @@ func TestPlanManyToManyConnection_Basic(t *testing.T) {
 	args := map[string]interface{}{"first": 2}
 	plan, err := PlanManyToManyConnection(
 		table,
-		"user_tags",
+		introspection.Table{Name: "user_tags"},
 		[]string{"user_id"},
 		[]string{"tag_id"},
 		[]string{"id"},
@@ -537,7 +537,7 @@ func TestPlanManyToManyConnection_CompositeKeys(t *testing.T) {
 	}
 	plan, err := PlanManyToManyConnection(
 		table,
-		"user_groups",
+		introspection.Table{Name: "user_groups"},
 		[]string{"tenant_id", "user_id"},
 		[]string{"group_tenant_id", "group_id"},
 		[]string{"tenant_id", "id"},

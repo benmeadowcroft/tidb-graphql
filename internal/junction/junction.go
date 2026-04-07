@@ -59,7 +59,7 @@ type Info struct {
 	AttributeColumns []string
 }
 
-// Map maps junction table names to their classification info.
+// Map maps junction tables by Table.MapKey() to their classification info.
 type Map map[string]Info
 
 // ToIntrospectionMap converts junction.Map to introspection.JunctionMap.
@@ -113,7 +113,7 @@ func ClassifyJunctions(schema *introspection.Schema) Map {
 			continue
 		}
 		if info, ok := classifyTable(table, tableByName); ok {
-			result[table.Name] = info
+			result[table.MapKey()] = info
 		}
 	}
 	return result

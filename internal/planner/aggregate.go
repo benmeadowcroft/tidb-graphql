@@ -73,7 +73,7 @@ func PlanAggregate(
 	selection AggregateSelection,
 	filters *AggregateFilters,
 ) (SQLQuery, error) {
-	base := sq.Select("*").From(sqlutil.QuoteIdentifier(table.Name))
+	base := sq.Select("*").From(table.SQLFrom())
 	if filters != nil && filters.Where != nil && filters.Where.Condition != nil {
 		base = base.Where(filters.Where.Condition)
 	}
@@ -115,7 +115,7 @@ func PlanRelationshipAggregate(
 	}
 
 	base := sq.Select("*").
-		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
+		From(relatedTable.SQLFrom()).
 		Where(finalCondition)
 
 	if filters != nil && filters.OrderBy != nil {
@@ -163,7 +163,7 @@ func PlanRelationshipAggregateBatch(
 	}
 
 	builder := sq.Select(selectClauses...).
-		From(sqlutil.QuoteIdentifier(relatedTable.Name)).
+		From(relatedTable.SQLFrom()).
 		Where(finalCondition).
 		GroupBy(groupCol)
 

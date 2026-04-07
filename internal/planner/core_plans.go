@@ -44,7 +44,7 @@ type SQLQuery struct {
 // PlanTableByPK builds the SQL for a single-column primary key lookup.
 func PlanTableByPK(table introspection.Table, columns []introspection.Column, pk *introspection.Column, pkValue interface{}) (SQLQuery, error) {
 	query, args, err := sq.Select(columnNames(table, columns)...).
-		From(sqlutil.QuoteIdentifier(table.Name)).
+		From(table.SQLFrom()).
 		Where(sq.Eq{sqlutil.QuoteIdentifier(pk.Name): pkValue}).
 		PlaceholderFormat(sq.Question).
 		ToSql()
@@ -67,7 +67,7 @@ func PlanTableByPKColumns(table introspection.Table, columns []introspection.Col
 	}
 
 	query, args, err := sq.Select(columnNames(table, columns)...).
-		From(sqlutil.QuoteIdentifier(table.Name)).
+		From(table.SQLFrom()).
 		Where(whereClause).
 		PlaceholderFormat(sq.Question).
 		ToSql()
@@ -91,7 +91,7 @@ func PlanUniqueKeyLookup(table introspection.Table, columns []introspection.Colu
 	}
 
 	query, args, err := sq.Select(columnNames(table, columns)...).
-		From(sqlutil.QuoteIdentifier(table.Name)).
+		From(table.SQLFrom()).
 		Where(whereClause).
 		PlaceholderFormat(sq.Question).
 		ToSql()
@@ -109,7 +109,7 @@ func PlanManyToOne(relatedTable introspection.Table, columns []introspection.Col
 	}
 
 	builder := sq.Select(columnNames(relatedTable, columns)...).
-		From(sqlutil.QuoteIdentifier(relatedTable.Name))
+		From(relatedTable.SQLFrom())
 	if len(remoteColumns) == 1 {
 		builder = builder.Where(sq.Eq{sqlutil.QuoteIdentifier(remoteColumns[0]): fkValues[0]})
 	} else {

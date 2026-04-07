@@ -99,10 +99,13 @@ type PrivilegeValidationResult struct {
 
 // ValidateRoleBasedAuthPrivileges checks whether the database user's privileges are compatible
 // with role-based authorization. For SET ROLE to effectively restrict access, the user should
-// NOT have direct SELECT privileges on the target database - only the ability to assume roles.
+// NOT have direct SELECT privileges on any of the target databases - only the ability to assume roles.
+//
+// targetDatabases is the list of SQL TABLE_SCHEMA names to validate against. In single-database
+// mode this is a one-element slice; in multi-database mode it contains all configured databases.
 //
 // Returns an error only if the privilege check itself fails, not if privileges are too broad.
-func ValidateRoleBasedAuthPrivileges(ctx context.Context, db *sql.DB, targetDatabase string) (*PrivilegeValidationResult, error) {
+func ValidateRoleBasedAuthPrivileges(ctx context.Context, db *sql.DB, targetDatabases []string) (*PrivilegeValidationResult, error) {
 	rows, err := db.QueryContext(ctx, "SHOW GRANTS FOR CURRENT_USER()")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query user privileges: %w", err)
@@ -127,21 +130,29 @@ func ValidateRoleBasedAuthPrivileges(ctx context.Context, db *sql.DB, targetData
 			continue
 		}
 
-		// Check for SELECT privilege on target database.* (all tables in target DB)
-		dbPattern := fmt.Sprintf("ON `%s`.*", targetDatabase)
-		if containsSelectPrivilege(grant) && strings.Contains(grant, dbPattern) {
+		// Check for ALL PRIVILEGES on *.* which includes SELECT
+		if strings.Contains(strings.ToUpper(grant), "ALL PRIVILEGES") && strings.Contains(grant, "ON *.*") {
 			result.Valid = false
 			result.HasBroadPrivileges = true
 			result.BroadPrivileges = append(result.BroadPrivileges, grant)
 			continue
 		}
 
-		// Check for ALL PRIVILEGES which includes SELECT
-		if strings.Contains(strings.ToUpper(grant), "ALL PRIVILEGES") {
-			if strings.Contains(grant, "ON *.*") || strings.Contains(grant, dbPattern) {
+		// Check for SELECT privilege on any of the target databases (all tables in that DB)
+		for _, db := range targetDatabases {
+			dbPattern := fmt.Sprintf("ON `%s`.*", db)
+			if containsSelectPrivilege(grant) && strings.Contains(grant, dbPattern) {
 				result.Valid = false
 				result.HasBroadPrivileges = true
 				result.BroadPrivileges = append(result.BroadPrivileges, grant)
+				break
+			}
+			// Check for ALL PRIVILEGES on a specific target database
+			if strings.Contains(strings.ToUpper(grant), "ALL PRIVILEGES") && strings.Contains(grant, dbPattern) {
+				result.Valid = false
+				result.HasBroadPrivileges = true
+				result.BroadPrivileges = append(result.BroadPrivileges, grant)
+				break
 			}
 		}
 	}

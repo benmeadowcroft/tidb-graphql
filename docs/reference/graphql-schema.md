@@ -120,6 +120,76 @@ When both patterns match the same column, `tinyint1_int_columns` takes precedenc
 Breaking change note:
 - Legacy filters using numeric booleans like `eq: 1` / `eq: 0` on `tinyint(1)` columns must be updated to `eq: true` / `eq: false`.
 
+## Multi-database mode
+
+When [`database.databases`](./configuration.md#multiple-databases) lists more than one entry (or a single entry with an explicit `namespace`), the GraphQL schema changes in the following ways.
+
+### Type naming
+
+Each table's GraphQL type name is prefixed with the PascalCase namespace alias followed by an underscore:
+
+- `shop` database, table `orders` → type `Shop_Order` (singular) / connection `Shop_OrderConnection`
+- `auth` database, table `users` → type `Auth_User` / connection `Auth_UserConnection`
+
+Both the singular type name (e.g. `Shop_Order`) and the list/connection name use this form. The `GraphQLTypeName` and `GraphQLSingleTypeName` are identical in multi-db mode to keep mutations and queries consistent.
+
+Per-database `naming.type_overrides` can still override the base name before the namespace prefix is applied.
+
+### Root schema structure
+
+Instead of table queries and mutations appearing directly on `Query`/`Mutation`, each namespace becomes a field that returns a wrapper object containing that namespace's fields:
+
+```graphql
+type Query {
+  shop: Shop_Query!   # all shop-database queries
+  auth: Auth_Query!   # all auth-database queries
+  node(id: ID!): Node # global node lookup (always on root)
+}
+
+type Mutation {
+  shop: Shop_Mutation!
+  auth: Auth_Mutation!
+}
+
+type Shop_Query {
+  orders(first: Int, after: String, where: Shop_OrderWhere, orderBy: [Shop_OrderOrderBy!]): Shop_OrderConnection!
+  order(id: ID!): Shop_Order
+  # ... other shop tables
+}
+
+type Shop_Mutation {
+  createShop_Order(input: CreateShop_OrderInput!): CreateShop_OrderResult!
+  updateShop_Order(id: ID!, set: UpdateShop_OrderSetInput): UpdateShop_OrderResult!
+  deleteShop_Order(id: ID!): DeleteShop_OrderResult!
+  # ... other shop tables
+}
+```
+
+The `node(id: ID!)` global lookup remains on the root `Query` and resolves objects across all namespaces.
+
+A namespace wrapper field resolves to a non-null empty object — child field resolvers are invoked normally.
+
+### Cross-database relationships
+
+Foreign keys that reference a table in a different SQL database produce a read-only many-to-one field on the source type. The inverse one-to-many field is added on the referenced type.
+
+Restrictions apply to cross-database mutations:
+
+| Operation | Cross-database? | Allowed |
+|-----------|----------------|---------|
+| Many-to-one connect | Yes | ✅ Allowed |
+| One-to-many nested create | Yes | ❌ Blocked |
+| One-to-many edge-list nested create | Yes | ❌ Blocked |
+| Many-to-many connect | Yes | ❌ Blocked |
+
+Blocked operations are silently omitted from the generated input types; no runtime error is produced.
+
+### Single-database with namespace
+
+A single entry in `database.databases` with no `namespace` set preserves the existing flat root schema — queries and mutations appear directly on `Query`/`Mutation` without any wrapper, and type names are not prefixed. This is the backward-compatible default for all existing configurations.
+
+A single entry **with** an explicit `namespace` enables namespace-prefixed type names and the wrapper structure, even with only one database.
+
 ## Descriptions
 
 Table and column comments are emitted as GraphQL descriptions on the corresponding types and fields when present.

@@ -209,7 +209,9 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 			if d.TLS.Mode == "" && settings.TLSMode != "" {
 				d.TLS.Mode = settings.TLSMode
 			}
-			if settings.HasDBName {
+			// Only apply the DB name from mycnf when using the legacy single-DB field.
+			// When Databases is already set, the user manages DB names there.
+			if len(d.Databases) == 0 && settings.HasDBName {
 				if strings.TrimSpace(d.Database) == "" {
 					d.Database = settings.Database
 				} else if d.Database != settings.Database {
@@ -283,39 +285,116 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 		})
 	}
 
-	effectiveDatabase, _, err := resolveEffectiveDatabaseName(d.Database, d.ConnectionString, d.MyCnfFile)
-	if err != nil {
-		switch {
-		case strings.HasPrefix(err.Error(), "database.dsn"):
+	if len(d.Databases) > 0 {
+		// New multi/single-db path: validate the Databases array.
+		validateDatabasesArray(result, d)
+	} else {
+		// Legacy single-db path: resolve the effective database name as before.
+		effectiveDatabase, _, err := resolveEffectiveDatabaseName(d.Database, d.ConnectionString, d.MyCnfFile)
+		if err != nil {
+			switch {
+			case strings.HasPrefix(err.Error(), "database.dsn"):
+				result.Errors = append(result.Errors, ValidationError{
+					Field:   "database.dsn",
+					Message: err.Error(),
+					Hint:    "set a valid MySQL DSN in database.dsn/database.dsn_file",
+				})
+			case strings.HasPrefix(err.Error(), "database.mycnf_file"):
+				result.Errors = append(result.Errors, ValidationError{
+					Field:   "database.mycnf_file",
+					Message: err.Error(),
+					Hint:    "set a valid my.cnf file and include [client] database or database.database",
+				})
+			case strings.Contains(err.Error(), "mismatch"):
+				result.Errors = append(result.Errors, ValidationError{
+					Field:   "database.database",
+					Message: err.Error(),
+					Hint:    "either remove database.database or set it to match the DSN/my.cnf database",
+				})
+			default:
+				result.Errors = append(result.Errors, ValidationError{
+					Field:   "database.database",
+					Message: err.Error(),
+					Hint:    "set database.database or include a /database in database.dsn/database.dsn_file or database.mycnf_file",
+				})
+			}
+			return
+		}
+		// Keep runtime behaviour deterministic for callers that consume Database.Database.
+		d.Database = effectiveDatabase
+	}
+	if !result.HasErrors() {
+		d.normalizeSchemaEntries()
+	}
+}
+
+// validateDatabasesArray validates the Databases slice of a DatabaseConfig.
+// It is called only when len(d.Databases) > 0 (the new config style).
+func validateDatabasesArray(result *ValidationResult, d *DatabaseConfig) {
+	seenNames := make(map[string]bool)
+	seenNamespaces := make(map[string]bool)
+	seenNormalizedNamespaces := make(map[string]string)
+	namer := naming.Default()
+
+	for i := range d.Databases {
+		entry := &d.Databases[i]
+		fieldBase := fmt.Sprintf("database.databases[%d]", i)
+
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "database.dsn",
-				Message: err.Error(),
-				Hint:    "set a valid MySQL DSN in database.dsn/database.dsn_file",
+				Field:   fieldBase + ".name",
+				Message: "database name cannot be empty",
+				Hint:    "set a non-empty SQL TABLE_SCHEMA name",
 			})
-		case strings.HasPrefix(err.Error(), "database.mycnf_file"):
+			continue
+		}
+
+		if strings.Contains(name, ".") {
 			result.Errors = append(result.Errors, ValidationError{
-				Field:   "database.mycnf_file",
-				Message: err.Error(),
-				Hint:    "set a valid my.cnf file and include [client] database or database.database",
-			})
-		case strings.Contains(err.Error(), "mismatch"):
-			result.Errors = append(result.Errors, ValidationError{
-				Field:   "database.database",
-				Message: err.Error(),
-				Hint:    "either remove database.database or set it to match the DSN/my.cnf database",
-			})
-		default:
-			result.Errors = append(result.Errors, ValidationError{
-				Field:   "database.database",
-				Message: err.Error(),
-				Hint:    "set database.database or include a /database in database.dsn/database.dsn_file or database.mycnf_file",
+				Field:   fieldBase + ".name",
+				Message: fmt.Sprintf("database name %q cannot contain dots", name),
+				Hint:    "dots are used as separators in the table key notation (e.g. db.table)",
 			})
 		}
-		return
-	}
 
-	// Keep runtime behavior deterministic for callers that consume Database.Database.
-	d.Database = effectiveDatabase
+		lowerName := strings.ToLower(name)
+		if seenNames[lowerName] {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   fieldBase + ".name",
+				Message: fmt.Sprintf("duplicate database name %q", name),
+			})
+		}
+		seenNames[lowerName] = true
+
+		ns := strings.TrimSpace(entry.EffectiveNamespace())
+		lowerNS := strings.ToLower(ns)
+		if seenNamespaces[lowerNS] {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   fieldBase + ".namespace",
+				Message: fmt.Sprintf("duplicate effective namespace %q", ns),
+				Hint:    "each database must have a unique namespace alias",
+			})
+		}
+		seenNamespaces[lowerNS] = true
+		normalizedNS := namer.ToGraphQLTypeName(ns)
+		if prev, ok := seenNormalizedNamespaces[normalizedNS]; ok {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   fieldBase + ".namespace",
+				Message: fmt.Sprintf("namespace %q normalizes to the same GraphQL namespace as %q", ns, prev),
+				Hint:    "choose namespace aliases that remain distinct after GraphQL name normalization",
+			})
+		} else {
+			seenNormalizedNamespaces[normalizedNS] = ns
+		}
+
+		if entry.Filters != nil {
+			validateSchemaFilters(result, *entry.Filters)
+		}
+		if entry.Naming != nil {
+			validateNamingConfig(result, *entry.Naming)
+		}
+	}
 }
 
 func (t *DatabaseTLSConfig) validate(result *ValidationResult) {

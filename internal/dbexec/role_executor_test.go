@@ -157,6 +157,28 @@ func TestRoleValidationLogic(t *testing.T) {
 	}
 }
 
+// TestRoleExecutorConfig_MultiDB tests that MultiDB flag is stored correctly.
+func TestRoleExecutorConfig_MultiDB(t *testing.T) {
+	t.Run("MultiDB=true is stored", func(t *testing.T) {
+		executor := NewRoleExecutor(RoleExecutorConfig{
+			DB:      nil,
+			MultiDB: true,
+		})
+		if !executor.multiDB {
+			t.Error("expected multiDB=true")
+		}
+	})
+
+	t.Run("MultiDB=false by default", func(t *testing.T) {
+		executor := NewRoleExecutor(RoleExecutorConfig{
+			DB: nil,
+		})
+		if executor.multiDB {
+			t.Error("expected multiDB=false by default")
+		}
+	})
+}
+
 // TestRoleAwareRows tests the cleanup wrapper
 func TestRoleAwareRows(t *testing.T) {
 	t.Run("cleanup is called on Close", func(t *testing.T) {

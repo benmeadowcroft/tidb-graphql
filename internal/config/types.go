@@ -68,6 +68,34 @@ type DatabaseTLSConfig struct {
 	ServerName string `mapstructure:"server_name"`
 }
 
+// DatabaseEntryConfig describes one database schema to include in the GraphQL schema.
+// It contains schema-level behaviour only — no connection settings.
+type DatabaseEntryConfig struct {
+	// Name is the SQL TABLE_SCHEMA name (required).
+	Name string `mapstructure:"name"`
+
+	// Namespace is the GraphQL namespace alias. Defaults to Name when empty.
+	// In single-database mode (one entry, no Namespace set), the flat root query
+	// style is preserved for backward compatibility.
+	Namespace string `mapstructure:"namespace"`
+
+	// Filters are per-database schema filter overrides.
+	// If nil, the top-level SchemaFilters apply.
+	Filters *schemafilter.Config `mapstructure:"schema_filters"`
+
+	// Naming holds per-database naming overrides (type_overrides, plural_overrides,
+	// singular_overrides). If nil, the top-level Naming config applies.
+	Naming *naming.Config `mapstructure:"naming"`
+}
+
+// EffectiveNamespace returns the GraphQL namespace alias, defaulting to Name.
+func (d DatabaseEntryConfig) EffectiveNamespace() string {
+	if d.Namespace != "" {
+		return d.Namespace
+	}
+	return d.Name
+}
+
 // DatabaseConfig holds database connection parameters.
 type DatabaseConfig struct {
 	// ConnectionString is a complete go-sql-driver/mysql Data Source Name.
@@ -93,6 +121,22 @@ type DatabaseConfig struct {
 	PasswordFile   string `mapstructure:"password_file"`
 	PasswordPrompt bool   `mapstructure:"password_prompt"`
 	Database       string `mapstructure:"database"`
+
+	// Databases lists the SQL schemas to expose via GraphQL. When non-empty,
+	// this takes precedence over the legacy Database string field. After
+	// validation, Database is always kept in sync with Databases[0].Name so
+	// that DSN() and other single-db code paths continue to work unchanged.
+	//
+	// Example (single DB):
+	//   databases:
+	//     - name: myapp
+	//
+	// Example (multi DB):
+	//   databases:
+	//     - name: ecommerce
+	//       namespace: shop
+	//     - name: analytics
+	Databases []DatabaseEntryConfig `mapstructure:"databases"`
 
 	// TLS holds the TLS/SSL configuration for database connections.
 	TLS DatabaseTLSConfig `mapstructure:"tls"`

@@ -16,11 +16,15 @@ func (r *Resolver) applyNaming() {
 		return
 	}
 	namingConfig := r.singularNamer.Config()
-	schemanaming.Apply(r.dbSchema, naming.New(namingConfig, nil))
+	namespaceMap := map[string]string(nil)
+	if r.namespacedRoot {
+		namespaceMap = r.namespaceMap
+	}
+	schemanaming.ApplyWithNamespaces(r.dbSchema, naming.New(namingConfig, nil), namespaceMap, nil)
 }
 
 func (r *Resolver) singularQueryName(table introspection.Table) string {
-	key := table.Name
+	key := table.MapKey()
 	r.mu.RLock()
 	if cached, ok := r.singularQueryCache[key]; ok {
 		r.mu.RUnlock()
@@ -42,7 +46,7 @@ func (r *Resolver) singularQueryName(table introspection.Table) string {
 }
 
 func (r *Resolver) singularTypeName(table introspection.Table) string {
-	key := table.Name
+	key := table.MapKey()
 	r.mu.RLock()
 	if cached, ok := r.singularTypeCache[key]; ok {
 		r.mu.RUnlock()
@@ -65,7 +69,7 @@ func (r *Resolver) singularTypeName(table introspection.Table) string {
 
 func (r *Resolver) addTableQueries(fields graphql.Fields, table introspection.Table) graphql.Fields {
 	if r.dbSchema != nil {
-		if jc, ok := r.dbSchema.Junctions[table.Name]; ok && jc.Type == introspection.JunctionTypePure {
+		if jc, ok := r.junctionConfigForTable(table); ok && jc.Type == introspection.JunctionTypePure {
 			return fields
 		}
 	}
@@ -327,7 +331,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 	for _, rel := range table.Relationships {
 		if rel.IsManyToOne {
 			// Many-to-one: returns single object
-			relatedTable, err := r.findTable(rel.RemoteTable)
+			relatedTable, err := r.findRelationshipRemoteTable(rel)
 			if err != nil {
 				// Log error but continue - this shouldn't happen if schema was built correctly
 				// The error will be caught at query time instead
@@ -344,7 +348,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			}
 		} else if rel.IsOneToMany {
 			// One-to-many: returns connection (only when related table has PK)
-			relatedTable, err := r.findTable(rel.RemoteTable)
+			relatedTable, err := r.findRelationshipRemoteTable(rel)
 			if err != nil {
 				// Log error but continue - this shouldn't happen if schema was built correctly
 				// The error will be caught at query time instead
@@ -358,7 +362,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			}
 		} else if rel.IsManyToMany {
 			// Many-to-many through pure junction: returns connection (only when related table has PK)
-			relatedTable, err := r.findTable(rel.RemoteTable)
+			relatedTable, err := r.findRelationshipRemoteTable(rel)
 			if err != nil {
 				continue
 			}
@@ -370,7 +374,7 @@ func (r *Resolver) buildFieldsForTable(table introspection.Table) graphql.Fields
 			}
 		} else if rel.IsEdgeList {
 			// Edge list through attribute junction: returns connection (only when junction table has PK)
-			junctionTable, err := r.findTable(rel.JunctionTable)
+			junctionTable, err := r.findRelationshipJunctionTable(rel)
 			if err != nil {
 				continue
 			}
@@ -426,14 +430,65 @@ func (r *Resolver) connectionFieldArgs(table introspection.Table) graphql.FieldC
 	return args
 }
 
-// findTable finds a table by name in the schema
+// findTable finds a table by bare name. In single-database mode this is
+// unambiguous. In multi-database mode, prefer findTableByKey when the fully-
+// qualified key is available.
 func (r *Resolver) findTable(tableName string) (introspection.Table, error) {
+	if r.tableIndex != nil {
+		if t, ok := r.tableIndex[tableName]; ok {
+			return *t, nil
+		}
+	}
+	// Fallback to linear scan (handles zero-Key tables or stale index)
 	for _, table := range r.dbSchema.Tables {
 		if table.Name == tableName {
 			return table, nil
 		}
 	}
 	return introspection.Table{}, fmt.Errorf("table not found: %s", tableName)
+}
+
+// findTableByKey finds a table by its fully-qualified TableKey.MapKey(). This
+// is the preferred lookup in multi-database mode where bare table names may
+// collide across databases.
+func (r *Resolver) findTableByKey(mapKey string) (introspection.Table, error) {
+	if r.tableIndex != nil {
+		if t, ok := r.tableIndex[mapKey]; ok {
+			return *t, nil
+		}
+	}
+	return introspection.Table{}, fmt.Errorf("table not found: %s", mapKey)
+}
+
+func (r *Resolver) findRelationshipRemoteTable(rel introspection.Relationship) (introspection.Table, error) {
+	if !rel.RemoteTableKey.IsZero() {
+		if table, err := r.findTableByKey(rel.RemoteTableKey.MapKey()); err == nil {
+			return table, nil
+		}
+	}
+	return r.findTable(rel.RemoteTable)
+}
+
+func (r *Resolver) findRelationshipJunctionTable(rel introspection.Relationship) (introspection.Table, error) {
+	if !rel.JunctionTableKey.IsZero() {
+		if table, err := r.findTableByKey(rel.JunctionTableKey.MapKey()); err == nil {
+			return table, nil
+		}
+	}
+	return r.findTable(rel.JunctionTable)
+}
+
+func (r *Resolver) junctionConfigForTable(table introspection.Table) (introspection.JunctionConfig, bool) {
+	if r.dbSchema == nil {
+		return introspection.JunctionConfig{}, false
+	}
+	if jc, ok := r.dbSchema.Junctions[table.MapKey()]; ok {
+		return jc, true
+	}
+	if jc, ok := r.dbSchema.Junctions[table.Name]; ok {
+		return jc, true
+	}
+	return introspection.JunctionConfig{}, false
 }
 
 // buildAggregateFieldsType creates the aggregate fields container.

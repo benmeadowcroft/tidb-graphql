@@ -48,7 +48,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		return nil, false, nil
 	}
 
-	relatedTable, err := r.findTable(rel.RemoteTable)
+	relatedTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 	}
@@ -239,9 +239,19 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		return nil, false, nil
 	}
 
-	relatedTable, err := r.findTable(rel.RemoteTable)
+	relatedTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
+	}
+
+	// Look up the junction table as an introspection.Table (needed for qualified SQL).
+	// Prefer the fully-qualified key set by relationship building; fall back to
+	// the string name for backward compatibility.
+	// If the junction table is not in the schema (e.g. pure junction not in Tables),
+	// create a minimal table with just the name so SQL remains correct for single-db.
+	junctionTableObj, err := r.findRelationshipJunctionTable(rel)
+	if err != nil {
+		junctionTableObj = introspection.Table{Name: rel.JunctionTable, Key: rel.JunctionTableKey}
 	}
 
 	pkCols := introspection.PrimaryKeyColumns(relatedTable)
@@ -376,18 +386,18 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		partial, err := runBatchConnectionChunks(
 			p.Context, r, bp, len(chunk), metrics,
 			func() (planner.SQLQuery, error) {
-				return planner.PlanManyToManyConnectionBatch(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, selection, chunk, first, orderBy, whereClause)
+				return planner.PlanManyToManyConnectionBatch(relatedTable, junctionTableObj, junctionLocalColumns, junctionRemoteColumns, remoteColumns, selection, chunk, first, orderBy, whereClause)
 			},
 			func(results []map[string]interface{}) map[string][]map[string]interface{} {
 				return groupByAliases(results, parentAliases)
 			},
 			func(parentID string) (planner.SQLQuery, planner.SQLQuery, error) {
 				tuple := parentValueByKey[parentID]
-				count, err := planner.BuildManyToManyCountSQL(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
+				count, err := planner.BuildManyToManyCountSQL(relatedTable, junctionTableObj, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
 				if err != nil {
 					return planner.SQLQuery{}, planner.SQLQuery{}, err
 				}
-				agg, err := planner.BuildManyToManyAggregateBaseSQL(relatedTable, rel.JunctionTable, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
+				agg, err := planner.BuildManyToManyAggregateBaseSQL(relatedTable, junctionTableObj, junctionLocalColumns, junctionRemoteColumns, remoteColumns, tuple.Values, whereClause)
 				return count, agg, err
 			},
 		)
@@ -444,7 +454,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		return nil, false, nil
 	}
 
-	junctionTable, err := r.findTable(rel.JunctionTable)
+	junctionTable, err := r.findRelationshipJunctionTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
 	}
@@ -660,7 +670,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		return nil, false, nil
 	}
 
-	relatedTable, err := r.findTable(rel.RemoteTable)
+	relatedTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 	}

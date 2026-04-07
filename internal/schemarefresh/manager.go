@@ -44,8 +44,11 @@ type Snapshot struct {
 
 // Config controls schema refresh behavior.
 type Config struct {
-	DB                     *sql.DB
-	DatabaseName           string
+	DB           *sql.DB
+	DatabaseName string
+	// SchemaEntries is the canonical normalized schema-entry list used for
+	// fingerprinting and schema building.
+	SchemaEntries          []DatabaseBuildEntry
 	Limits                 *planner.PlanLimits
 	DefaultLimit           int
 	Logger                 *logging.Logger
@@ -68,8 +71,11 @@ type Config struct {
 
 // Manager maintains and refreshes schema snapshots.
 type Manager struct {
-	db                     *sql.DB
-	databaseName           string
+	db           *sql.DB
+	databaseName string
+	// schemaEntries is the canonical normalized schema-entry list used across
+	// fingerprinting and schema building.
+	schemaEntries          []DatabaseBuildEntry
 	limits                 *planner.PlanLimits
 	defaultLimit           int
 	logger                 *logging.Logger
@@ -147,9 +153,15 @@ func NewManager(ctx context.Context, cfg Config) (*Manager, error) {
 	if cfg.Metrics != nil {
 		recordRefreshFn = cfg.Metrics.RecordRefresh
 	}
+	schemaEntries := append([]DatabaseBuildEntry(nil), cfg.SchemaEntries...)
+	if len(schemaEntries) == 0 && cfg.DatabaseName != "" {
+		schemaEntries = []DatabaseBuildEntry{{Name: cfg.DatabaseName}}
+	}
+
 	manager := &Manager{
 		db:                     cfg.DB,
 		databaseName:           cfg.DatabaseName,
+		schemaEntries:          schemaEntries,
 		limits:                 cfg.Limits,
 		defaultLimit:           cfg.DefaultLimit,
 		logger:                 componentLogger,
@@ -558,8 +570,8 @@ func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, role string, fin
 	buildResult, err := BuildSchema(ctx, BuildSchemaConfig{
 		Queryer:                queryer,
 		Executor:               executor,
-		DatabaseName:           m.databaseName,
-		Filters:                m.filters,
+		Databases:              m.schemaEntries,
+		GlobalFilters:          m.filters,
 		UUIDColumns:            m.uuidColumns,
 		TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
 		TinyInt1IntColumns:     m.tinyInt1IntColumns,
@@ -667,24 +679,58 @@ func (m *Manager) computeFingerprintDetails(ctx context.Context) (fingerprintDet
 	return fallback, nil
 }
 
+// schemaInClause builds a SQL IN-clause placeholder string and a matching args
+// slice for the list of database names held by the manager.
+// e.g. for ["shop","auth"] it returns ("?,?", []any{"shop","auth"}).
+// Callers embed the placeholder directly in the WHERE clause.
+func (m *Manager) schemaInClause() (string, []any) {
+	dbs := make([]string, 0, len(m.schemaEntries))
+	for _, entry := range m.schemaEntries {
+		if entry.Name != "" {
+			dbs = append(dbs, entry.Name)
+		}
+	}
+	if len(dbs) == 0 {
+		// Safety fallback: use databaseName so queries always have at least one arg.
+		dbs = []string{m.databaseName}
+	}
+	placeholders := make([]byte, 0, len(dbs)*2)
+	args := make([]any, len(dbs))
+	for i, db := range dbs {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args[i] = db
+	}
+	return string(placeholders), args
+}
+
 func (m *Manager) computeTiDBStructuralFingerprint(ctx context.Context, queryer introspection.Queryer) (fingerprintDetails, error) {
 	// Structural mode fingerprints only behavior-relevant metadata.
 	// Comments are intentionally excluded to avoid churn without API/runtime impact.
+	//
+	// In multi-db mode TABLE_SCHEMA is included as the first selected column so
+	// rows from different databases are distinguished in the hash, and ORDER BY
+	// TABLE_SCHEMA ensures a deterministic order across databases.
+	inClause, args := m.schemaInClause()
+
 	components := []fingerprintComponent{
 		{
 			name: "tables",
 			query: `
-				SELECT TABLE_NAME, TABLE_TYPE
+				SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
 				FROM INFORMATION_SCHEMA.TABLES
-				WHERE TABLE_SCHEMA = ?
+				WHERE TABLE_SCHEMA IN (` + inClause + `)
 					AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
-				ORDER BY TABLE_NAME, TABLE_TYPE
+				ORDER BY TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
 			`,
 		},
 		{
 			name: "columns",
 			query: `
 				SELECT
+					TABLE_SCHEMA,
 					TABLE_NAME,
 					COLUMN_NAME,
 					CAST(ORDINAL_POSITION AS CHAR),
@@ -694,27 +740,29 @@ func (m *Manager) computeTiDBStructuralFingerprint(ctx context.Context, queryer 
 					COALESCE(COLUMN_DEFAULT, ''),
 					EXTRA
 				FROM INFORMATION_SCHEMA.COLUMNS
-				WHERE TABLE_SCHEMA = ?
-				ORDER BY TABLE_NAME, ORDINAL_POSITION, COLUMN_NAME
+				WHERE TABLE_SCHEMA IN (` + inClause + `)
+				ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION, COLUMN_NAME
 			`,
 		},
 		{
 			name: "primary_keys",
 			query: `
 				SELECT
+					TABLE_SCHEMA,
 					TABLE_NAME,
 					COLUMN_NAME,
 					CAST(ORDINAL_POSITION AS CHAR)
 				FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-				WHERE TABLE_SCHEMA = ?
+				WHERE TABLE_SCHEMA IN (` + inClause + `)
 					AND CONSTRAINT_NAME = 'PRIMARY'
-				ORDER BY TABLE_NAME, ORDINAL_POSITION, COLUMN_NAME
+				ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION, COLUMN_NAME
 			`,
 		},
 		{
 			name: "foreign_keys",
 			query: `
 				SELECT
+					TABLE_SCHEMA,
 					TABLE_NAME,
 					CONSTRAINT_NAME,
 					COLUMN_NAME,
@@ -723,15 +771,16 @@ func (m *Manager) computeTiDBStructuralFingerprint(ctx context.Context, queryer 
 					CAST(ORDINAL_POSITION AS CHAR),
 					COALESCE(CAST(POSITION_IN_UNIQUE_CONSTRAINT AS CHAR), '')
 				FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-				WHERE TABLE_SCHEMA = ?
+				WHERE TABLE_SCHEMA IN (` + inClause + `)
 					AND REFERENCED_TABLE_NAME IS NOT NULL
-				ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION, COLUMN_NAME
+				ORDER BY TABLE_SCHEMA, TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION, COLUMN_NAME
 			`,
 		},
 		{
 			name: "indexes",
 			query: `
 				SELECT
+					TABLE_SCHEMA,
 					TABLE_NAME,
 					INDEX_NAME,
 					CAST(NON_UNIQUE AS CHAR),
@@ -742,15 +791,15 @@ func (m *Manager) computeTiDBStructuralFingerprint(ctx context.Context, queryer 
 					COALESCE(NULLABLE, ''),
 					COALESCE(INDEX_TYPE, '')
 				FROM INFORMATION_SCHEMA.STATISTICS
-				WHERE TABLE_SCHEMA = ?
-				ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME
+				WHERE TABLE_SCHEMA IN (` + inClause + `)
+				ORDER BY TABLE_SCHEMA, TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX, COLUMN_NAME
 			`,
 		},
 	}
 
 	componentHashes := make(map[string]string, len(components))
 	for _, component := range components {
-		hash, _, err := m.hashComponentQuery(ctx, queryer, component.query, m.databaseName)
+		hash, _, err := m.hashComponentQuery(ctx, queryer, component.query, args...)
 		if err != nil {
 			return fingerprintDetails{}, fmt.Errorf("failed to hash %s component: %w", component.name, err)
 		}
@@ -765,17 +814,19 @@ func (m *Manager) computeTiDBStructuralFingerprint(ctx context.Context, queryer 
 }
 
 func (m *Manager) computeTiDBLightweightFingerprint(ctx context.Context, queryer introspection.Queryer) (fingerprintDetails, error) {
+	inClause, args := m.schemaInClause()
 	query := `
 		SELECT
+			TABLE_SCHEMA,
 			TABLE_NAME,
 			COALESCE(CAST(CREATE_TIME AS CHAR), ''),
 			COALESCE(CAST(UPDATE_TIME AS CHAR), '')
 		FROM INFORMATION_SCHEMA.TABLES
-		WHERE TABLE_SCHEMA = ?
+		WHERE TABLE_SCHEMA IN (` + inClause + `)
 			AND TABLE_TYPE = 'BASE TABLE'
-		ORDER BY TABLE_NAME
+		ORDER BY TABLE_SCHEMA, TABLE_NAME
 	`
-	componentHash, _, err := m.hashComponentQuery(ctx, queryer, query, m.databaseName)
+	componentHash, _, err := m.hashComponentQuery(ctx, queryer, query, args...)
 	if err != nil {
 		return fingerprintDetails{}, err
 	}

@@ -97,6 +97,54 @@ func (d *DatabaseConfig) EffectiveDatabaseName() (name string, source string, er
 	return resolveEffectiveDatabaseName(d.Database, d.ConnectionString, d.MyCnfFile)
 }
 
+// EffectiveDatabaseNames returns the SQL TABLE_SCHEMA names to expose via GraphQL.
+// When Databases is populated (new config style), it returns the Names from that slice.
+// Otherwise it returns a single-element slice containing the legacy Database field,
+// which is always normalised by Load/Validate before callers see it.
+func (d *DatabaseConfig) EffectiveDatabaseNames() []string {
+	return d.SchemaDatabaseNames()
+}
+
+// SchemaEntries returns the canonical schema-entry list used by runtime code.
+// It is always derived from Databases when present, falling back to the legacy
+// Database field for single-database deployments.
+func (d *DatabaseConfig) SchemaEntries() []DatabaseEntryConfig {
+	if len(d.Databases) > 0 {
+		entries := make([]DatabaseEntryConfig, len(d.Databases))
+		copy(entries, d.Databases)
+		return entries
+	}
+	if d.Database != "" {
+		return []DatabaseEntryConfig{{Name: d.Database}}
+	}
+	return nil
+}
+
+// SchemaDatabaseNames returns the SQL TABLE_SCHEMA names from SchemaEntries.
+func (d *DatabaseConfig) SchemaDatabaseNames() []string {
+	entries := d.SchemaEntries()
+	if len(entries) == 0 {
+		return nil
+	}
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.Name
+	}
+	return names
+}
+
+// normalizeSchemaEntries keeps Database and Databases synchronized so the
+// Databases slice is the canonical schema-selection model at runtime.
+func (d *DatabaseConfig) normalizeSchemaEntries() {
+	if len(d.Databases) > 0 {
+		d.Database = d.Databases[0].Name
+		return
+	}
+	if d.Database != "" {
+		d.Databases = []DatabaseEntryConfig{{Name: d.Database}}
+	}
+}
+
 func resolveEffectiveDatabaseName(databaseName string, connectionString string, myCnfFile string) (name string, source string, err error) {
 	configDatabase := strings.TrimSpace(databaseName)
 	dsn := strings.TrimSpace(connectionString)

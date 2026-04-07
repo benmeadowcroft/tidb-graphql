@@ -21,7 +21,7 @@ func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspectio
 	aliases := BatchParentAliases(len(remoteColumns))
 
 	builder := sq.Select(columnNames(relatedTable, columns)...).
-		From(sqlutil.QuoteIdentifier(relatedTable.Name))
+		From(relatedTable.SQLFrom())
 
 	if len(remoteColumns) == 1 {
 		flat := make([]interface{}, 0, len(values))
@@ -57,7 +57,7 @@ func PlanManyToOneBatch(relatedTable introspection.Table, columns []introspectio
 
 // PlanManyToManyBatch builds a batched SQL query for many-to-many relationships with per-parent limits.
 func PlanManyToManyBatch(
-	junctionTable string,
+	junctionTable introspection.Table,
 	targetTable introspection.Table,
 	junctionLocalFKColumns []string,
 	junctionRemoteFKColumns []string,
@@ -75,8 +75,8 @@ func PlanManyToManyBatch(
 		return SQLQuery{}, fmt.Errorf("many-to-many batch remote key mapping width mismatch")
 	}
 
-	quotedTarget := sqlutil.QuoteIdentifier(targetTable.Name)
-	quotedJunction := sqlutil.QuoteIdentifier(junctionTable)
+	quotedTarget := targetTable.SQLFrom()
+	quotedJunction := junctionTable.SQLFrom()
 	joinPredicates := make([]string, len(junctionRemoteFKColumns))
 	for i := range junctionRemoteFKColumns {
 		joinPredicates[i] = fmt.Sprintf(
@@ -110,7 +110,7 @@ func PlanEdgeListBatch(
 		return SQLQuery{}, fmt.Errorf("edge-list batch requires at least one local FK column")
 	}
 
-	quotedTable := sqlutil.QuoteIdentifier(junctionTable.Name)
+	quotedTable := junctionTable.SQLFrom()
 	partitionColumns := quotedColumnNames(junctionLocalFKColumns)
 	orderClause, err := batchOrderClause(junctionTable, orderBy)
 	if err != nil {
@@ -222,7 +222,7 @@ func PlanOneToManyBatch(
 	}
 
 	quotedRemoteColumn := sqlutil.QuoteIdentifier(remoteColumn)
-	quotedTable := sqlutil.QuoteIdentifier(relatedTable.Name)
+	quotedTable := relatedTable.SQLFrom()
 
 	whereSQL := ""
 	var whereArgs []interface{}

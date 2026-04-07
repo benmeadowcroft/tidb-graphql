@@ -58,7 +58,7 @@ func applyCore(schema *introspection.Schema, namer *naming.Namer, namespaceMap m
 		effectiveNamer := namer
 		if namingPerDB != nil {
 			if dbCfg, ok := namingPerDB[table.Key.Database]; ok {
-				effectiveNamer = naming.New(dbCfg, nil)
+				effectiveNamer = naming.New(mergedNamingConfig(namer.Config(), dbCfg), nil)
 			}
 		}
 
@@ -226,4 +226,27 @@ func findTypeOverride(globalOverrides map[string]string, namingPerDB map[string]
 		}
 	}
 	return "", false
+}
+
+func mergedNamingConfig(base, override naming.Config) naming.Config {
+	merged := naming.DefaultConfig()
+	for key, value := range base.PluralOverrides {
+		merged.PluralOverrides[key] = value
+	}
+	for key, value := range base.SingularOverrides {
+		merged.SingularOverrides[key] = value
+	}
+	for key, value := range base.TypeOverrides {
+		merged.TypeOverrides[key] = value
+	}
+	for key, value := range override.PluralOverrides {
+		merged.PluralOverrides[key] = value
+	}
+	for key, value := range override.SingularOverrides {
+		merged.SingularOverrides[key] = value
+	}
+	for key, value := range override.TypeOverrides {
+		merged.TypeOverrides[key] = value
+	}
+	return merged
 }

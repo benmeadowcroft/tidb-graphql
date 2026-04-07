@@ -233,6 +233,28 @@ func TestApplyWithNamespaces_QualifiedKeyTypeOverride(t *testing.T) {
 	assert.Equal(t, "Shop_Purchase", schema.Tables[0].GraphQLTypeName)
 }
 
+func TestApplyWithNamespaces_PreservesGlobalInflectionOverrides(t *testing.T) {
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{
+			{Name: "staff", Key: tk("shop", "staff")},
+		},
+	}
+
+	namer := naming.New(naming.Config{
+		SingularOverrides: map[string]string{
+			"staff": "staff_member",
+		},
+	}, nil)
+	namespaceMap := map[string]string{"shop": "shop"}
+	namingPerDB := map[string]naming.Config{
+		"shop": naming.DefaultConfig(),
+	}
+
+	ApplyWithNamespaces(schema, namer, namespaceMap, namingPerDB)
+
+	assert.Equal(t, "Shop_StaffMember", schema.Tables[0].GraphQLTypeName)
+}
+
 func TestApplyWithNamespaces_NilNamespaceMapFallsBackToApply(t *testing.T) {
 	schema := &introspection.Schema{
 		Tables: []introspection.Table{

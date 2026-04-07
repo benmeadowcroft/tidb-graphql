@@ -48,7 +48,7 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 		return nil, false, nil
 	}
 
-	relatedTable, err := r.findTable(rel.RemoteTable)
+	relatedTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 	}
@@ -239,7 +239,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		return nil, false, nil
 	}
 
-	relatedTable, err := r.findTable(rel.RemoteTable)
+	relatedTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 	}
@@ -249,13 +249,9 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	// the string name for backward compatibility.
 	// If the junction table is not in the schema (e.g. pure junction not in Tables),
 	// create a minimal table with just the name so SQL remains correct for single-db.
-	junctionTableKey := rel.JunctionTableKey.MapKey()
-	if junctionTableKey == "" {
-		junctionTableKey = rel.JunctionTable
-	}
-	junctionTableObj, _ := r.findTableByKey(junctionTableKey)
-	if junctionTableObj.Name == "" {
-		junctionTableObj = introspection.Table{Name: rel.JunctionTable}
+	junctionTableObj, err := r.findRelationshipJunctionTable(rel)
+	if err != nil {
+		junctionTableObj = introspection.Table{Name: rel.JunctionTable, Key: rel.JunctionTableKey}
 	}
 
 	pkCols := introspection.PrimaryKeyColumns(relatedTable)
@@ -458,7 +454,7 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 		return nil, false, nil
 	}
 
-	junctionTable, err := r.findTable(rel.JunctionTable)
+	junctionTable, err := r.findRelationshipJunctionTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
 	}
@@ -674,7 +670,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		return nil, false, nil
 	}
 
-	relatedTable, err := r.findTable(rel.RemoteTable)
+	relatedTable, err := r.findRelationshipRemoteTable(rel)
 	if err != nil {
 		return nil, true, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 	}

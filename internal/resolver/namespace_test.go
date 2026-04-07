@@ -172,6 +172,68 @@ func TestBuildGraphQLSchema_FlatWhenNoNamespaceMap(t *testing.T) {
 	assert.NotContains(t, fields, "myapp", "flat schema should not have namespace wrapper")
 }
 
+func TestFindRelationshipRemoteTable_PrefersQualifiedKey(t *testing.T) {
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{
+			{Name: "users", Key: tablekey.TableKey{Database: "shop", Table: "users"}},
+			{Name: "users", Key: tablekey.TableKey{Database: "auth", Table: "users"}},
+		},
+	}
+
+	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	relatedTable, err := r.findRelationshipRemoteTable(introspection.Relationship{
+		RemoteTable:    "users",
+		RemoteTableKey: tablekey.TableKey{Database: "shop", Table: "users"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "shop", relatedTable.Key.Database)
+}
+
+func TestJunctionConfigForTable_UsesQualifiedKey(t *testing.T) {
+	schema := &introspection.Schema{
+		Junctions: introspection.JunctionMap{
+			"shop.user_roles": {Table: "user_roles", Type: introspection.JunctionTypePure},
+			"auth.user_roles": {Table: "user_roles", Type: introspection.JunctionTypeAttribute},
+		},
+	}
+
+	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	shopConfig, ok := r.junctionConfigForTable(introspection.Table{
+		Name: "user_roles",
+		Key:  tablekey.TableKey{Database: "shop", Table: "user_roles"},
+	})
+	require.True(t, ok)
+	assert.Equal(t, introspection.JunctionTypePure, shopConfig.Type)
+
+	authConfig, ok := r.junctionConfigForTable(introspection.Table{
+		Name: "user_roles",
+		Key:  tablekey.TableKey{Database: "auth", Table: "user_roles"},
+	})
+	require.True(t, ok)
+	assert.Equal(t, introspection.JunctionTypeAttribute, authConfig.Type)
+}
+
+func TestBuildNamespacedGraphQLSchema_RejectsNormalizedNamespaceCollision(t *testing.T) {
+	schema := &introspection.Schema{
+		Tables: []introspection.Table{
+			{Name: "orders", Key: tablekey.TableKey{Database: "db_one", Table: "orders"}},
+			{Name: "users", Key: tablekey.TableKey{Database: "db_two", Table: "users"}},
+		},
+	}
+
+	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	r.SetNamespaceMap(map[string]string{
+		"db_one": "my_app",
+		"db_two": "MyApp",
+	})
+
+	_, err := r.BuildGraphQLSchema()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `normalize to the GraphQL namespace`)
+}
+
 // unwrapGraphQLNonNull peels one layer of *graphql.NonNull if present.
 func unwrapGraphQLNonNull(t graphql.Type) graphql.Type {
 	if nn, ok := t.(*graphql.NonNull); ok {

@@ -64,41 +64,41 @@ type Resolver struct {
 	// Built once when the schema is loaded; keyed both by MapKey() (e.g.
 	// "mydb.users" in multi-db mode) and by bare table name (for single-db
 	// compat). In single-db mode the two are identical.
-	tableIndex             map[string]*introspection.Table
-	singularQueryCache     map[string]string
-	singularTypeCache      map[string]string
-	singularNamer          *naming.Namer
-	orderDirection         *graphql.Enum
-	orderByPolicy          *graphql.Enum
-	nonNegativeInt         *graphql.Scalar
-	bigIntType             *graphql.Scalar
-	decimalType            *graphql.Scalar
-	jsonType               *graphql.Scalar
-	dateType               *graphql.Scalar
-	timeType               *graphql.Scalar
-	yearType               *graphql.Scalar
-	bytesType              *graphql.Scalar
-	uuidType               *graphql.Scalar
-	vectorType             *graphql.Scalar
-	nodeInterface          *graphql.Interface
-	pageInfoType           *graphql.Object
-	vectorDistance         *graphql.Enum
-	edgeCache              map[string]*graphql.Object
-	connectionCache        map[string]*graphql.Object
-	limits                 *planner.PlanLimits
-	defaultLimit           int
-	filters                schemafilter.Config
+	tableIndex         map[string]*introspection.Table
+	singularQueryCache map[string]string
+	singularTypeCache  map[string]string
+	singularNamer      *naming.Namer
+	orderDirection     *graphql.Enum
+	orderByPolicy      *graphql.Enum
+	nonNegativeInt     *graphql.Scalar
+	bigIntType         *graphql.Scalar
+	decimalType        *graphql.Scalar
+	jsonType           *graphql.Scalar
+	dateType           *graphql.Scalar
+	timeType           *graphql.Scalar
+	yearType           *graphql.Scalar
+	bytesType          *graphql.Scalar
+	uuidType           *graphql.Scalar
+	vectorType         *graphql.Scalar
+	nodeInterface      *graphql.Interface
+	pageInfoType       *graphql.Object
+	vectorDistance     *graphql.Enum
+	edgeCache          map[string]*graphql.Object
+	connectionCache    map[string]*graphql.Object
+	limits             *planner.PlanLimits
+	defaultLimit       int
+	filters            schemafilter.Config
 	// filtersPerDB holds per-database schema filter overrides used in multi-db mode.
 	// When non-empty, mutationFiltersFor looks up the filter config by Key.Database
 	// before falling back to filters.
-	filtersPerDB           map[string]schemafilter.Config
+	filtersPerDB map[string]schemafilter.Config
 	// namespaceMap maps each physical SQL database name to its GraphQL namespace alias.
 	// When non-empty, BuildGraphQLSchema wraps table queries/mutations inside
 	// {NsPascalCase}_Query / {NsPascalCase}_Mutation objects rather than placing them
 	// directly on the root Query/Mutation types.
-	namespaceMap           map[string]string
-	vectorSearch           VectorSearchConfig
-	mu                     sync.RWMutex
+	namespaceMap map[string]string
+	vectorSearch VectorSearchConfig
+	mu           sync.RWMutex
 }
 
 // VectorSearchConfig controls generated vector-search fields.
@@ -324,6 +324,7 @@ func (r *Resolver) buildNamespacedGraphQLSchema() (graphql.Schema, error) {
 	type nsEntry struct {
 		nsPascal string
 		nsAlias  string
+		dbName   string
 		tables   []introspection.Table
 	}
 	seen := make(map[string]int) // nsPascal -> index in entries
@@ -341,9 +342,12 @@ func (r *Resolver) buildNamespacedGraphQLSchema() (graphql.Schema, error) {
 			nsPascal = nsAlias
 		}
 		idx, exists := seen[nsPascal]
+		if exists && entries[idx].dbName != dbName {
+			return graphql.Schema{}, fmt.Errorf("databases %q and %q both normalize to the GraphQL namespace %q", entries[idx].dbName, dbName, nsPascal)
+		}
 		if !exists {
 			idx = len(entries)
-			entries = append(entries, nsEntry{nsPascal: nsPascal, nsAlias: nsAlias})
+			entries = append(entries, nsEntry{nsPascal: nsPascal, nsAlias: nsAlias, dbName: dbName})
 			seen[nsPascal] = idx
 		}
 		entries[idx].tables = append(entries[idx].tables, table)
@@ -1003,7 +1007,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			}
 		}
 
-		relatedTable, err := r.findTable(rel.RemoteTable)
+		relatedTable, err := r.findRelationshipRemoteTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 		}
@@ -1065,20 +1069,16 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			}
 		}
 
-		relatedTable, err := r.findTable(rel.RemoteTable)
+		relatedTable, err := r.findRelationshipRemoteTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 		}
 
 		// Look up junction table as an introspection.Table for qualified SQL support.
 		// Fall back to a minimal table if not found (e.g. pure junctions not in Tables).
-		junctionKey := rel.JunctionTableKey.MapKey()
-		if junctionKey == "" {
-			junctionKey = rel.JunctionTable
-		}
-		junctionTableObj, _ := r.findTableByKey(junctionKey)
-		if junctionTableObj.Name == "" {
-			junctionTableObj = introspection.Table{Name: rel.JunctionTable}
+		junctionTableObj, err := r.findRelationshipJunctionTable(rel)
+		if err != nil {
+			junctionTableObj = introspection.Table{Name: rel.JunctionTable, Key: rel.JunctionTableKey}
 		}
 
 		field := firstFieldAST(p.Info.FieldASTs)
@@ -1148,7 +1148,7 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 			}
 		}
 
-		junctionTable, err := r.findTable(rel.JunctionTable)
+		junctionTable, err := r.findRelationshipJunctionTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find junction table %s: %w", rel.JunctionTable, err)
 		}
@@ -1279,9 +1279,9 @@ func (r *Resolver) addRelationshipWhereFields(fields graphql.InputObjectConfigFi
 		var err error
 		switch {
 		case rel.IsEdgeList:
-			relatedTable, err = r.findTable(rel.JunctionTable)
+			relatedTable, err = r.findRelationshipJunctionTable(rel)
 		default:
-			relatedTable, err = r.findTable(rel.RemoteTable)
+			relatedTable, err = r.findRelationshipRemoteTable(rel)
 		}
 		if err != nil {
 			continue
@@ -2377,7 +2377,7 @@ func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspe
 		}
 
 		// Query the related table
-		relatedTable, err := r.findTable(rel.RemoteTable)
+		relatedTable, err := r.findRelationshipRemoteTable(rel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find related table %s: %w", rel.RemoteTable, err)
 		}

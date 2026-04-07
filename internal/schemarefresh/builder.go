@@ -108,13 +108,13 @@ func BuildSchema(ctx context.Context, cfg BuildSchemaConfig) (*BuildSchemaResult
 
 // BuildMultiDatabaseConfig defines inputs for multi-database schema assembly.
 type BuildMultiDatabaseConfig struct {
-	Queryer                introspection.Queryer
-	Executor               dbexec.QueryExecutor
+	Queryer  introspection.Queryer
+	Executor dbexec.QueryExecutor
 	// Databases lists the SQL schemas to introspect (at least one required).
-	Databases              []DatabaseBuildEntry
+	Databases []DatabaseBuildEntry
 	// GlobalFilters are the default schema filters applied to every database
 	// that does not provide its own DatabaseBuildEntry.Filters override.
-	GlobalFilters          schemafilter.Config
+	GlobalFilters schemafilter.Config
 	// Type mapping overrides applied to every database.
 	UUIDColumns            map[string][]string
 	TinyInt1BooleanColumns map[string][]string
@@ -159,6 +159,7 @@ func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig)
 	// OR when any single database has an explicit Namespace set.
 	namespaceMap := make(map[string]string, len(cfg.Databases))
 	namingPerDB := make(map[string]naming.Config, len(cfg.Databases))
+	normalizedNamespaceOwners := make(map[string]string, len(cfg.Databases))
 	useNamespaces := len(cfg.Databases) > 1
 	for _, entry := range cfg.Databases {
 		ns := entry.Namespace
@@ -167,6 +168,11 @@ func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig)
 		} else {
 			useNamespaces = true // explicit namespace on a single-db entry triggers it too
 		}
+		normalizedNS := namer.ToGraphQLTypeName(ns)
+		if prev, ok := normalizedNamespaceOwners[normalizedNS]; ok && prev != entry.Name {
+			return nil, fmt.Errorf("databases %q and %q both normalize to the GraphQL namespace %q", prev, entry.Name, normalizedNS)
+		}
+		normalizedNamespaceOwners[normalizedNS] = entry.Name
 		namespaceMap[entry.Name] = ns
 		if entry.Naming != nil {
 			namingPerDB[entry.Name] = *entry.Naming

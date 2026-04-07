@@ -88,7 +88,7 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 		}
 
 		// Skip M2O relationships for pure junction tables (hidden)
-		jType := junctionTypes[table.Name]
+		jType := junctionTypes[table.MapKey()]
 		if jType == JunctionTypePure {
 			continue
 		}
@@ -117,12 +117,12 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			// equals the source database name and the FK is intra-database.
 			isCrossDatabase := fk.ReferencedDatabase != "" && fk.ReferencedDatabase != table.Key.Database
 			rel := Relationship{
-				IsManyToOne:     true,
-				IsCrossDatabase: isCrossDatabase,
-				LocalColumns:    localColumns,
-				RemoteTable:     fk.ReferencedTable,
-				RemoteColumns:   remoteColumns,
-				RemoteTableKey:  tablekey.TableKey{Database: remoteDB, Table: fk.ReferencedTable},
+				IsManyToOne:      true,
+				IsCrossDatabase:  isCrossDatabase,
+				LocalColumns:     localColumns,
+				RemoteTable:      fk.ReferencedTable,
+				RemoteColumns:    remoteColumns,
+				RemoteTableKey:   tablekey.TableKey{Database: remoteDB, Table: fk.ReferencedTable},
 				GraphQLFieldName: fieldName,
 			}
 			table.Relationships = append(table.Relationships, rel)
@@ -147,7 +147,7 @@ func buildRelationships(ctx context.Context, schema *Schema, namer *naming.Namer
 			}
 
 			// Skip one-to-many from junction tables (edge or pure)
-			if junctionTypes[otherTable.Name] != JunctionTypeNone {
+			if junctionTypes[otherTable.MapKey()] != JunctionTypeNone {
 				continue
 			}
 

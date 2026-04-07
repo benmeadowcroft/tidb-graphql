@@ -392,6 +392,17 @@ func TestConfig_Validate(t *testing.T) {
 		assert.False(t, result.HasErrors())
 	})
 
+	t.Run("database namespaces must stay distinct after GraphQL normalization", func(t *testing.T) {
+		cfg := validConfig()
+		cfg.Database.Databases = []DatabaseEntryConfig{
+			{Name: "shop", Namespace: "my_app"},
+			{Name: "auth", Namespace: "MyApp"},
+		}
+		result := cfg.Validate()
+		assert.True(t, result.HasErrors())
+		assert.Contains(t, result.Error(), "same GraphQL namespace")
+	})
+
 	t.Run("rate limit disabled with values warns", func(t *testing.T) {
 		cfg := validConfig()
 		cfg.Server.RateLimitEnabled = false

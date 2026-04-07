@@ -337,6 +337,8 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 func validateDatabasesArray(result *ValidationResult, d *DatabaseConfig) {
 	seenNames := make(map[string]bool)
 	seenNamespaces := make(map[string]bool)
+	seenNormalizedNamespaces := make(map[string]string)
+	namer := naming.Default()
 
 	for i := range d.Databases {
 		entry := &d.Databases[i]
@@ -379,6 +381,16 @@ func validateDatabasesArray(result *ValidationResult, d *DatabaseConfig) {
 			})
 		}
 		seenNamespaces[lowerNS] = true
+		normalizedNS := namer.ToGraphQLTypeName(ns)
+		if prev, ok := seenNormalizedNamespaces[normalizedNS]; ok {
+			result.Errors = append(result.Errors, ValidationError{
+				Field:   fieldBase + ".namespace",
+				Message: fmt.Sprintf("namespace %q normalizes to the same GraphQL namespace as %q", ns, prev),
+				Hint:    "choose namespace aliases that remain distinct after GraphQL name normalization",
+			})
+		} else {
+			seenNormalizedNamespaces[normalizedNS] = ns
+		}
 
 		if entry.Filters != nil {
 			validateSchemaFilters(result, *entry.Filters)

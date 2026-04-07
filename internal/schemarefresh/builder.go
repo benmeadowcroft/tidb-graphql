@@ -33,12 +33,20 @@ type DatabaseBuildEntry struct {
 	Naming *naming.Config
 }
 
-// BuildSchemaConfig defines inputs for shared schema assembly.
+// EffectiveNamespace returns the GraphQL namespace alias, defaulting to Name.
+func (d DatabaseBuildEntry) EffectiveNamespace() string {
+	if d.Namespace != "" {
+		return d.Namespace
+	}
+	return d.Name
+}
+
+// BuildSchemaConfig defines inputs for schema assembly across one or more databases.
 type BuildSchemaConfig struct {
 	Queryer                introspection.Queryer
 	Executor               dbexec.QueryExecutor
-	DatabaseName           string
-	Filters                schemafilter.Config
+	Databases              []DatabaseBuildEntry
+	GlobalFilters          schemafilter.Config
 	UUIDColumns            map[string][]string
 	TinyInt1BooleanColumns map[string][]string
 	TinyInt1IntColumns     map[string][]string
@@ -55,92 +63,31 @@ type BuildSchemaResult struct {
 	GraphQLSchema graphql.Schema
 }
 
+func buildNamespaceConfig(entries []DatabaseBuildEntry, namer *naming.Namer) (map[string]string, map[string]naming.Config, bool, error) {
+	namespaceMap := make(map[string]string, len(entries))
+	namingPerDB := make(map[string]naming.Config, len(entries))
+	normalizedNamespaceOwners := make(map[string]string, len(entries))
+	namespacedRoot := len(entries) > 1
+	for _, entry := range entries {
+		ns := entry.EffectiveNamespace()
+		if entry.Namespace != "" {
+			namespacedRoot = true
+		}
+		normalizedNS := namer.ToGraphQLTypeName(ns)
+		if prev, ok := normalizedNamespaceOwners[normalizedNS]; ok && prev != entry.Name {
+			return nil, nil, false, fmt.Errorf("databases %q and %q both normalize to the GraphQL namespace %q", prev, entry.Name, normalizedNS)
+		}
+		normalizedNamespaceOwners[normalizedNS] = entry.Name
+		namespaceMap[entry.Name] = ns
+		if entry.Naming != nil {
+			namingPerDB[entry.Name] = *entry.Naming
+		}
+	}
+	return namespaceMap, namingPerDB, namespacedRoot, nil
+}
+
 // BuildSchema runs the canonical schema assembly pipeline used by runtime and tests.
 func BuildSchema(ctx context.Context, cfg BuildSchemaConfig) (*BuildSchemaResult, error) {
-	if cfg.Queryer == nil {
-		return nil, fmt.Errorf("schema builder requires an introspection queryer")
-	}
-	if cfg.Executor == nil {
-		return nil, fmt.Errorf("schema builder requires a query executor")
-	}
-
-	dbSchema, err := introspection.IntrospectDatabaseContext(ctx, cfg.Queryer, cfg.DatabaseName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to introspect database: %w", err)
-	}
-
-	schemafilter.Apply(ctx, dbSchema, cfg.Filters)
-
-	if err := introspection.ApplyTinyInt1TypeOverrides(dbSchema, cfg.TinyInt1BooleanColumns, cfg.TinyInt1IntColumns); err != nil {
-		return nil, fmt.Errorf("failed to apply tinyint(1) type mappings: %w", err)
-	}
-
-	if err := introspection.ApplyUUIDTypeOverrides(dbSchema, cfg.UUIDColumns); err != nil {
-		return nil, fmt.Errorf("failed to apply UUID type mappings: %w", err)
-	}
-
-	junctions := junction.ClassifyJunctions(dbSchema)
-	dbSchema.Junctions = junctions.ToIntrospectionMap()
-
-	namer := naming.New(cfg.Naming, nil)
-	if err := introspection.RebuildRelationshipsWithJunctions(ctx, dbSchema, namer, dbSchema.Junctions); err != nil {
-		return nil, fmt.Errorf("failed to rebuild relationships: %w", err)
-	}
-	schemanaming.Apply(dbSchema, namer)
-
-	res := resolver.NewResolver(cfg.Executor, dbSchema, cfg.Limits, cfg.DefaultLimit, cfg.Filters, cfg.Naming)
-	if cfg.VectorRequireIndex || cfg.VectorMaxTopK > 0 {
-		res.SetVectorSearchConfig(resolver.VectorSearchConfig{
-			RequireIndex: cfg.VectorRequireIndex,
-			MaxTopK:      cfg.VectorMaxTopK,
-		})
-	}
-	graphqlSchema, err := res.BuildGraphQLSchema()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build GraphQL schema: %w", err)
-	}
-
-	return &BuildSchemaResult{
-		DBSchema:      dbSchema,
-		GraphQLSchema: graphqlSchema,
-	}, nil
-}
-
-// BuildMultiDatabaseConfig defines inputs for multi-database schema assembly.
-type BuildMultiDatabaseConfig struct {
-	Queryer  introspection.Queryer
-	Executor dbexec.QueryExecutor
-	// Databases lists the SQL schemas to introspect (at least one required).
-	Databases []DatabaseBuildEntry
-	// GlobalFilters are the default schema filters applied to every database
-	// that does not provide its own DatabaseBuildEntry.Filters override.
-	GlobalFilters schemafilter.Config
-	// Type mapping overrides applied to every database.
-	UUIDColumns            map[string][]string
-	TinyInt1BooleanColumns map[string][]string
-	TinyInt1IntColumns     map[string][]string
-	Naming                 naming.Config
-	Limits                 *planner.PlanLimits
-	DefaultLimit           int
-	VectorRequireIndex     bool
-	VectorMaxTopK          int
-}
-
-// BuildMultiDatabaseSchema introspects each database, merges the schemas, resolves
-// cross-database relationships, and builds a unified GraphQL schema.
-//
-// Pipeline per database:
-//  1. IntrospectDatabaseContext — tables get Key.Database set to entry.Name.
-//  2. Per-db filter application (falls back to GlobalFilters).
-//  3. Type override application (UUID, tinyint(1)).
-//  4. Intra-db junction classification + relationship building.
-//
-// After all databases are processed:
-//  5. Schemas are merged into a single introspection.Schema.
-//  6. ResolveCrossDatabaseRelationships adds cross-db one-to-many relationships.
-//  7. schemanaming.Apply names GraphQL types (namespace-aware naming in Phase 3).
-//  8. A Resolver is built with per-db filter overrides and a GraphQL schema produced.
-func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig) (*BuildSchemaResult, error) {
 	if cfg.Queryer == nil {
 		return nil, fmt.Errorf("schema builder requires an introspection queryer")
 	}
@@ -153,30 +100,9 @@ func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig)
 
 	namer := naming.New(cfg.Naming, nil)
 	filtersPerDB := make(map[string]schemafilter.Config, len(cfg.Databases))
-
-	// Build namespace map and per-db naming map from the database entries.
-	// Namespace-prefixed type names are generated when there are multiple databases
-	// OR when any single database has an explicit Namespace set.
-	namespaceMap := make(map[string]string, len(cfg.Databases))
-	namingPerDB := make(map[string]naming.Config, len(cfg.Databases))
-	normalizedNamespaceOwners := make(map[string]string, len(cfg.Databases))
-	useNamespaces := len(cfg.Databases) > 1
-	for _, entry := range cfg.Databases {
-		ns := entry.Namespace
-		if ns == "" {
-			ns = entry.Name
-		} else {
-			useNamespaces = true // explicit namespace on a single-db entry triggers it too
-		}
-		normalizedNS := namer.ToGraphQLTypeName(ns)
-		if prev, ok := normalizedNamespaceOwners[normalizedNS]; ok && prev != entry.Name {
-			return nil, fmt.Errorf("databases %q and %q both normalize to the GraphQL namespace %q", prev, entry.Name, normalizedNS)
-		}
-		normalizedNamespaceOwners[normalizedNS] = entry.Name
-		namespaceMap[entry.Name] = ns
-		if entry.Naming != nil {
-			namingPerDB[entry.Name] = *entry.Naming
-		}
+	namespaceMap, namingPerDB, namespacedRoot, err := buildNamespaceConfig(cfg.Databases, namer)
+	if err != nil {
+		return nil, err
 	}
 
 	var allTables []introspection.Table
@@ -231,20 +157,21 @@ func BuildMultiDatabaseSchema(ctx context.Context, cfg BuildMultiDatabaseConfig)
 		return nil, fmt.Errorf("failed to resolve cross-database relationships: %w", err)
 	}
 
-	// 7. GraphQL type naming — namespace-aware when multiple databases are configured
-	// or when any entry carries an explicit Namespace alias.
-	if useNamespaces {
-		schemanaming.ApplyWithNamespaces(merged, namer, namespaceMap, namingPerDB)
-	} else {
-		schemanaming.Apply(merged, namer)
+	// 7. GraphQL type naming.
+	namingNamespaceMap := map[string]string(nil)
+	if namespacedRoot {
+		namingNamespaceMap = namespaceMap
 	}
+	schemanaming.ApplyWithNamespaces(merged, namer, namingNamespaceMap, namingPerDB)
 
 	// 8. Build resolver + GraphQL schema.
-	res := resolver.NewResolver(cfg.Executor, merged, cfg.Limits, cfg.DefaultLimit, cfg.GlobalFilters, cfg.Naming)
-	res.SetFiltersPerDB(filtersPerDB)
-	if useNamespaces {
-		res.SetNamespaceMap(namespaceMap)
-	}
+	res := resolver.NewResolverWithConfig(cfg.Executor, merged, cfg.Limits, cfg.DefaultLimit, resolver.ResolverConfig{
+		Filters:        cfg.GlobalFilters,
+		FiltersPerDB:   filtersPerDB,
+		NamespaceMap:   namespaceMap,
+		NamespacedRoot: namespacedRoot,
+		Naming:         cfg.Naming,
+	})
 	if cfg.VectorRequireIndex || cfg.VectorMaxTopK > 0 {
 		res.SetVectorSearchConfig(resolver.VectorSearchConfig{
 			RequireIndex: cfg.VectorRequireIndex,

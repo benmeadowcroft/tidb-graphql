@@ -104,7 +104,7 @@ func (a *App) Init(ctx context.Context) error {
 	})
 
 	if err := runStartupPhase(startupCtx, startupSpanDBVerify, func(phaseCtx context.Context) error {
-		if verifyErr := configureDatabase(phaseCtx, a.cfg, a.logger, db, a.effectiveDatabase, a.cfg.Database.EffectiveDatabaseNames(), a.databaseSource, a.dsnPresent); verifyErr != nil {
+		if verifyErr := configureDatabase(phaseCtx, a.cfg, a.logger, db, a.effectiveDatabase, a.cfg.Database.SchemaDatabaseNames(), a.databaseSource, a.dsnPresent); verifyErr != nil {
 			return fmt.Errorf("failed to verify database connection: %w", verifyErr)
 		}
 		return nil
@@ -141,7 +141,7 @@ func (a *App) Init(ctx context.Context) error {
 		)
 
 		if err := runStartupPhase(startupCtx, startupSpanRoleValidate, func(phaseCtx context.Context) error {
-			if validateErr := validateDBRolePrivileges(phaseCtx, db, a.cfg.Database.EffectiveDatabaseNames(), a.logger); validateErr != nil {
+			if validateErr := validateDBRolePrivileges(phaseCtx, db, a.cfg.Database.SchemaDatabaseNames(), a.logger); validateErr != nil {
 				return fmt.Errorf("failed to validate database role privileges: %w", validateErr)
 			}
 			return nil

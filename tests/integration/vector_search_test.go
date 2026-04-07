@@ -231,8 +231,8 @@ func buildVectorGraphQLSchema(t *testing.T, testDB *tidbcloud.TestDB) graphql.Sc
 	result, err := schemarefresh.BuildSchema(context.Background(), schemarefresh.BuildSchemaConfig{
 		Queryer:                testDB.DB,
 		Executor:               executor,
-		DatabaseName:           testDB.DatabaseName,
-		Filters:                schemafilter.Config{},
+		Databases:              []schemarefresh.DatabaseBuildEntry{{Name: testDB.DatabaseName}},
+		GlobalFilters:          schemafilter.Config{},
 		UUIDColumns:            nil,
 		TinyInt1BooleanColumns: nil,
 		TinyInt1IntColumns:     nil,

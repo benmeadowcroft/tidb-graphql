@@ -782,6 +782,34 @@ func TestDatabaseConfig_EffectiveDatabaseName(t *testing.T) {
 	}
 }
 
+func TestDatabaseConfig_SchemaEntries(t *testing.T) {
+	t.Run("legacy database synthesizes a single schema entry", func(t *testing.T) {
+		cfg := DatabaseConfig{Database: "appdb"}
+		entries := cfg.SchemaEntries()
+		if assert.Len(t, entries, 1) {
+			assert.Equal(t, "appdb", entries[0].Name)
+			assert.Equal(t, []string{"appdb"}, cfg.SchemaDatabaseNames())
+		}
+	})
+
+	t.Run("configured databases remain canonical", func(t *testing.T) {
+		cfg := DatabaseConfig{
+			Databases: []DatabaseEntryConfig{
+				{Name: "shop", Namespace: "shop"},
+				{Name: "auth"},
+			},
+		}
+		entries := cfg.SchemaEntries()
+		if assert.Len(t, entries, 2) {
+			assert.Equal(t, "shop", entries[0].Name)
+			assert.Equal(t, "auth", entries[1].Name)
+		}
+		entries[0].Name = "mutated"
+		assert.Equal(t, "shop", cfg.Databases[0].Name)
+		assert.Equal(t, []string{"shop", "auth"}, cfg.SchemaDatabaseNames())
+	})
+}
+
 func TestConfigValidate_DatabaseResolution(t *testing.T) {
 	t.Run("dsn with matching database passes", func(t *testing.T) {
 		cfg := &Config{
@@ -804,6 +832,9 @@ func TestConfigValidate_DatabaseResolution(t *testing.T) {
 		result := cfg.Validate()
 		assert.False(t, result.HasErrors())
 		assert.Equal(t, "match_db", cfg.Database.Database)
+		if assert.Len(t, cfg.Database.Databases, 1) {
+			assert.Equal(t, "match_db", cfg.Database.Databases[0].Name)
+		}
 	})
 
 	t.Run("dsn mismatch with database errors", func(t *testing.T) {

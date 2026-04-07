@@ -122,6 +122,14 @@ func testLogger() *logging.Logger {
 	return &logging.Logger{Logger: slog.New(handler)}
 }
 
+func testSchemaEntries(names ...string) []DatabaseBuildEntry {
+	entries := make([]DatabaseBuildEntry, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, DatabaseBuildEntry{Name: name})
+	}
+	return entries
+}
+
 func TestComputeFingerprint(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -154,10 +162,10 @@ func TestComputeFingerprint(t *testing.T) {
 	expectTiDBStructuralFingerprintQueries(mock, []string{"testdb"}, fixture)
 
 	manager := &Manager{
-		db:           db,
-		databaseName: "testdb",
-		databases:    []string{"testdb"},
-		logger:       testLogger(),
+		db:            db,
+		databaseName:  "testdb",
+		schemaEntries: testSchemaEntries("testdb"),
+		logger:        testLogger(),
 	}
 
 	fingerprint, err := manager.computeFingerprint(t.Context())
@@ -197,10 +205,10 @@ func TestComputeFingerprint_FallsBackToLightweight(t *testing.T) {
 		))
 
 	manager := &Manager{
-		db:           db,
-		databaseName: "testdb",
-		databases:    []string{"testdb"},
-		logger:       testLogger(),
+		db:            db,
+		databaseName:  "testdb",
+		schemaEntries: testSchemaEntries("testdb"),
+		logger:        testLogger(),
 	}
 
 	fingerprint, err := manager.computeFingerprintDetails(t.Context())
@@ -220,47 +228,9 @@ func TestComputeFingerprint_FallsBackToLightweight(t *testing.T) {
 	}
 }
 
-func TestIsMultiDB(t *testing.T) {
-	tests := []struct {
-		name    string
-		entries []DatabaseBuildEntry
-		want    bool
-	}{
-		{
-			name:    "no entries — single-db mode",
-			entries: nil,
-			want:    false,
-		},
-		{
-			name:    "one entry, no namespace — single-db mode",
-			entries: []DatabaseBuildEntry{{Name: "mydb"}},
-			want:    false,
-		},
-		{
-			name:    "one entry with explicit namespace — multi-db mode",
-			entries: []DatabaseBuildEntry{{Name: "mydb", Namespace: "shop"}},
-			want:    true,
-		},
-		{
-			name:    "two entries — multi-db mode",
-			entries: []DatabaseBuildEntry{{Name: "shop"}, {Name: "auth"}},
-			want:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := &Manager{databaseEntries: tt.entries}
-			if got := m.isMultiDB(); got != tt.want {
-				t.Errorf("isMultiDB() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestNewManager_MultiDB_UsesMultiDatabaseEntries(t *testing.T) {
-	// Verifies that NewManager stores DatabaseEntries and exposes isMultiDB correctly
-	// when two database entries are provided via Config.
+func TestNewManager_UsesCanonicalSchemaEntries(t *testing.T) {
+	// Verifies that NewManager stores the normalized schema-entry list and uses it
+	// for fingerprinting when two database entries are provided via Config.
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("failed to create sqlmock: %v", err)
@@ -288,7 +258,7 @@ func TestNewManager_MultiDB_UsesMultiDatabaseEntries(t *testing.T) {
 	}
 	expectTiDBStructuralFingerprintQueries(mock, []string{"shop", "auth"}, fixture)
 
-	// BuildMultiDatabaseSchema calls IntrospectDatabaseContext for each db.
+	// The unified schema builder introspects each configured database entry.
 	for _, dbName := range []string{"shop", "auth"} {
 		mock.ExpectQuery("SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT\\s+FROM INFORMATION_SCHEMA.TABLES").
 			WithArgs(dbName).
@@ -300,23 +270,19 @@ func TestNewManager_MultiDB_UsesMultiDatabaseEntries(t *testing.T) {
 		{Name: "auth"},
 	}
 	manager, err := NewManager(context.Background(), Config{
-		DB:              db,
-		DatabaseName:    "shop",
-		Databases:       []string{"shop", "auth"},
-		DatabaseEntries: entries,
-		Logger:          testLogger(),
-		MinInterval:     time.Second,
-		MaxInterval:     2 * time.Second,
+		DB:            db,
+		DatabaseName:  "shop",
+		SchemaEntries: entries,
+		Logger:        testLogger(),
+		MinInterval:   time.Second,
+		MaxInterval:   2 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewManager failed: %v", err)
 	}
 
-	if !manager.isMultiDB() {
-		t.Error("expected isMultiDB()=true for two-entry config")
-	}
-	if len(manager.databaseEntries) != 2 {
-		t.Errorf("expected 2 databaseEntries, got %d", len(manager.databaseEntries))
+	if len(manager.schemaEntries) != 2 {
+		t.Errorf("expected 2 schemaEntries, got %d", len(manager.schemaEntries))
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -356,10 +322,10 @@ func TestComputeFingerprint_MultiDatabase(t *testing.T) {
 	expectTiDBStructuralFingerprintQueries(mock, []string{"shop", "auth"}, fixture)
 
 	manager := &Manager{
-		db:           db,
-		databaseName: "shop",
-		databases:    []string{"shop", "auth"},
-		logger:       testLogger(),
+		db:            db,
+		databaseName:  "shop",
+		schemaEntries: testSchemaEntries("shop", "auth"),
+		logger:        testLogger(),
 	}
 
 	fingerprint, err := manager.computeFingerprint(t.Context())
@@ -402,10 +368,10 @@ func TestComputeFingerprint_MultiDatabase_LightweightFallback(t *testing.T) {
 		))
 
 	manager := &Manager{
-		db:           db,
-		databaseName: "shop",
-		databases:    []string{"shop", "auth"},
-		logger:       testLogger(),
+		db:            db,
+		databaseName:  "shop",
+		schemaEntries: testSchemaEntries("shop", "auth"),
+		logger:        testLogger(),
 	}
 
 	details, err := manager.computeFingerprintDetails(t.Context())
@@ -427,38 +393,38 @@ func TestComputeFingerprint_MultiDatabase_LightweightFallback(t *testing.T) {
 
 func TestSchemaInClause(t *testing.T) {
 	tests := []struct {
-		name         string
-		databaseName string
-		databases    []string
-		wantClause   string
-		wantArgs     []any
+		name          string
+		databaseName  string
+		schemaEntries []DatabaseBuildEntry
+		wantClause    string
+		wantArgs      []any
 	}{
 		{
-			name:         "single database from databases slice",
-			databaseName: "mydb",
-			databases:    []string{"mydb"},
-			wantClause:   "?",
-			wantArgs:     []any{"mydb"},
+			name:          "single database from schema entries",
+			databaseName:  "mydb",
+			schemaEntries: testSchemaEntries("mydb"),
+			wantClause:    "?",
+			wantArgs:      []any{"mydb"},
 		},
 		{
-			name:         "multiple databases",
-			databaseName: "shop",
-			databases:    []string{"shop", "auth"},
-			wantClause:   "?,?",
-			wantArgs:     []any{"shop", "auth"},
+			name:          "multiple databases",
+			databaseName:  "shop",
+			schemaEntries: testSchemaEntries("shop", "auth"),
+			wantClause:    "?,?",
+			wantArgs:      []any{"shop", "auth"},
 		},
 		{
-			name:         "fallback to databaseName when databases empty",
-			databaseName: "fallback",
-			databases:    nil,
-			wantClause:   "?",
-			wantArgs:     []any{"fallback"},
+			name:          "fallback to databaseName when schema entries empty",
+			databaseName:  "fallback",
+			schemaEntries: nil,
+			wantClause:    "?",
+			wantArgs:      []any{"fallback"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := &Manager{databaseName: tt.databaseName, databases: tt.databases}
+			m := &Manager{databaseName: tt.databaseName, schemaEntries: tt.schemaEntries}
 			clause, args := m.schemaInClause()
 			if clause != tt.wantClause {
 				t.Errorf("clause: got %q want %q", clause, tt.wantClause)
@@ -511,12 +477,12 @@ func TestRefreshOnce_NoChange_BacksOff(t *testing.T) {
 	expectTiDBStructuralFingerprintQueries(mock, []string{"testdb"}, fixture)
 
 	manager := &Manager{
-		db:           db,
-		databaseName: "testdb",
-		databases:    []string{"testdb"},
-		logger:       testLogger(),
-		minInterval:  10 * time.Second,
-		maxInterval:  time.Minute,
+		db:            db,
+		databaseName:  "testdb",
+		schemaEntries: testSchemaEntries("testdb"),
+		logger:        testLogger(),
+		minInterval:   10 * time.Second,
+		maxInterval:   time.Minute,
 	}
 	manager.active.Store(&snapshotSet{
 		Default:         &Snapshot{Fingerprint: expected},
@@ -591,12 +557,12 @@ func TestRefreshOnce_Change_Rebuilds(t *testing.T) {
 		WillReturnRows(mockTables)
 
 	manager := &Manager{
-		db:           db,
-		databaseName: "testdb",
-		databases:    []string{"testdb"},
-		logger:       testLogger(),
-		minInterval:  5 * time.Second,
-		maxInterval:  time.Minute,
+		db:            db,
+		databaseName:  "testdb",
+		schemaEntries: testSchemaEntries("testdb"),
+		logger:        testLogger(),
+		minInterval:   5 * time.Second,
+		maxInterval:   time.Minute,
 	}
 	manager.active.Store(&snapshotSet{
 		Default:     &Snapshot{Fingerprint: "old"},
@@ -878,7 +844,7 @@ func TestRefreshNowContext_ForwardsContextToMetrics(t *testing.T) {
 	manager := &Manager{
 		db:              db,
 		databaseName:    "testdb",
-		databases:       []string{"testdb"},
+		schemaEntries:   testSchemaEntries("testdb"),
 		logger:          testLogger(),
 		recordRefreshFn: metricsRecorder.RecordRefresh,
 	}
@@ -954,12 +920,12 @@ func TestBuildSnapshotSet_EmitsSnapshotSpanPerRole(t *testing.T) {
 	})
 
 	manager := &Manager{
-		db:           db,
-		databaseName: "testdb",
-		databases:    []string{"testdb"},
-		logger:       testLogger(),
-		roleSchemas:  []string{"viewer"},
-		executor:     dbexec.NewStandardExecutor(db),
+		db:            db,
+		databaseName:  "testdb",
+		schemaEntries: testSchemaEntries("testdb"),
+		logger:        testLogger(),
+		roleSchemas:   []string{"viewer"},
+		executor:      dbexec.NewStandardExecutor(db),
 	}
 
 	_, err = manager.buildSnapshotSet(context.Background(), fingerprintDetails{

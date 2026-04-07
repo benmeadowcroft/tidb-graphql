@@ -93,12 +93,11 @@ type Resolver struct {
 	// before falling back to filters.
 	filtersPerDB map[string]schemafilter.Config
 	// namespaceMap maps each physical SQL database name to its GraphQL namespace alias.
-	// When non-empty, BuildGraphQLSchema wraps table queries/mutations inside
-	// {NsPascalCase}_Query / {NsPascalCase}_Mutation objects rather than placing them
-	// directly on the root Query/Mutation types.
-	namespaceMap map[string]string
-	vectorSearch VectorSearchConfig
-	mu           sync.RWMutex
+	// It is applied only when namespacedRoot is true.
+	namespaceMap   map[string]string
+	namespacedRoot bool
+	vectorSearch   VectorSearchConfig
+	mu             sync.RWMutex
 }
 
 // VectorSearchConfig controls generated vector-search fields.
@@ -106,6 +105,15 @@ type VectorSearchConfig struct {
 	RequireIndex bool
 	MaxTopK      int
 	DefaultFirst int
+}
+
+// ResolverConfig controls immutable resolver behaviour selected at construction time.
+type ResolverConfig struct {
+	Filters        schemafilter.Config
+	FiltersPerDB   map[string]schemafilter.Config
+	NamespaceMap   map[string]string
+	NamespacedRoot bool
+	Naming         naming.Config
 }
 
 var staticMutationTypeNames = map[string]bool{
@@ -131,10 +139,30 @@ func normalizeVectorSearchConfig(cfg VectorSearchConfig) VectorSearchConfig {
 	return cfg
 }
 
-// NewResolver creates a new resolver with the given executor, schema, and optional limits.
-// The executor handles SQL query execution, dbSchema provides the database structure,
-// and limits (if non-nil) enforces query depth, complexity, and row count constraints.
-func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int, filters schemafilter.Config, namingConfig naming.Config) *Resolver {
+func cloneSchemaFilterMap(src map[string]schemafilter.Config) map[string]schemafilter.Config {
+	if len(src) == 0 {
+		return nil
+	}
+	clone := make(map[string]schemafilter.Config, len(src))
+	for key, value := range src {
+		clone[key] = value
+	}
+	return clone
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	clone := make(map[string]string, len(src))
+	for key, value := range src {
+		clone[key] = value
+	}
+	return clone
+}
+
+// NewResolverWithConfig creates a new resolver with immutable resolver configuration.
+func NewResolverWithConfig(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int, cfg ResolverConfig) *Resolver {
 	if defaultLimit <= 0 {
 		defaultLimit = planner.DefaultListLimit
 	}
@@ -165,30 +193,27 @@ func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, 
 		vectorConnCache:    make(map[string]*graphql.Object),
 		singularQueryCache: make(map[string]string),
 		singularTypeCache:  make(map[string]string),
-		singularNamer:      naming.New(namingConfig, nil),
+		singularNamer:      naming.New(cfg.Naming, nil),
 		edgeCache:          make(map[string]*graphql.Object),
 		connectionCache:    make(map[string]*graphql.Object),
 		limits:             limits,
 		defaultLimit:       defaultLimit,
-		filters:            filters,
+		filters:            cfg.Filters,
+		filtersPerDB:       cloneSchemaFilterMap(cfg.FiltersPerDB),
+		namespaceMap:       cloneStringMap(cfg.NamespaceMap),
+		namespacedRoot:     cfg.NamespacedRoot,
 		vectorSearch: normalizeVectorSearchConfig(VectorSearchConfig{
 			RequireIndex: true,
 		}),
 	}
 }
 
-// SetFiltersPerDB installs per-database schema filter overrides used in multi-db mode.
-// Must be called before BuildGraphQLSchema when using BuildMultiDatabaseSchema.
-func (r *Resolver) SetFiltersPerDB(m map[string]schemafilter.Config) {
-	r.filtersPerDB = m
-}
-
-// SetNamespaceMap installs the database-to-namespace mapping used in multi-db mode.
-// When non-empty, BuildGraphQLSchema groups tables into {NsPascalCase}_Query /
-// {NsPascalCase}_Mutation wrapper objects instead of placing them on the root directly.
-// Must be called before BuildGraphQLSchema.
-func (r *Resolver) SetNamespaceMap(m map[string]string) {
-	r.namespaceMap = m
+// NewResolver creates a resolver with default flat-root behaviour.
+func NewResolver(executor dbexec.QueryExecutor, dbSchema *introspection.Schema, limits *planner.PlanLimits, defaultLimit int, filters schemafilter.Config, namingConfig naming.Config) *Resolver {
+	return NewResolverWithConfig(executor, dbSchema, limits, defaultLimit, ResolverConfig{
+		Filters: filters,
+		Naming:  namingConfig,
+	})
 }
 
 // mutationFiltersFor returns the schemafilter.Config applicable to the given table.
@@ -238,132 +263,92 @@ func (r *Resolver) SetVectorSearchConfig(cfg VectorSearchConfig) {
 	r.mu.Unlock()
 }
 
-// BuildGraphQLSchema constructs an executable GraphQL schema from the database schema.
-// It creates types for each table, adds list and by-primary-key queries, and wires up
-// relationship resolvers for foreign key navigation.
-//
-// In multi-database mode (when SetNamespaceMap has been called with a non-empty map),
-// tables are grouped by database namespace. Each namespace becomes a field on the root
-// Query/Mutation, wrapping that namespace's table fields inside a dedicated
-// {NsPascalCase}_Query / {NsPascalCase}_Mutation object type.
-func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
-	r.applyNaming()
-	if err := r.checkMutationTypeNameCollisions(); err != nil {
-		return graphql.Schema{}, err
-	}
-
-	if len(r.namespaceMap) > 0 {
-		return r.buildNamespacedGraphQLSchema()
-	}
-
-	queryFields := graphql.Fields{}
-
-	for _, table := range r.dbSchema.Tables {
-		queryFields = r.addTableQueries(queryFields, table)
-	}
-
-	// If no tables exist, add a placeholder query to satisfy GraphQL requirements
-	if len(queryFields) == 0 {
-		queryFields["_schema"] = &graphql.Field{
-			Type: graphql.String,
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				return "No tables found in database", nil
-			},
-			Description: "Placeholder field when database has no tables",
-		}
-	}
-	if r.hasNodeTypes() {
-		queryFields["node"] = &graphql.Field{
-			Type: r.nodeInterfaceType(),
-			Args: graphql.FieldConfigArgument{
-				"id": &graphql.ArgumentConfig{
-					Type: graphql.NewNonNull(graphql.ID),
-				},
-			},
-			Resolve: r.makeNodeResolver(),
-		}
-	}
-
-	rootQuery := graphql.ObjectConfig{
-		Name:   "Query",
-		Fields: queryFields,
-	}
-
-	mutationFields := graphql.Fields{}
-	for _, table := range r.dbSchema.Tables {
-		mutationFields = r.addTableMutations(mutationFields, table)
-	}
-
-	schemaConfig := graphql.SchemaConfig{
-		Query: graphql.NewObject(rootQuery),
-	}
-	if len(mutationFields) > 0 {
-		schemaConfig.Mutation = graphql.NewObject(graphql.ObjectConfig{
-			Name:   "Mutation",
-			Fields: mutationFields,
-		})
-	}
-	if types := r.schemaTypes(); len(types) > 0 {
-		schemaConfig.Types = types
-	}
-
-	return graphql.NewSchema(schemaConfig)
+type rootFieldGroup struct {
+	nsPascal string
+	nsAlias  string
+	dbName   string
+	wrapper  bool
+	tables   []introspection.Table
 }
 
-// buildNamespacedGraphQLSchema builds a GraphQL schema where each configured database
-// namespace is exposed as a field on the root Query/Mutation types.
-//
-// Each namespace produces:
-//   - A {NsPascalCase}_Query object containing that namespace's table query fields.
-//   - A {NsPascalCase}_Mutation object containing that namespace's table mutation fields.
-//
-// The root Query has one field per namespace plus the global `node(id:)` field.
-// The root Mutation has one field per namespace that has any mutable tables.
-func (r *Resolver) buildNamespacedGraphQLSchema() (graphql.Schema, error) {
-	// Group tables by their namespace alias (PascalCase) preserving declaration order.
-	type nsEntry struct {
-		nsPascal string
-		nsAlias  string
-		dbName   string
-		tables   []introspection.Table
+func (r *Resolver) buildRootFieldGroups() ([]rootFieldGroup, error) {
+	if !r.namespacedRoot {
+		return []rootFieldGroup{{
+			tables: append([]introspection.Table(nil), r.dbSchema.Tables...),
+		}}, nil
 	}
-	seen := make(map[string]int) // nsPascal -> index in entries
-	var entries []nsEntry
 
+	seen := make(map[string]int)
+	var groups []rootFieldGroup
 	for _, table := range r.dbSchema.Tables {
 		dbName := table.Key.Database
 		nsAlias, ok := r.namespaceMap[dbName]
 		if !ok || nsAlias == "" {
 			nsAlias = dbName
 		}
-		// ToGraphQLTypeName produces PascalCase from the alias (e.g. "shop" -> "Shop").
 		nsPascal := r.singularNamer.ToGraphQLTypeName(nsAlias)
 		if nsPascal == "" {
 			nsPascal = nsAlias
 		}
 		idx, exists := seen[nsPascal]
-		if exists && entries[idx].dbName != dbName {
-			return graphql.Schema{}, fmt.Errorf("databases %q and %q both normalize to the GraphQL namespace %q", entries[idx].dbName, dbName, nsPascal)
+		if exists && groups[idx].dbName != dbName {
+			return nil, fmt.Errorf("databases %q and %q both normalize to the GraphQL namespace %q", groups[idx].dbName, dbName, nsPascal)
 		}
 		if !exists {
-			idx = len(entries)
-			entries = append(entries, nsEntry{nsPascal: nsPascal, nsAlias: nsAlias, dbName: dbName})
+			idx = len(groups)
+			groups = append(groups, rootFieldGroup{
+				nsPascal: nsPascal,
+				nsAlias:  nsAlias,
+				dbName:   dbName,
+				wrapper:  true,
+			})
 			seen[nsPascal] = idx
 		}
-		entries[idx].tables = append(entries[idx].tables, table)
+		groups[idx].tables = append(groups[idx].tables, table)
+	}
+	return groups, nil
+}
+
+// BuildGraphQLSchema constructs an executable GraphQL schema from the database schema.
+// It creates types for each table, adds list and by-primary-key queries, and wires up
+// relationship resolvers for foreign key navigation.
+func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
+	r.applyNaming()
+	if err := r.checkMutationTypeNameCollisions(); err != nil {
+		return graphql.Schema{}, err
+	}
+
+	groups, err := r.buildRootFieldGroups()
+	if err != nil {
+		return graphql.Schema{}, err
 	}
 
 	rootQueryFields := graphql.Fields{}
 	rootMutationFields := graphql.Fields{}
 
-	for _, entry := range entries {
-		nsQueryFields := graphql.Fields{}
-		for _, table := range entry.tables {
-			nsQueryFields = r.addTableQueries(nsQueryFields, table)
+	for _, group := range groups {
+		groupQueryFields := graphql.Fields{}
+		for _, table := range group.tables {
+			groupQueryFields = r.addTableQueries(groupQueryFields, table)
 		}
 
-		if len(nsQueryFields) == 0 {
-			nsQueryFields["_schema"] = &graphql.Field{
+		groupMutationFields := graphql.Fields{}
+		for _, table := range group.tables {
+			groupMutationFields = r.addTableMutations(groupMutationFields, table)
+		}
+
+		if !group.wrapper {
+			for name, field := range groupQueryFields {
+				rootQueryFields[name] = field
+			}
+			for name, field := range groupMutationFields {
+				rootMutationFields[name] = field
+			}
+			continue
+		}
+
+		if len(groupQueryFields) == 0 {
+			groupQueryFields["_schema"] = &graphql.Field{
 				Type: graphql.String,
 				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 					return "No tables found in namespace", nil
@@ -371,47 +356,51 @@ func (r *Resolver) buildNamespacedGraphQLSchema() (graphql.Schema, error) {
 			}
 		}
 
-		nsQueryTypeName := entry.nsPascal + "_Query"
 		nsQueryObj := graphql.NewObject(graphql.ObjectConfig{
-			Name:   nsQueryTypeName,
-			Fields: nsQueryFields,
+			Name:   group.nsPascal + "_Query",
+			Fields: groupQueryFields,
 		})
-
-		nsFieldName := r.singularNamer.ToGraphQLFieldName(entry.nsAlias)
+		nsFieldName := r.singularNamer.ToGraphQLFieldName(group.nsAlias)
 		if nsFieldName == "" {
-			nsFieldName = entry.nsAlias
+			nsFieldName = group.nsAlias
 		}
 		rootQueryFields[nsFieldName] = &graphql.Field{
 			Type: graphql.NewNonNull(nsQueryObj),
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				// Return a non-nil value so child field resolvers are invoked.
 				return struct{}{}, nil
 			},
-			Description: "Queries for the " + entry.nsAlias + " database namespace.",
+			Description: "Queries for the " + group.nsAlias + " database namespace.",
 		}
 
-		// Build mutation wrapper only when the namespace has mutable tables.
-		nsMutationFields := graphql.Fields{}
-		for _, table := range entry.tables {
-			nsMutationFields = r.addTableMutations(nsMutationFields, table)
-		}
-		if len(nsMutationFields) > 0 {
-			nsMutationTypeName := entry.nsPascal + "_Mutation"
+		if len(groupMutationFields) > 0 {
 			nsMutationObj := graphql.NewObject(graphql.ObjectConfig{
-				Name:   nsMutationTypeName,
-				Fields: nsMutationFields,
+				Name:   group.nsPascal + "_Mutation",
+				Fields: groupMutationFields,
 			})
 			rootMutationFields[nsFieldName] = &graphql.Field{
 				Type: graphql.NewNonNull(nsMutationObj),
 				Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 					return struct{}{}, nil
 				},
-				Description: "Mutations for the " + entry.nsAlias + " database namespace.",
+				Description: "Mutations for the " + group.nsAlias + " database namespace.",
 			}
 		}
 	}
 
-	// Global node(id:) lookup — registered types span all namespaces.
+	// If no tables exist, add a placeholder query to satisfy GraphQL requirements.
+	if len(rootQueryFields) == 0 {
+		placeholder := "No tables found in database"
+		if r.namespacedRoot {
+			placeholder = "No namespaces configured"
+		}
+		rootQueryFields["_schema"] = &graphql.Field{
+			Type: graphql.String,
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				return placeholder, nil
+			},
+			Description: "Placeholder field when database has no tables",
+		}
+	}
 	if r.hasNodeTypes() {
 		rootQueryFields["node"] = &graphql.Field{
 			Type: r.nodeInterfaceType(),
@@ -421,15 +410,6 @@ func (r *Resolver) buildNamespacedGraphQLSchema() (graphql.Schema, error) {
 				},
 			},
 			Resolve: r.makeNodeResolver(),
-		}
-	}
-
-	if len(rootQueryFields) == 0 {
-		rootQueryFields["_schema"] = &graphql.Field{
-			Type: graphql.String,
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				return "No namespaces configured", nil
-			},
 		}
 	}
 

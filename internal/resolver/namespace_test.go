@@ -50,8 +50,12 @@ func TestBuildNamespacedGraphQLSchema_RootFields(t *testing.T) {
 		"identity":  "auth",
 	}
 
-	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
-	r.SetNamespaceMap(namespaceMap)
+	r := NewResolverWithConfig(nil, schema, nil, 0, ResolverConfig{
+		Filters:        schemafilter.Config{},
+		NamespaceMap:   namespaceMap,
+		NamespacedRoot: true,
+		Naming:         naming.DefaultConfig(),
+	})
 
 	gqlSchema, err := r.BuildGraphQLSchema()
 	require.NoError(t, err)
@@ -72,8 +76,12 @@ func TestBuildNamespacedGraphQLSchema_NamespaceQueryTypes(t *testing.T) {
 		"identity":  "auth",
 	}
 
-	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
-	r.SetNamespaceMap(namespaceMap)
+	r := NewResolverWithConfig(nil, schema, nil, 0, ResolverConfig{
+		Filters:        schemafilter.Config{},
+		NamespaceMap:   namespaceMap,
+		NamespacedRoot: true,
+		Naming:         naming.DefaultConfig(),
+	})
 
 	gqlSchema, err := r.BuildGraphQLSchema()
 	require.NoError(t, err)
@@ -100,8 +108,12 @@ func TestBuildNamespacedGraphQLSchema_MutationFields(t *testing.T) {
 		"identity":  "auth",
 	}
 
-	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
-	r.SetNamespaceMap(namespaceMap)
+	r := NewResolverWithConfig(nil, schema, nil, 0, ResolverConfig{
+		Filters:        schemafilter.Config{},
+		NamespaceMap:   namespaceMap,
+		NamespacedRoot: true,
+		Naming:         naming.DefaultConfig(),
+	})
 
 	gqlSchema, err := r.BuildGraphQLSchema()
 	require.NoError(t, err)
@@ -133,8 +145,12 @@ func TestBuildNamespacedGraphQLSchema_NodeFieldOnRoot(t *testing.T) {
 		"identity":  "auth",
 	}
 
-	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
-	r.SetNamespaceMap(namespaceMap)
+	r := NewResolverWithConfig(nil, schema, nil, 0, ResolverConfig{
+		Filters:        schemafilter.Config{},
+		NamespaceMap:   namespaceMap,
+		NamespacedRoot: true,
+		Naming:         naming.DefaultConfig(),
+	})
 
 	gqlSchema, err := r.BuildGraphQLSchema()
 	require.NoError(t, err)
@@ -223,10 +239,14 @@ func TestBuildNamespacedGraphQLSchema_RejectsNormalizedNamespaceCollision(t *tes
 		},
 	}
 
-	r := NewResolver(nil, schema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
-	r.SetNamespaceMap(map[string]string{
-		"db_one": "my_app",
-		"db_two": "MyApp",
+	r := NewResolverWithConfig(nil, schema, nil, 0, ResolverConfig{
+		Filters: schemafilter.Config{},
+		NamespaceMap: map[string]string{
+			"db_one": "my_app",
+			"db_two": "MyApp",
+		},
+		NamespacedRoot: true,
+		Naming:         naming.DefaultConfig(),
 	})
 
 	_, err := r.BuildGraphQLSchema()

@@ -44,17 +44,11 @@ type Snapshot struct {
 
 // Config controls schema refresh behavior.
 type Config struct {
-	DB                     *sql.DB
-	DatabaseName           string
-	// Databases lists all physical SQL database names to fingerprint in multi-db
-	// mode. When non-empty it takes precedence over DatabaseName for fingerprinting;
-	// DatabaseName is still used for backward-compat single-db introspection.
-	Databases              []string
-	// DatabaseEntries carries the full per-database build configuration for
-	// multi-database mode. When len > 1 (or when one entry has a non-empty Namespace),
-	// BuildMultiDatabaseSchema is used instead of BuildSchema.
-	// Leave nil/empty for single-database mode.
-	DatabaseEntries        []DatabaseBuildEntry
+	DB           *sql.DB
+	DatabaseName string
+	// SchemaEntries is the canonical normalized schema-entry list used for
+	// fingerprinting and schema building.
+	SchemaEntries          []DatabaseBuildEntry
 	Limits                 *planner.PlanLimits
 	DefaultLimit           int
 	Logger                 *logging.Logger
@@ -77,15 +71,11 @@ type Config struct {
 
 // Manager maintains and refreshes schema snapshots.
 type Manager struct {
-	db                     *sql.DB
-	databaseName           string
-	// databases is the authoritative list of database names used for fingerprinting.
-	// Derived from Config.Databases when set, otherwise falls back to [databaseName].
-	databases              []string
-	// databaseEntries holds per-database build configuration for multi-db mode.
-	// When len > 1 (or a single entry has a non-empty Namespace), BuildMultiDatabaseSchema
-	// is used instead of BuildSchema.
-	databaseEntries        []DatabaseBuildEntry
+	db           *sql.DB
+	databaseName string
+	// schemaEntries is the canonical normalized schema-entry list used across
+	// fingerprinting and schema building.
+	schemaEntries          []DatabaseBuildEntry
 	limits                 *planner.PlanLimits
 	defaultLimit           int
 	logger                 *logging.Logger
@@ -163,17 +153,15 @@ func NewManager(ctx context.Context, cfg Config) (*Manager, error) {
 	if cfg.Metrics != nil {
 		recordRefreshFn = cfg.Metrics.RecordRefresh
 	}
-	// Resolve the authoritative database list for fingerprinting.
-	databases := append([]string(nil), cfg.Databases...)
-	if len(databases) == 0 && cfg.DatabaseName != "" {
-		databases = []string{cfg.DatabaseName}
+	schemaEntries := append([]DatabaseBuildEntry(nil), cfg.SchemaEntries...)
+	if len(schemaEntries) == 0 && cfg.DatabaseName != "" {
+		schemaEntries = []DatabaseBuildEntry{{Name: cfg.DatabaseName}}
 	}
 
 	manager := &Manager{
 		db:                     cfg.DB,
 		databaseName:           cfg.DatabaseName,
-		databases:              databases,
-		databaseEntries:        append([]DatabaseBuildEntry(nil), cfg.DatabaseEntries...),
+		schemaEntries:          schemaEntries,
 		limits:                 cfg.Limits,
 		defaultLimit:           cfg.DefaultLimit,
 		logger:                 componentLogger,
@@ -549,20 +537,6 @@ func (m *Manager) buildSnapshotSet(ctx context.Context, fingerprint fingerprintD
 	return state, nil
 }
 
-// isMultiDB reports whether the manager is operating in multi-database mode.
-// Multi-db mode is active when at least two DatabaseEntries are configured OR
-// when a single entry carries an explicit Namespace (signalling intent to use
-// namespace-prefixed type names even for one database).
-func (m *Manager) isMultiDB() bool {
-	if len(m.databaseEntries) > 1 {
-		return true
-	}
-	if len(m.databaseEntries) == 1 && m.databaseEntries[0].Namespace != "" {
-		return true
-	}
-	return false
-}
-
 func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, role string, fingerprint string, fingerprintMode string, queryer introspection.Queryer) (_ *Snapshot, err error) {
 	start := time.Now()
 	roleName := strings.TrimSpace(role)
@@ -593,38 +567,20 @@ func (m *Manager) buildSnapshotWithQueryer(ctx context.Context, role string, fin
 	}
 
 	m.logger.Info("introspecting database schema")
-	var buildResult *BuildSchemaResult
-	if m.isMultiDB() {
-		buildResult, err = BuildMultiDatabaseSchema(ctx, BuildMultiDatabaseConfig{
-			Queryer:                queryer,
-			Executor:               executor,
-			Databases:              m.databaseEntries,
-			GlobalFilters:          m.filters,
-			UUIDColumns:            m.uuidColumns,
-			TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
-			TinyInt1IntColumns:     m.tinyInt1IntColumns,
-			Naming:                 m.namingConfig,
-			Limits:                 m.limits,
-			DefaultLimit:           m.defaultLimit,
-			VectorRequireIndex:     m.vectorRequireIndex,
-			VectorMaxTopK:          m.vectorMaxTopK,
-		})
-	} else {
-		buildResult, err = BuildSchema(ctx, BuildSchemaConfig{
-			Queryer:                queryer,
-			Executor:               executor,
-			DatabaseName:           m.databaseName,
-			Filters:                m.filters,
-			UUIDColumns:            m.uuidColumns,
-			TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
-			TinyInt1IntColumns:     m.tinyInt1IntColumns,
-			Naming:                 m.namingConfig,
-			Limits:                 m.limits,
-			DefaultLimit:           m.defaultLimit,
-			VectorRequireIndex:     m.vectorRequireIndex,
-			VectorMaxTopK:          m.vectorMaxTopK,
-		})
-	}
+	buildResult, err := BuildSchema(ctx, BuildSchemaConfig{
+		Queryer:                queryer,
+		Executor:               executor,
+		Databases:              m.schemaEntries,
+		GlobalFilters:          m.filters,
+		UUIDColumns:            m.uuidColumns,
+		TinyInt1BooleanColumns: m.tinyInt1BooleanColumns,
+		TinyInt1IntColumns:     m.tinyInt1IntColumns,
+		Naming:                 m.namingConfig,
+		Limits:                 m.limits,
+		DefaultLimit:           m.defaultLimit,
+		VectorRequireIndex:     m.vectorRequireIndex,
+		VectorMaxTopK:          m.vectorMaxTopK,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -728,7 +684,12 @@ func (m *Manager) computeFingerprintDetails(ctx context.Context) (fingerprintDet
 // e.g. for ["shop","auth"] it returns ("?,?", []any{"shop","auth"}).
 // Callers embed the placeholder directly in the WHERE clause.
 func (m *Manager) schemaInClause() (string, []any) {
-	dbs := m.databases
+	dbs := make([]string, 0, len(m.schemaEntries))
+	for _, entry := range m.schemaEntries {
+		if entry.Name != "" {
+			dbs = append(dbs, entry.Name)
+		}
+	}
 	if len(dbs) == 0 {
 		// Safety fallback: use databaseName so queries always have at least one arg.
 		dbs = []string{m.databaseName}

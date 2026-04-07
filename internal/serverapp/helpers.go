@@ -466,7 +466,7 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string,
 		// Multi-db mode: more than one database configured. In this case all table
 		// references are fully qualified so a USE statement before each query is
 		// unnecessary (and would be ambiguous).
-		multiDB := len(cfg.Database.Databases) > 1
+		multiDB := len(cfg.Database.SchemaEntries()) > 1
 		queryExecutor = dbexec.NewRoleExecutor(dbexec.RoleExecutorConfig{
 			DB:           db,
 			DatabaseName: effectiveDatabase,
@@ -492,7 +492,7 @@ func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging
 
 	// Convert config database entries to schema builder entries.
 	var dbEntries []schemarefresh.DatabaseBuildEntry
-	for _, entry := range cfg.Database.Databases {
+	for _, entry := range cfg.Database.SchemaEntries() {
 		dbEntries = append(dbEntries, schemarefresh.DatabaseBuildEntry{
 			Name:      entry.Name,
 			Namespace: entry.Namespace,
@@ -504,8 +504,7 @@ func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging
 	manager, err := schemarefresh.NewManager(ctx, schemarefresh.Config{
 		DB:                     db,
 		DatabaseName:           effectiveDatabase,
-		Databases:              cfg.Database.EffectiveDatabaseNames(),
-		DatabaseEntries:        dbEntries,
+		SchemaEntries:          dbEntries,
 		Limits:                 limits,
 		DefaultLimit:           cfg.Server.GraphQLDefaultLimit,
 		Logger:                 logger,

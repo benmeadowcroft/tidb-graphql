@@ -288,11 +288,6 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 	if len(d.Databases) > 0 {
 		// New multi/single-db path: validate the Databases array.
 		validateDatabasesArray(result, d)
-		// Keep the legacy Database field in sync with Databases[0] so that
-		// DSN() and other single-connection code paths continue to work.
-		if !result.HasErrors() {
-			d.Database = d.Databases[0].Name
-		}
 	} else {
 		// Legacy single-db path: resolve the effective database name as before.
 		effectiveDatabase, _, err := resolveEffectiveDatabaseName(d.Database, d.ConnectionString, d.MyCnfFile)
@@ -327,8 +322,9 @@ func (d *DatabaseConfig) validate(result *ValidationResult) {
 		}
 		// Keep runtime behaviour deterministic for callers that consume Database.Database.
 		d.Database = effectiveDatabase
-		// Synthesise the Databases slice so Phase 2+ code always has a populated array.
-		d.Databases = []DatabaseEntryConfig{{Name: d.Database}}
+	}
+	if !result.HasErrors() {
+		d.normalizeSchemaEntries()
 	}
 }
 

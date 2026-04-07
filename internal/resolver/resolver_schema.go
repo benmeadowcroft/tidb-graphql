@@ -16,7 +16,11 @@ func (r *Resolver) applyNaming() {
 		return
 	}
 	namingConfig := r.singularNamer.Config()
-	schemanaming.Apply(r.dbSchema, naming.New(namingConfig, nil))
+	namespaceMap := map[string]string(nil)
+	if r.namespacedRoot {
+		namespaceMap = r.namespaceMap
+	}
+	schemanaming.ApplyWithNamespaces(r.dbSchema, naming.New(namingConfig, nil), namespaceMap, nil)
 }
 
 func (r *Resolver) singularQueryName(table introspection.Table) string {

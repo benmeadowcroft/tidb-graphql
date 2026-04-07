@@ -186,6 +186,7 @@ func Load() (*Config, error) {
 	); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	cfg.Database.normalizeSchemaEntries()
 
 	return &cfg, nil
 }

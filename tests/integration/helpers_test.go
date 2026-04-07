@@ -299,8 +299,8 @@ func buildSchemaWithConfig(t *testing.T, testDB *tidbcloud.TestDB, uuidColumns m
 	result, err := schemarefresh.BuildSchema(context.Background(), schemarefresh.BuildSchemaConfig{
 		Queryer:                testDB.DB,
 		Executor:               executor,
-		DatabaseName:           testDB.DatabaseName,
-		Filters:                schemafilter.Config{},
+		Databases:              []schemarefresh.DatabaseBuildEntry{{Name: testDB.DatabaseName}},
+		GlobalFilters:          schemafilter.Config{},
 		UUIDColumns:            uuidColumns,
 		TinyInt1BooleanColumns: nil,
 		TinyInt1IntColumns:     nil,

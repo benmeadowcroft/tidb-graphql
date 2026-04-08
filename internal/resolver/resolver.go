@@ -418,6 +418,7 @@ func (r *Resolver) BuildGraphQLSchema() (graphql.Schema, error) {
 			Name:   "Query",
 			Fields: rootQueryFields,
 		}),
+		Directives: append(graphql.SpecifiedDirectives, asOfDirective()),
 	}
 	if len(rootMutationFields) > 0 {
 		schemaConfig.Mutation = graphql.NewObject(graphql.ObjectConfig{
@@ -481,6 +482,12 @@ func (r *Resolver) checkMutationTypeNameCollisions() error {
 // Used for primary key lookups and unique key lookups.
 func (r *Resolver) makeSingleRowResolver(table introspection.Table) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		planned, err := r.planFromParams(p)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build query: %w", err)
@@ -507,7 +514,7 @@ func (r *Resolver) makeSingleRowResolver(table introspection.Table) graphql.Fiel
 			return nil, nil
 		}
 
-		return results[0], nil
+		return annotateRowWithSnapshot(p.Context, results[0]), nil
 	}
 }
 
@@ -536,6 +543,12 @@ func (r *Resolver) makeNodeIDResolver(table introspection.Table, pkCols []intros
 
 func (r *Resolver) makePrimaryKeyResolver(table introspection.Table, pkCols []introspection.Column) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		rawID, ok := p.Args["id"]
 		if !ok || rawID == nil {
 			return nil, fmt.Errorf("missing id argument")
@@ -582,12 +595,18 @@ func (r *Resolver) makePrimaryKeyResolver(table introspection.Table, pkCols []in
 		if len(results) == 0 {
 			return nil, nil
 		}
-		return results[0], nil
+		return annotateRowWithSnapshot(p.Context, results[0]), nil
 	}
 }
 
 func (r *Resolver) makeNodeResolver() graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		rawID, ok := p.Args["id"]
 		if !ok || rawID == nil {
 			return nil, fmt.Errorf("missing id argument")
@@ -650,7 +669,7 @@ func (r *Resolver) makeNodeResolver() graphql.FieldResolveFn {
 			return nil, nil
 		}
 		results[0]["__typename"] = typeName
-		return results[0], nil
+		return annotateRowWithSnapshot(p.Context, results[0]), nil
 	}
 }
 
@@ -784,6 +803,12 @@ func shapeConnectionRows(rows []map[string]interface{}, plan *planner.Connection
 // makeConnectionResolver creates a resolver for root connection queries.
 func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		field := firstFieldAST(p.Info.FieldASTs)
 		if field == nil {
 			return nil, fmt.Errorf("missing field AST")
@@ -813,6 +838,7 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 			return nil, err
 		}
 
+		annotateRowsWithSnapshot(p.Context, results)
 		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
 		seedBatchRows(p, results)
@@ -822,6 +848,12 @@ func (r *Resolver) makeConnectionResolver(table introspection.Table) graphql.Fie
 
 func (r *Resolver) makeVectorConnectionResolver(table introspection.Table, vectorCol introspection.Column) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		field := firstFieldAST(p.Info.FieldASTs)
 		if field == nil {
 			return nil, fmt.Errorf("missing field AST")
@@ -881,6 +913,7 @@ func (r *Resolver) makeVectorConnectionResolver(table introspection.Table, vecto
 				fieldName := introspection.GraphQLFieldName(col)
 				node[fieldName] = row[fieldName]
 			}
+			annotateRowWithSnapshot(p.Context, node)
 			rank := i + 1
 
 			cursorValues := make([]interface{}, 0, len(plan.PKColumns)+1)
@@ -965,6 +998,12 @@ func coerceDistanceValue(value interface{}) (float64, error) {
 // makeOneToManyConnectionResolver creates a resolver for relationship connection queries.
 func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		source, ok := p.Source.(map[string]interface{})
 		if !ok {
 			return nil, fmt.Errorf("invalid source type")
@@ -1021,6 +1060,7 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 			return nil, err
 		}
 
+		annotateRowsWithSnapshot(p.Context, results)
 		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
 		seedBatchRows(p, results)
@@ -1031,6 +1071,12 @@ func (r *Resolver) makeOneToManyConnectionResolver(parentTable introspection.Tab
 // makeManyToManyConnectionResolver creates a resolver for many-to-many connection queries.
 func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		source, ok := p.Source.(map[string]interface{})
 		if !ok {
 			return nil, fmt.Errorf("invalid source type")
@@ -1100,6 +1146,7 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 			return nil, err
 		}
 
+		annotateRowsWithSnapshot(p.Context, results)
 		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
 		seedBatchRows(p, results)
@@ -1110,6 +1157,12 @@ func (r *Resolver) makeManyToManyConnectionResolver(parentTable introspection.Ta
 // makeEdgeListConnectionResolver creates a resolver for edge-list connection queries.
 func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		source, ok := p.Source.(map[string]interface{})
 		if !ok {
 			return nil, fmt.Errorf("invalid source type")
@@ -1169,6 +1222,7 @@ func (r *Resolver) makeEdgeListConnectionResolver(parentTable introspection.Tabl
 			return nil, err
 		}
 
+		annotateRowsWithSnapshot(p.Context, results)
 		results, hasNext, hasPrev := shapeConnectionRows(results, plan)
 
 		return r.buildConnectionResult(p.Context, results, plan, hasNext, hasPrev), nil
@@ -2336,6 +2390,12 @@ func (r *Resolver) mapColumnTypeToGraphQLInput(table introspection.Table, col *i
 // makeManyToOneResolver creates a resolver for many-to-one relationships (e.g., verses.chapter)
 func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspection.Relationship) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
+		var err error
+		p, err = r.withSnapshotContext(p)
+		if err != nil {
+			return nil, err
+		}
+
 		// Get the foreign key value from parent object
 		source, ok := p.Source.(map[string]interface{})
 		if !ok {
@@ -2392,6 +2452,6 @@ func (r *Resolver) makeManyToOneResolver(table introspection.Table, rel introspe
 			return nil, nil
 		}
 
-		return results[0], nil
+		return annotateRowWithSnapshot(p.Context, results[0]), nil
 	}
 }

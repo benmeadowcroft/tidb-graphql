@@ -67,6 +67,10 @@ func (e *RoleExecutor) QueryContext(ctx context.Context, query string, args ...a
 	}, nil
 }
 
+func (e *RoleExecutor) queryContextWithSnapshot(ctx context.Context, query string, args ...any) (Rows, error) {
+	return e.QueryContext(ctx, query, args...)
+}
+
 func (e *RoleExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	conn, cleanup, err := e.prepareRoleConn(ctx)
 	if err != nil {
@@ -99,6 +103,7 @@ func (e *RoleExecutor) prepareRoleConn(ctx context.Context) (*sql.Conn, func(), 
 	}
 
 	cleanup := func() {
+		resetSnapshotOnConn(ctx, conn)
 		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "SET ROLE DEFAULT")
 		_ = conn.Close()
 	}
@@ -120,6 +125,12 @@ func (e *RoleExecutor) prepareRoleConn(ctx context.Context) (*sql.Conn, func(), 
 	if err := e.useDatabase(ctx, conn); err != nil {
 		cleanup()
 		return nil, nil, err
+	}
+	if snapshot, ok := SnapshotReadFromContext(ctx); ok {
+		if err := setSnapshotOnConn(ctx, conn, snapshot); err != nil {
+			cleanup()
+			return nil, nil, err
+		}
 	}
 
 	return conn, cleanup, nil

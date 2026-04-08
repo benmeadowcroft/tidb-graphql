@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -197,4 +199,57 @@ func TestRoleAwareRows(t *testing.T) {
 			t.Error("expected cleanup function to work when called")
 		}
 	})
+}
+
+func TestSnapshotExecutor_StandardExecutorUsesTidbSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec("SET @@tidb_snapshot = \\?").
+		WithArgs("2026-04-01 10:00:00").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT 1").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+	mock.ExpectExec("SET @@tidb_snapshot = ''").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	executor := NewSnapshotExecutor(NewStandardExecutor(db))
+	ctx := WithSnapshotRead(context.Background(), SnapshotRead{
+		Time: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+	})
+
+	rows, err := executor.QueryContext(ctx, "SELECT 1")
+	if err != nil {
+		t.Fatalf("QueryContext() error = %v", err)
+	}
+	_ = rows.Close()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestSnapshotExecutor_DelegatesWithoutSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT 1").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+
+	executor := NewSnapshotExecutor(NewStandardExecutor(db))
+	rows, err := executor.QueryContext(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatalf("QueryContext() error = %v", err)
+	}
+	_ = rows.Close()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
 }

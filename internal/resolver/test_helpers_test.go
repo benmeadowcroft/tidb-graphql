@@ -172,11 +172,13 @@ type fakeExecutor struct {
 	responses [][][]any
 	calls     int
 	args      [][]any
+	ctxs      []context.Context
 }
 
-func (e *fakeExecutor) QueryContext(_ context.Context, _ string, args ...any) (dbexec.Rows, error) {
+func (e *fakeExecutor) QueryContext(ctx context.Context, _ string, args ...any) (dbexec.Rows, error) {
 	e.calls++
 	e.args = append(e.args, args)
+	e.ctxs = append(e.ctxs, ctx)
 	idx := e.calls - 1
 	if idx >= len(e.responses) {
 		return &fakeRows{}, nil
@@ -196,15 +198,18 @@ type txAwareFakeExecutor struct {
 	baseResponses [][][]any
 	baseCalls     int
 	baseArgs      [][]any
+	baseCtxs      []context.Context
 
 	txResponses [][][]any
 	txCalls     int
 	txArgs      [][]any
+	txCtxs      []context.Context
 }
 
-func (e *txAwareFakeExecutor) QueryContext(_ context.Context, _ string, args ...any) (dbexec.Rows, error) {
+func (e *txAwareFakeExecutor) QueryContext(ctx context.Context, _ string, args ...any) (dbexec.Rows, error) {
 	e.baseCalls++
 	e.baseArgs = append(e.baseArgs, args)
+	e.baseCtxs = append(e.baseCtxs, ctx)
 	idx := e.baseCalls - 1
 	if idx >= len(e.baseResponses) {
 		return &fakeRows{}, nil
@@ -224,9 +229,10 @@ type txAwareFakeTx struct {
 	parent *txAwareFakeExecutor
 }
 
-func (t *txAwareFakeTx) QueryContext(_ context.Context, _ string, args ...any) (dbexec.Rows, error) {
+func (t *txAwareFakeTx) QueryContext(ctx context.Context, _ string, args ...any) (dbexec.Rows, error) {
 	t.parent.txCalls++
 	t.parent.txArgs = append(t.parent.txArgs, args)
+	t.parent.txCtxs = append(t.parent.txCtxs, ctx)
 	idx := t.parent.txCalls - 1
 	if idx >= len(t.parent.txResponses) {
 		return &fakeRows{}, nil

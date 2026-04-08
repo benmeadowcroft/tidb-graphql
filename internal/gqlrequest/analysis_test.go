@@ -13,6 +13,7 @@ func TestAnalyzeEnvelope_Metadata(t *testing.T) {
 		wantVars          int
 		wantParseErr      bool
 		wantSelectionErr  bool
+		wantValidationErr bool
 		wantResolvedName  string
 		wantOperationHash bool
 	}{
@@ -77,6 +78,26 @@ func TestAnalyzeEnvelope_Metadata(t *testing.T) {
 			wantParseErr: true,
 		},
 		{
+			name: "reject nested @asOf",
+			query: `query {
+				users {
+					posts @asOf(offsetSeconds: -10) {
+						id
+					}
+				}
+			}`,
+			wantValidationErr: true,
+		},
+		{
+			name: "reject future @asOf",
+			query: `query {
+				users @asOf(time: "2999-01-01T00:00:00Z") {
+					id
+				}
+			}`,
+			wantValidationErr: true,
+		},
+		{
 			name:         "empty query",
 			query:        "",
 			wantParseErr: false,
@@ -95,7 +116,10 @@ func TestAnalyzeEnvelope_Metadata(t *testing.T) {
 			if (analysis.SelectionError != nil) != tt.wantSelectionErr {
 				t.Fatalf("SelectionError presence = %v, want %v (err=%v)", analysis.SelectionError != nil, tt.wantSelectionErr, analysis.SelectionError)
 			}
-			if tt.wantParseErr || tt.wantSelectionErr {
+			if (analysis.ValidationError != nil) != tt.wantValidationErr {
+				t.Fatalf("ValidationError presence = %v, want %v (err=%v)", analysis.ValidationError != nil, tt.wantValidationErr, analysis.ValidationError)
+			}
+			if tt.wantParseErr || tt.wantSelectionErr || tt.wantValidationErr {
 				return
 			}
 			if analysis.OperationType != tt.wantType {
@@ -117,6 +141,24 @@ func TestAnalyzeEnvelope_Metadata(t *testing.T) {
 				t.Fatalf("OperationHash presence = %v, want %v", analysis.OperationHash != "", tt.wantOperationHash)
 			}
 		})
+	}
+}
+
+func TestAnalyzeEnvelope_ValidatesAsOfVariables(t *testing.T) {
+	analysis := AnalyzeEnvelope(Envelope{
+		Query: `query Q($offset: Int!) {
+			users @asOf(offsetSeconds: $offset) {
+				id
+			}
+		}`,
+		OperationName: "Q",
+		VariablesRaw:  []byte(`{"offset":10}`),
+	})
+	if analysis.ValidationError == nil {
+		t.Fatalf("expected validation error for positive offset variable")
+	}
+	if got, want := analysis.ValidationError.Error(), "@asOf offsetSeconds must be less than or equal to 0"; got != want {
+		t.Fatalf("ValidationError = %q, want %q", got, want)
 	}
 }
 

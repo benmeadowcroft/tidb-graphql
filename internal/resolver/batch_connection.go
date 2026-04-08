@@ -91,6 +91,7 @@ func runBatchConnectionChunks(
 	if err != nil {
 		return nil, err
 	}
+	annotateRowsWithSnapshot(ctx, results)
 	span.SetAttributes(attribute.Int("graphql.batch.result_rows", len(results)))
 	if metrics != nil {
 		metrics.RecordBatchResultRows(ctx, int64(len(results)), bp.relation)

@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	"tidb-graphql/internal/asof"
 
 	"github.com/graphql-go/graphql/language/ast"
 	"github.com/graphql-go/graphql/language/parser"
@@ -32,6 +35,7 @@ type Analysis struct {
 	DecodeError     error
 	ParseError      error
 	SelectionError  error
+	ValidationError error
 	CanonicalizeErr error
 }
 
@@ -85,6 +89,16 @@ func AnalyzeEnvelope(env Envelope) *Analysis {
 	analysis.OperationName = effectiveOperationName(op)
 	analysis.OperationType = string(op.Operation)
 	analysis.VariableCount = len(op.VariableDefinitions)
+
+	variables, err := asof.DecodeVariables(env.VariablesRaw)
+	if err != nil {
+		analysis.ValidationError = err
+		return analysis
+	}
+	if err := asof.ValidateOperation(op, analysis.Fragments, variables, time.Now().UTC()); err != nil {
+		analysis.ValidationError = err
+		return analysis
+	}
 
 	fields, depth := countFieldsAndDepth(op.SelectionSet, analysis.Fragments, 1, map[string]bool{}, map[string]bool{})
 	analysis.FieldCount = fields

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quickstart-db-credentials
+  namespace: tidb-graphql-quickstart
+type: Opaque
+stringData:
+  database-user: "root"
+  database-password: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quickstart-tidb-graphql-config
+  namespace: tidb-graphql-quickstart
+data:
+  tidb-graphql.yaml: |
+    database:
+      host: tidb-tidb
+      port: 4000
+      user: root
+      database: tidb_graphql_tutorial
+
+    server:
+      port: 8080
+      graphiql_enabled: true
+      tls_mode: off
+      admin:
+        schema_reload_enabled: true
+        auth_token: quickstart-admin-token
+      search:
+        vector_require_index: false
+
+    observability:
+      environment: development
+      logging:
+        format: text

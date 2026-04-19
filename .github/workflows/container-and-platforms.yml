@@ -1,4 +1,4 @@
-name: Docker Build & Push
+name: Container and Platforms
 
 on:
   pull_request:
@@ -8,13 +8,32 @@ on:
     tags: ["v*"]
 
 concurrency:
-  group: docker-${{ github.ref }}
+  group: container-and-platforms-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      k8s_changed: ${{ steps.filter.outputs.k8s }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            k8s:
+              - 'examples/k8s/quickstart/manifests/**'
+              - '.github/workflows/container-and-platforms.yml'
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -51,9 +70,31 @@ jobs:
           docker compose -f examples/compose/quickstart-db-zero/docker-compose.yml config >/dev/null
           docker compose -f examples/compose/oidc-roles/docker-compose.yml config >/dev/null
 
+  k8s-compat:
+    needs: [changes, test]
+    if: needs.changes.outputs.k8s_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: latest
+
+      - name: Render Kubernetes kustomization
+        run: kubectl kustomize examples/k8s/quickstart/manifests >/dev/null
+
   build-and-push:
-    if: github.event_name == 'push'
-    needs: [test, compose-compat]
+    if: >-
+      github.event_name == 'push' &&
+      needs.changes.result == 'success' &&
+      needs.test.result == 'success' &&
+      needs['compose-compat'].result == 'success' &&
+      contains(fromJSON('["success","skipped"]'), needs['k8s-compat'].result)
+    needs: [changes, test, compose-compat, k8s-compat]
     runs-on: ubuntu-latest
     permissions:
       contents: read

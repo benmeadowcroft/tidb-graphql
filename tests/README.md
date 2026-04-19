@@ -55,6 +55,20 @@ The `internal/testutil/tidbcloud` package provides utilities for integration tes
 
 Some integration tests create multiple temporary databases in the same test run to exercise multi-database configuration, namespace wrappers, cross-database relationships, and schema refresh behavior.
 
+## Snapshot Read Integration Tests
+
+The `@asOf` integration tests in [`tests/integration/asof_test.go`](./integration/asof_test.go) require a TiDB environment backed by TiKV/PD so historical snapshot reads are available.
+
+Lightweight or single-process TiDB environments can lack the `tikv_gc_safe_point` metadata required for `@@tidb_snapshot`. In those environments, the `@asOf` tests intentionally skip with a clear message instead of failing the full integration suite.
+
+For full `@asOf` coverage, use a complete TiDB topology such as the Kubernetes example or another deployment that includes TiDB, PD, and TiKV.
+
+To run only the snapshot integration coverage:
+
+```bash
+go test -tags=integration ./tests/integration -run AsOf
+```
+
 ## Role-Based Authorization Integration Tests
 
 Role-based authorization tests create and grant database roles, then validates GraphQL access through OIDC + DB role middleware. These tests create a temporary runtime user and require database credentials with:

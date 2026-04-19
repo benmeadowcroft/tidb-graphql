@@ -162,6 +162,7 @@ func (r *Resolver) buildConnectionResult(ctx context.Context, rows []map[string]
 	if rows == nil {
 		rows = []map[string]interface{}{}
 	}
+	annotateRowsWithSnapshot(ctx, rows)
 	countCtx := ctx
 	if countCtx == nil {
 		countCtx = context.Background()

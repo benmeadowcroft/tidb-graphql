@@ -241,7 +241,7 @@ const (
 )
 
 func parentKeyFromResolve(p graphql.ResolveParams) string {
-	return fmt.Sprintf("%s|%s|%s", responsePathString(p.Info.Path), fieldNameWithAlias(p.Info.FieldASTs), stableArgsKey(p.Args))
+	return fmt.Sprintf("%s|%s|%s|%s", responsePathString(p.Info.Path), fieldNameWithAlias(p.Info.FieldASTs), stableArgsKey(p.Args), snapshotKeyPart(p.Context))
 }
 
 func parentKeyFromSource(source interface{}) (string, bool) {

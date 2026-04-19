@@ -112,13 +112,14 @@ func (r *Resolver) tryBatchOneToManyConnection(p graphql.ResolveParams, table in
 	cursorCols := planner.CursorColumns(relatedTable, orderBy)
 
 	relKey := fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s",
+		"%s|%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.RemoteTable,
 		remoteColumn,
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
+		snapshotKeyPart(p.Context),
 	)
 
 	if cached := state.getConnectionRows(relKey); cached != nil {
@@ -323,7 +324,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 	currentParentTupleKey := tupleKeyFromValues(pkValues)
 
 	relKey := fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s|%s",
+		"%s|%s|%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.RemoteTable,
 		rel.JunctionTable,
@@ -331,6 +332,7 @@ func (r *Resolver) tryBatchManyToManyConnection(p graphql.ResolveParams, table i
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
+		snapshotKeyPart(p.Context),
 	)
 
 	if cached := state.getConnectionRows(relKey); cached != nil {
@@ -523,13 +525,14 @@ func (r *Resolver) tryBatchEdgeListConnection(p graphql.ResolveParams, table int
 	currentParentTupleKey := tupleKeyFromValues(pkValues)
 
 	relKey := fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%s",
+		"%s|%s|%s|%s|%s|%s|%s",
 		table.Name,
 		rel.JunctionTable,
 		strings.Join(junctionLocalColumns, ","),
 		orderByKey,
 		columnsKey(selection),
 		stableArgsKey(p.Args),
+		snapshotKeyPart(p.Context),
 	)
 
 	if cached := state.getConnectionRows(relKey); cached != nil {
@@ -686,7 +689,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		return nil, true, fmt.Errorf("invalid many-to-one batch mapping")
 	}
 
-	relKey := fmt.Sprintf("%s|%s|%s|%s", relatedTable.Name, strings.Join(remoteColumns, ","), parentKey, columnsKey(selection))
+	relKey := fmt.Sprintf("%s|%s|%s|%s|%s", relatedTable.Name, strings.Join(remoteColumns, ","), parentKey, columnsKey(selection), snapshotKeyPart(p.Context))
 	if cached := state.getChildRows(relKey); cached != nil {
 		state.IncrementCacheHit()
 		if metrics != nil {
@@ -741,6 +744,7 @@ func (r *Resolver) tryBatchManyToOne(p graphql.ResolveParams, table introspectio
 		if err != nil {
 			return nil, true, err
 		}
+		annotateRowsWithSnapshot(p.Context, results)
 		if metrics != nil {
 			metrics.RecordBatchResultRows(p.Context, int64(len(results)), relationManyToOne)
 		}

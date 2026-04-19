@@ -236,7 +236,7 @@ func configureDatabase(ctx context.Context, cfg *config.Config, logger *logging.
 	db.SetMaxIdleConns(cfg.Database.Pool.MaxIdle)
 	db.SetConnMaxLifetime(cfg.Database.Pool.MaxLifetime)
 
-	if err := waitForDatabase(ctx, cfg, logger, db, effectiveDatabase, databases); err != nil {
+	if err := waitForDatabase(ctx, cfg, logger, db, databases); err != nil {
 		return err
 	}
 
@@ -251,7 +251,7 @@ func configureDatabase(ctx context.Context, cfg *config.Config, logger *logging.
 	return nil
 }
 
-func waitForDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, effectiveDatabase string, databases []string) error {
+func waitForDatabase(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, databases []string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -478,7 +478,7 @@ func buildQueryExecutor(cfg *config.Config, db *sql.DB, availableRoles []string,
 			MultiDB:      multiDB,
 		})
 	}
-	return queryExecutor
+	return dbexec.NewSnapshotExecutor(queryExecutor)
 }
 
 func startSchemaManager(ctx context.Context, cfg *config.Config, logger *logging.Logger, db *sql.DB, limits *planner.PlanLimits, metrics *observability.SchemaRefreshMetrics, executor dbexec.QueryExecutor, effectiveDatabase string, availableRoles []string) (*schemarefresh.Manager, context.CancelFunc, error) {
@@ -565,14 +565,15 @@ func buildGraphQLHandler(cfg *config.Config, logger *logging.Logger, manager *sc
 	// Middleware order: OIDC auth runs outermost, then DB role extraction.
 	// DB role middleware must run after OIDC because it reads claims from the
 	// validated JWT token that OIDC places in context. The chain is:
-	//   request -> logging -> OIDC auth -> DB role -> request analysis -> mutation tx -> metrics -> tracing -> batching -> graphql
+	//   request -> logging -> OIDC auth -> DB role -> request analysis -> request validation -> mutation tx -> metrics -> tracing -> batching -> graphql
 	baseHandler := metricsHandler
 	if executor != nil {
 		baseHandler = middleware.MutationTransactionMiddleware(executor)(baseHandler)
 		logger.Info("mutation transaction middleware enabled")
 	}
 
-	analysisHandler := middleware.GraphQLRequestAnalysisMiddleware(manager)(baseHandler)
+	validationHandler := middleware.GraphQLRequestValidationMiddleware()(baseHandler)
+	analysisHandler := middleware.GraphQLRequestAnalysisMiddleware(manager)(validationHandler)
 
 	dbRoleHandler := analysisHandler
 	if cfg.Server.Auth.DBRoleEnabled {

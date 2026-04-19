@@ -5,6 +5,7 @@ package dbexec
 import (
 	"context"
 	"database/sql"
+	"errors"
 )
 
 // Rows abstracts sql.Rows to allow wrapped cleanup behavior.
@@ -45,6 +46,29 @@ func (e *StandardExecutor) QueryContext(ctx context.Context, query string, args 
 		return nil, sql.ErrConnDone
 	}
 	return e.db.QueryContext(ctx, query, args...)
+}
+
+func (e *StandardExecutor) queryContextWithSnapshot(ctx context.Context, query string, args ...any) (Rows, error) {
+	snapshot, ok := SnapshotReadFromContext(ctx)
+	if !ok {
+		return e.QueryContext(ctx, query, args...)
+	}
+
+	reserved, err := acquireConnWithSession(ctx, e.db, snapshotSessionOp(snapshot))
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := reserved.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, errors.Join(err, reserved.cleanup(ctx))
+	}
+	return &connAwareRows{
+		Rows: rows,
+		cleanup: func() error {
+			return reserved.cleanup(ctx)
+		},
+	}, nil
 }
 
 func (e *StandardExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {

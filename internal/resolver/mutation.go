@@ -318,7 +318,7 @@ func (r *Resolver) buildCreateMutationPlan(table introspection.Table) createMuta
 			if rel.IsCrossDatabase {
 				continue // cross-database M2M connect not supported
 			}
-			if !r.m2mConnectSupported(table, rel) {
+			if !r.m2mConnectSupported(rel) {
 				continue
 			}
 			plan.m2mFields[rel.GraphQLFieldName+"Connect"] = rel
@@ -646,7 +646,7 @@ func (r *Resolver) localColumnsMutationAllowed(table introspection.Table, cols [
 	return seen
 }
 
-func (r *Resolver) m2mConnectSupported(parentTable introspection.Table, rel introspection.Relationship) bool {
+func (r *Resolver) m2mConnectSupported(rel introspection.Relationship) bool {
 	if !rel.IsManyToMany {
 		return false
 	}

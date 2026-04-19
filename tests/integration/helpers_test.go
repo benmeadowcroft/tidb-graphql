@@ -42,6 +42,53 @@ func requireIntegrationEnv(t *testing.T) {
 	}
 }
 
+func requireSnapshotReadSupport(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	const skipReason = "@asOf integration tests require TiKV/PD-backed TiDB with tikv_gc_safe_point available"
+
+	var safePoint sql.NullString
+	err := db.QueryRow(`SELECT variable_value FROM mysql.tidb WHERE variable_name = 'tikv_gc_safe_point'`).Scan(&safePoint)
+	switch {
+	case err == sql.ErrNoRows:
+		t.Skip(skipReason)
+	case err != nil:
+		if isSnapshotUnsupportedError(err) {
+			t.Skip(skipReason)
+		}
+		require.NoError(t, err, "failed to probe snapshot read support")
+	case strings.TrimSpace(safePoint.String) == "":
+		t.Skip(skipReason)
+	}
+
+	var snapshotTime time.Time
+	err = db.QueryRow(`SELECT NOW(6)`).Scan(&snapshotTime)
+	require.NoError(t, err, "failed to read current database time for snapshot probe")
+
+	// Use a small past offset rather than the exact current database timestamp.
+	// TiDB can reject boundary timestamps that land slightly ahead of currentTS.
+	sessionValue := snapshotTime.Add(-1 * time.Second).Format("2006-01-02 15:04:05.999999")
+	if _, err := db.Exec(`SET @@tidb_snapshot = ?`, sessionValue); err != nil {
+		if isSnapshotUnsupportedError(err) {
+			t.Skip(skipReason)
+		}
+		require.NoError(t, err, "failed to enable snapshot reads during probe")
+	}
+
+	_, err = db.Exec(`SET @@tidb_snapshot = ''`)
+	require.NoError(t, err, "failed to clear tidb_snapshot after snapshot probe")
+}
+
+func isSnapshotUnsupportedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "can not get 'tikv_gc_safe_point'") ||
+		strings.Contains(msg, "can't get 'tikv_gc_safe_point'")
+}
+
 func cloudDSN() string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&tls=%s",
 		cloudUserWithPrefix(),
@@ -131,7 +178,31 @@ func buildBaseTestConfig(port int) *config.Config {
 func executeGraphQLHTTP(t *testing.T, port int, query string) map[string]interface{} {
 	t.Helper()
 
-	payload, err := json.Marshal(map[string]string{"query": query})
+	result := executeGraphQLHTTPRaw(t, port, query, nil, "")
+	require.Equal(t, http.StatusOK, result.StatusCode, "unexpected GraphQL HTTP status: %s", result.RawBody)
+	require.Empty(t, result.Errors, "GraphQL returned errors: %s", result.RawBody)
+	return result.Data
+}
+
+type graphQLHTTPResult struct {
+	StatusCode int
+	Data       map[string]interface{}
+	Errors     []map[string]interface{}
+	RawBody    string
+}
+
+func executeGraphQLHTTPRaw(t *testing.T, port int, query string, variables map[string]interface{}, operationName string) graphQLHTTPResult {
+	t.Helper()
+
+	payloadMap := map[string]interface{}{"query": query}
+	if variables != nil {
+		payloadMap["variables"] = variables
+	}
+	if operationName != "" {
+		payloadMap["operationName"] = operationName
+	}
+
+	payload, err := json.Marshal(payloadMap)
 	require.NoError(t, err)
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d/graphql", port), bytes.NewReader(payload))
@@ -144,15 +215,18 @@ func executeGraphQLHTTP(t *testing.T, port int, query string) map[string]interfa
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode, "unexpected GraphQL HTTP status: %s", string(body))
 
 	var decoded struct {
 		Data   map[string]interface{}   `json:"data"`
 		Errors []map[string]interface{} `json:"errors"`
 	}
 	require.NoError(t, json.Unmarshal(body, &decoded), "failed to parse GraphQL response: %s", string(body))
-	require.Empty(t, decoded.Errors, "GraphQL returned errors: %s", string(body))
-	return decoded.Data
+	return graphQLHTTPResult{
+		StatusCode: resp.StatusCode,
+		Data:       decoded.Data,
+		Errors:     decoded.Errors,
+		RawBody:    string(body),
+	}
 }
 
 func waitForHealthyWithLogs(t *testing.T, port int, stdout, stderr *bytes.Buffer, env []string) {

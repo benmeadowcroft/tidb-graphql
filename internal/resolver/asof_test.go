@@ -7,11 +7,16 @@ import (
 	"time"
 
 	"tidb-graphql/internal/dbexec"
+	"tidb-graphql/internal/gqlrequest"
 	"tidb-graphql/internal/introspection"
 	"tidb-graphql/internal/naming"
+	"tidb-graphql/internal/nodeid"
 	"tidb-graphql/internal/schemafilter"
 
 	"github.com/graphql-go/graphql"
+	"github.com/graphql-go/graphql/language/ast"
+	"github.com/graphql-go/graphql/language/parser"
+	"github.com/graphql-go/graphql/language/source"
 )
 
 func TestBuildGraphQLSchema_IncludesAsOfDirective(t *testing.T) {
@@ -171,6 +176,100 @@ func TestAsOfTotalCountUsesSnapshotContext(t *testing.T) {
 	}
 }
 
+func TestAsOfNodeQueryUsesSnapshotContext(t *testing.T) {
+	executor := &snapshotRoutingExecutor{}
+	dbSchema := simpleUsersOnlySchema()
+	typeName := introspection.GraphQLTypeName(dbSchema.Tables[0])
+	nodeID := nodeid.Encode(typeName, int64(1))
+
+	doc, err := parser.Parse(parser.ParseParams{
+		Source: source.NewSource(&source.Source{
+			Body: []byte(`query {
+				node @asOf(time: "2026-04-01T10:00:00Z") {
+					... on ` + typeName + ` {
+						databaseId
+					}
+				}
+			}`),
+			Name: "graphql",
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	op, ok := doc.Definitions[0].(*ast.OperationDefinition)
+	if !ok {
+		t.Fatalf("expected operation definition, got %T", doc.Definitions[0])
+	}
+	field, ok := op.SelectionSet.Selections[0].(*ast.Field)
+	if !ok {
+		t.Fatalf("expected field selection, got %T", op.SelectionSet.Selections[0])
+	}
+
+	r := NewResolver(executor, dbSchema, nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+
+	result, err := r.makeNodeResolver()(graphql.ResolveParams{
+		Args: map[string]any{
+			"id": nodeID,
+		},
+		Context: NewBatchingContext(context.Background()),
+		Info: graphql.ResolveInfo{
+			ParentType: graphql.NewObject(graphql.ObjectConfig{Name: "Query", Fields: graphql.Fields{}}),
+			FieldASTs:  []*ast.Field{field},
+			Fragments:  map[string]ast.Definition{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("makeNodeResolver() error = %v", err)
+	}
+
+	if got := executor.snapshotQueries["current"]; got != 0 {
+		t.Fatalf("current snapshot queries = %d, want 0", got)
+	}
+	if got := executor.snapshotQueries["snapshot"]; got != 1 {
+		t.Fatalf("snapshot queries = %d, want 1", got)
+	}
+
+	node, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected node result map, got %T", result)
+	}
+	if got := node["databaseId"]; got != int64(1) && got != 1 {
+		t.Fatalf("databaseId = %v, want 1", got)
+	}
+}
+
+func TestWithSnapshotContextUsesAnalysisValidationTime(t *testing.T) {
+	r := NewResolver(nil, simpleUsersOnlySchema(), nil, 0, schemafilter.Config{}, naming.DefaultConfig())
+	field := &ast.Field{
+		Name: &ast.Name{Value: "users"},
+		Directives: []*ast.Directive{
+			{
+				Name: &ast.Name{Value: "asOf"},
+				Arguments: []*ast.Argument{
+					{
+						Name:  &ast.Name{Value: "time"},
+						Value: &ast.StringValue{Value: "2026-04-18T00:00:00Z"},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := r.withSnapshotContext(graphql.ResolveParams{
+		Context: gqlrequest.WithAnalysis(context.Background(), &gqlrequest.Analysis{
+			ValidationTime: time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC),
+		}),
+		Info: graphql.ResolveInfo{
+			ParentType: graphql.NewObject(graphql.ObjectConfig{Name: "Query", Fields: graphql.Fields{}}),
+			FieldASTs:  []*ast.Field{field},
+		},
+	})
+	if err == nil || err.Error() != "@asOf time must not be in the future" {
+		t.Fatalf("withSnapshotContext() error = %v, want future time error", err)
+	}
+}
+
 func simpleAsOfSchema() *introspection.Schema {
 	users := introspection.Table{
 		Name: "users",
@@ -203,7 +302,7 @@ func simpleUsersOnlySchema() *introspection.Schema {
 	users := introspection.Table{
 		Name: "users",
 		Columns: []introspection.Column{
-			{Name: "id", IsPrimaryKey: true},
+			{Name: "id", DataType: "int", IsPrimaryKey: true},
 		},
 	}
 	renamePrimaryKeyID(&users)

@@ -250,9 +250,12 @@ func (r *connAwareRows) Close() error {
 	var err error
 	if r.Rows != nil {
 		err = r.Rows.Close()
+		r.Rows = nil
 	}
 	if r.cleanup != nil {
-		err = errors.Join(err, r.cleanup())
+		cleanup := r.cleanup
+		r.cleanup = nil
+		err = errors.Join(err, cleanup())
 	}
 	return err
 }

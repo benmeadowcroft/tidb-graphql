@@ -67,14 +67,14 @@ func TestResolveDirective_RejectsInvalidUsage(t *testing.T) {
 		{
 			name: "missing args",
 			directive: &ast.Directive{
-				Name: DirectiveASTName(),
+				Name: directiveASTName(),
 			},
 			wantErr: "@asOf requires exactly one of: time, offsetSeconds",
 		},
 		{
 			name: "multiple args",
 			directive: &ast.Directive{
-				Name: DirectiveASTName(),
+				Name: directiveASTName(),
 				Arguments: []*ast.Argument{
 					{Name: &ast.Name{Value: ArgTime}, Value: &ast.StringValue{Value: "2026-04-01T10:00:00Z"}},
 					{Name: &ast.Name{Value: ArgOffsetSeconds}, Value: &ast.IntValue{Value: "-10"}},
@@ -85,7 +85,7 @@ func TestResolveDirective_RejectsInvalidUsage(t *testing.T) {
 		{
 			name: "future time",
 			directive: &ast.Directive{
-				Name: DirectiveASTName(),
+				Name: directiveASTName(),
 				Arguments: []*ast.Argument{
 					{Name: &ast.Name{Value: ArgTime}, Value: &ast.StringValue{Value: "2026-04-08T10:00:00Z"}},
 				},
@@ -95,7 +95,7 @@ func TestResolveDirective_RejectsInvalidUsage(t *testing.T) {
 		{
 			name: "positive offset",
 			directive: &ast.Directive{
-				Name: DirectiveASTName(),
+				Name: directiveASTName(),
 				Arguments: []*ast.Argument{
 					{Name: &ast.Name{Value: ArgOffsetSeconds}, Value: &ast.IntValue{Value: "10"}},
 				},
@@ -105,7 +105,7 @@ func TestResolveDirective_RejectsInvalidUsage(t *testing.T) {
 		{
 			name: "variable time",
 			directive: &ast.Directive{
-				Name: DirectiveASTName(),
+				Name: directiveASTName(),
 				Arguments: []*ast.Argument{
 					{Name: &ast.Name{Value: ArgTime}, Value: &ast.Variable{Name: &ast.Name{Value: "t"}}},
 				},
@@ -128,7 +128,7 @@ func TestResolveDirective_RejectsInvalidUsage(t *testing.T) {
 func TestValidateOperation_RootOnly(t *testing.T) {
 	now := time.Date(2026, 4, 7, 12, 0, 0, 0, time.UTC)
 	directive := &ast.Directive{
-		Name: DirectiveASTName(),
+		Name: directiveASTName(),
 		Arguments: []*ast.Argument{
 			{Name: &ast.Name{Value: ArgTime}, Value: &ast.StringValue{Value: "2026-04-01T10:00:00Z"}},
 		},
@@ -189,6 +189,6 @@ func TestDecodeVariables(t *testing.T) {
 	}
 }
 
-func DirectiveASTName() *ast.Name {
+func directiveASTName() *ast.Name {
 	return &ast.Name{Value: DirectiveName}
 }

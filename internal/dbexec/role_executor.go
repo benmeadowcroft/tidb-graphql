@@ -69,10 +69,6 @@ func (e *RoleExecutor) QueryContext(ctx context.Context, query string, args ...a
 	}, nil
 }
 
-func (e *RoleExecutor) queryContextWithSnapshot(ctx context.Context, query string, args ...any) (Rows, error) {
-	return e.QueryContext(ctx, query, args...)
-}
-
 func (e *RoleExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	reserved, err := e.prepareRoleConn(ctx)
 	if err != nil {
@@ -126,6 +122,8 @@ func (e *RoleExecutor) useDatabaseOp() sessionOp {
 	if e.databaseName == "" {
 		return nil
 	}
+	// USE only needs apply-time setup because this reserved connection is closed
+	// after the request/transaction rather than returned with persistent session state.
 	return useDatabaseSessionOp(sqlutil.QuoteIdentifier(e.databaseName))
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"tidb-graphql/internal/asof"
 	"tidb-graphql/internal/dbexec"
+	"tidb-graphql/internal/gqlrequest"
 
 	"github.com/graphql-go/graphql"
 )
@@ -42,7 +43,7 @@ func (r *Resolver) withSnapshotContext(p graphql.ResolveParams) (graphql.Resolve
 	}
 
 	field := firstFieldAST(p.Info.FieldASTs)
-	spec, err := asof.ResolveFieldDirective(field, p.Info.VariableValues, time.Now().UTC())
+	spec, err := asof.ResolveFieldDirective(field, p.Info.VariableValues, snapshotValidationTime(ctx))
 	if err != nil {
 		return p, err
 	}
@@ -112,4 +113,11 @@ func snapshotKeyPart(ctx context.Context) string {
 		return "current"
 	}
 	return fmt.Sprintf("snapshot:%s", identity)
+}
+
+func snapshotValidationTime(ctx context.Context) time.Time {
+	if analysis := gqlrequest.AnalysisFromContext(ctx); analysis != nil && !analysis.ValidationTime.IsZero() {
+		return analysis.ValidationTime
+	}
+	return time.Now().UTC()
 }

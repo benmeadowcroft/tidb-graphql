@@ -31,6 +31,7 @@ type Analysis struct {
 
 	CanonicalOperation string
 	OperationHash      string
+	ValidationTime     time.Time
 
 	DecodeError     error
 	ParseError      error
@@ -89,13 +90,14 @@ func AnalyzeEnvelope(env Envelope) *Analysis {
 	analysis.OperationName = effectiveOperationName(op)
 	analysis.OperationType = string(op.Operation)
 	analysis.VariableCount = len(op.VariableDefinitions)
+	analysis.ValidationTime = time.Now().UTC()
 
 	variables, err := asof.DecodeVariables(env.VariablesRaw)
 	if err != nil {
 		analysis.ValidationError = err
 		return analysis
 	}
-	if err := asof.ValidateOperation(op, analysis.Fragments, variables, time.Now().UTC()); err != nil {
+	if err := asof.ValidateOperation(op, analysis.Fragments, variables, analysis.ValidationTime); err != nil {
 		analysis.ValidationError = err
 		return analysis
 	}

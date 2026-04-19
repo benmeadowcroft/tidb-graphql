@@ -3,6 +3,7 @@ package dbexec
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -208,12 +209,20 @@ func TestSnapshotExecutor_StandardExecutorUsesTidbSnapshot(t *testing.T) {
 	}
 	defer db.Close()
 
+	mock.ExpectQuery("SELECT @@time_zone").
+		WillReturnRows(sqlmock.NewRows([]string{"@@time_zone"}).AddRow("SYSTEM"))
+	mock.ExpectExec("SET time_zone = \\?").
+		WithArgs("+00:00").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("SET @@tidb_snapshot = \\?").
 		WithArgs("2026-04-01 10:00:00").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery("SELECT 1").
 		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
 	mock.ExpectExec("SET @@tidb_snapshot = ''").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET time_zone = \\?").
+		WithArgs("SYSTEM").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 
 	executor := NewSnapshotExecutor(NewStandardExecutor(db))
@@ -225,7 +234,51 @@ func TestSnapshotExecutor_StandardExecutorUsesTidbSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryContext() error = %v", err)
 	}
-	_ = rows.Close()
+	if err := rows.Close(); err != nil {
+		t.Fatalf("rows.Close() error = %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestSnapshotExecutor_StandardExecutorCloseReturnsCleanupError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT @@time_zone").
+		WillReturnRows(sqlmock.NewRows([]string{"@@time_zone"}).AddRow("SYSTEM"))
+	mock.ExpectExec("SET time_zone = \\?").
+		WithArgs("+00:00").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET @@tidb_snapshot = \\?").
+		WithArgs("2026-04-01 10:00:00").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT 1").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+	mock.ExpectExec("SET @@tidb_snapshot = ''").
+		WillReturnError(errors.New("reset failed"))
+	mock.ExpectExec("SET time_zone = \\?").
+		WithArgs("SYSTEM").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	executor := NewSnapshotExecutor(NewStandardExecutor(db))
+	ctx := WithSnapshotRead(context.Background(), SnapshotRead{
+		Time: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+	})
+
+	rows, err := executor.QueryContext(ctx, "SELECT 1")
+	if err != nil {
+		t.Fatalf("QueryContext() error = %v", err)
+	}
+	err = rows.Close()
+	if err == nil || err.Error() != "failed to reset tidb_snapshot: reset failed" {
+		t.Fatalf("rows.Close() error = %v, want reset error", err)
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)
@@ -248,6 +301,171 @@ func TestSnapshotExecutor_DelegatesWithoutSnapshot(t *testing.T) {
 		t.Fatalf("QueryContext() error = %v", err)
 	}
 	_ = rows.Close()
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestRoleExecutor_QueryContextWithoutSnapshotSkipsSnapshotSessionOps(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec("SET ROLE `app_reader`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("USE `shop`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT 1").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+	mock.ExpectExec("SET ROLE DEFAULT").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	executor := NewRoleExecutor(RoleExecutorConfig{
+		DB:           db,
+		DatabaseName: "shop",
+		RoleFromCtx: func(context.Context) (string, bool) {
+			return "app_reader", true
+		},
+		AllowedRoles: []string{"app_reader"},
+	})
+
+	rows, err := executor.QueryContext(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatalf("QueryContext() error = %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("rows.Close() error = %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestRoleExecutor_QueryContextWithSnapshotUsesSharedSessionOps(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec("SET ROLE `app_reader`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("USE `shop`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT @@time_zone").
+		WillReturnRows(sqlmock.NewRows([]string{"@@time_zone"}).AddRow("SYSTEM"))
+	mock.ExpectExec("SET time_zone = \\?").
+		WithArgs("+00:00").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET @@tidb_snapshot = \\?").
+		WithArgs("2026-04-01 10:00:00").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT 1").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(1))
+	mock.ExpectExec("SET @@tidb_snapshot = ''").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET time_zone = \\?").
+		WithArgs("SYSTEM").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET ROLE DEFAULT").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	executor := NewRoleExecutor(RoleExecutorConfig{
+		DB:           db,
+		DatabaseName: "shop",
+		RoleFromCtx: func(context.Context) (string, bool) {
+			return "app_reader", true
+		},
+		AllowedRoles: []string{"app_reader"},
+	})
+	ctx := WithSnapshotRead(context.Background(), SnapshotRead{
+		Time: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+	})
+
+	rows, err := executor.QueryContext(ctx, "SELECT 1")
+	if err != nil {
+		t.Fatalf("QueryContext() error = %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("rows.Close() error = %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestRoleExecutor_ExecContextReturnsCleanupError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec("SET ROLE `app_reader`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("USE `shop`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("UPDATE orders SET status = 'ready'").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("SET ROLE DEFAULT").
+		WillReturnError(errors.New("role reset failed"))
+
+	executor := NewRoleExecutor(RoleExecutorConfig{
+		DB:           db,
+		DatabaseName: "shop",
+		RoleFromCtx: func(context.Context) (string, bool) {
+			return "app_reader", true
+		},
+		AllowedRoles: []string{"app_reader"},
+	})
+
+	_, err = executor.ExecContext(context.Background(), "UPDATE orders SET status = 'ready'")
+	if err == nil || err.Error() != "failed to reset role: role reset failed" {
+		t.Fatalf("ExecContext() error = %v, want role reset error", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sqlmock expectations: %v", err)
+	}
+}
+
+func TestRoleTx_CommitReturnsCleanupError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New() error = %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectExec("SET ROLE `app_reader`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("USE `shop`").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectBegin()
+	mock.ExpectCommit()
+	mock.ExpectExec("SET ROLE DEFAULT").
+		WillReturnError(errors.New("role reset failed"))
+
+	executor := NewRoleExecutor(RoleExecutorConfig{
+		DB:           db,
+		DatabaseName: "shop",
+		RoleFromCtx: func(context.Context) (string, bool) {
+			return "app_reader", true
+		},
+		AllowedRoles: []string{"app_reader"},
+	})
+
+	tx, err := executor.BeginTx(context.Background())
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	if err := tx.Commit(); err == nil || err.Error() != "failed to reset role: role reset failed" {
+		t.Fatalf("Commit() error = %v, want role reset error", err)
+	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sqlmock expectations: %v", err)

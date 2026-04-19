@@ -5,7 +5,7 @@ package dbexec
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"errors"
 )
 
 // Rows abstracts sql.Rows to allow wrapped cleanup behavior.
@@ -49,35 +49,26 @@ func (e *StandardExecutor) QueryContext(ctx context.Context, query string, args 
 }
 
 func (e *StandardExecutor) queryContextWithSnapshot(ctx context.Context, query string, args ...any) (Rows, error) {
-	if e.db == nil {
-		return nil, sql.ErrConnDone
-	}
 	snapshot, ok := SnapshotReadFromContext(ctx)
 	if !ok {
 		return e.QueryContext(ctx, query, args...)
 	}
 
-	conn, err := e.db.Conn(ctx)
+	reserved, err := acquireConnWithSession(ctx, e.db, snapshotSessionOp(snapshot))
 	if err != nil {
-		return nil, fmt.Errorf("failed to acquire connection: %w", err)
-	}
-
-	cleanup := func() {
-		resetSnapshotOnConn(ctx, conn)
-		_ = conn.Close()
-	}
-
-	if err := setSnapshotOnConn(ctx, conn, snapshot); err != nil {
-		cleanup()
 		return nil, err
 	}
 
-	rows, err := conn.QueryContext(ctx, query, args...)
+	rows, err := reserved.conn.QueryContext(ctx, query, args...)
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, errors.Join(err, reserved.cleanup(ctx))
 	}
-	return &connAwareRows{Rows: rows, cleanup: cleanup}, nil
+	return &connAwareRows{
+		Rows: rows,
+		cleanup: func() error {
+			return reserved.cleanup(ctx)
+		},
+	}, nil
 }
 
 func (e *StandardExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {

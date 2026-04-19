@@ -3,6 +3,7 @@ package dbexec
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"tidb-graphql/internal/sqlutil"
@@ -50,20 +51,21 @@ func NewRoleExecutor(cfg RoleExecutorConfig) *RoleExecutor {
 }
 
 func (e *RoleExecutor) QueryContext(ctx context.Context, query string, args ...any) (Rows, error) {
-	conn, cleanup, err := e.prepareRoleConn(ctx)
+	reserved, err := e.prepareRoleConn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := conn.QueryContext(ctx, query, args...)
+	rows, err := reserved.conn.QueryContext(ctx, query, args...)
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, errors.Join(err, reserved.cleanup(ctx))
 	}
 
-	return &roleAwareRows{
-		Rows:    rows,
-		cleanup: cleanup,
+	return &connAwareRows{
+		Rows: rows,
+		cleanup: func() error {
+			return reserved.cleanup(ctx)
+		},
 	}, nil
 }
 
@@ -72,71 +74,51 @@ func (e *RoleExecutor) queryContextWithSnapshot(ctx context.Context, query strin
 }
 
 func (e *RoleExecutor) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	conn, cleanup, err := e.prepareRoleConn(ctx)
+	reserved, err := e.prepareRoleConn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
 
-	return conn.ExecContext(ctx, query, args...)
+	result, err := reserved.conn.ExecContext(ctx, query, args...)
+	return result, errors.Join(err, reserved.cleanup(ctx))
 }
 
 func (e *RoleExecutor) BeginTx(ctx context.Context) (TxExecutor, error) {
-	conn, cleanup, err := e.prepareRoleConn(ctx)
+	reserved, err := e.prepareRoleConn(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err := reserved.conn.BeginTx(ctx, nil)
 	if err != nil {
-		cleanup()
-		return nil, err
+		return nil, errors.Join(err, reserved.cleanup(ctx))
 	}
 
-	return &roleTx{tx: tx, cleanup: cleanup}, nil
+	return &roleTx{
+		tx: tx,
+		cleanup: func() error {
+			return reserved.cleanup(ctx)
+		},
+	}, nil
 }
 
-func (e *RoleExecutor) prepareRoleConn(ctx context.Context) (*sql.Conn, func(), error) {
-	conn, err := e.db.Conn(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to acquire connection: %w", err)
-	}
-
-	cleanup := func() {
-		resetSnapshotOnConn(ctx, conn)
-		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "SET ROLE DEFAULT")
-		_ = conn.Close()
-	}
-
+func (e *RoleExecutor) prepareRoleConn(ctx context.Context) (*reservedConn, error) {
+	ops := make([]sessionOp, 0, 3)
 	role, ok := e.roleFromCtx(ctx)
 	if ok && role != "" {
 		if _, allowed := e.allowedRoles[role]; !allowed {
-			cleanup()
-			return nil, nil, fmt.Errorf("role not allowed: %s", role)
+			return nil, fmt.Errorf("role not allowed: %s", role)
 		}
-		// MySQL/TiDB don't support parameterized SET ROLE, use string formatting
-		// Safe because role is validated against allowlist above
-		setRoleSQL := fmt.Sprintf("SET ROLE %s", sqlutil.QuoteIdentifier(role))
-		if _, err := conn.ExecContext(ctx, setRoleSQL); err != nil {
-			cleanup()
-			return nil, nil, fmt.Errorf("failed to set role %s: %w", role, err)
-		}
+		ops = append(ops, roleSessionOp(sqlutil.QuoteIdentifier(role)))
 	}
-	if err := e.useDatabase(ctx, conn); err != nil {
-		cleanup()
-		return nil, nil, err
-	}
+	ops = append(ops, e.useDatabaseOp())
 	if snapshot, ok := SnapshotReadFromContext(ctx); ok {
-		if err := setSnapshotOnConn(ctx, conn, snapshot); err != nil {
-			cleanup()
-			return nil, nil, err
-		}
+		ops = append(ops, snapshotSessionOp(snapshot))
 	}
-
-	return conn, cleanup, nil
+	return acquireConnWithSession(ctx, e.db, ops...)
 }
 
-func (e *RoleExecutor) useDatabase(ctx context.Context, conn *sql.Conn) error {
+func (e *RoleExecutor) useDatabaseOp() sessionOp {
 	// In multi-db mode all queries use fully-qualified table names so no USE is needed.
 	if e.multiDB {
 		return nil
@@ -144,26 +126,12 @@ func (e *RoleExecutor) useDatabase(ctx context.Context, conn *sql.Conn) error {
 	if e.databaseName == "" {
 		return nil
 	}
-	useSQL := fmt.Sprintf("USE %s", sqlutil.QuoteIdentifier(e.databaseName))
-	if _, err := conn.ExecContext(ctx, useSQL); err != nil {
-		return fmt.Errorf("failed to select database %s: %w", e.databaseName, err)
-	}
-	return nil
-}
-
-type roleAwareRows struct {
-	*sql.Rows
-	cleanup func()
-}
-
-func (r *roleAwareRows) Close() error {
-	defer r.cleanup()
-	return r.Rows.Close()
+	return useDatabaseSessionOp(sqlutil.QuoteIdentifier(e.databaseName))
 }
 
 type roleTx struct {
 	tx      *sql.Tx
-	cleanup func()
+	cleanup func() error
 }
 
 func (t *roleTx) QueryContext(ctx context.Context, query string, args ...any) (Rows, error) {
@@ -185,8 +153,7 @@ func (t *roleTx) Commit() error {
 		return sql.ErrConnDone
 	}
 	err := t.tx.Commit()
-	t.cleanup()
-	return err
+	return errors.Join(err, t.cleanup())
 }
 
 func (t *roleTx) Rollback() error {
@@ -194,6 +161,5 @@ func (t *roleTx) Rollback() error {
 		return sql.ErrConnDone
 	}
 	err := t.tx.Rollback()
-	t.cleanup()
-	return err
+	return errors.Join(err, t.cleanup())
 }

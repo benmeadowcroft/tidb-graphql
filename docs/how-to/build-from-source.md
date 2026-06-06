@@ -4,7 +4,7 @@ Build and run tidb-graphql as a standalone binary, without Docker.
 
 ## Prerequisites
 
-- Go 1.25 or later
+- Go 1.26 or later
 - `make`
 - A running TiDB instance (local or [TiDB Cloud](https://docs.pingcap.com/tidbcloud/dev-guide-build-cluster-in-cloud/?plan=starter))
 - `mysql` client (optional, for loading sample data)

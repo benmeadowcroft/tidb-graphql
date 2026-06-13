@@ -118,7 +118,49 @@ query {
 }
 ```
 
-## 6) Fetch by primary key
+## 6) Summarize rows with aggregates
+
+Every connection has an `aggregate` field for summaries such as counts, totals, averages, and minimum or maximum values.
+
+To count all orders without fetching order rows:
+
+```graphql
+query {
+  orders {
+    aggregate {
+      count
+    }
+  }
+}
+```
+
+Aggregates work with filters. This query summarizes paid orders by total value and order date:
+
+```graphql
+query {
+  orders(where: { status: { eq: PAID } }) {
+    aggregate {
+      count
+      sum {
+        total
+      }
+      avg {
+        total
+      }
+      min {
+        createdAt
+      }
+      max {
+        createdAt
+      }
+    }
+  }
+}
+```
+
+The aggregate summarizes the matching connection, not just the current page of returned nodes. For the full aggregate field rules, see the [GraphQL schema mapping reference](../reference/graphql-schema.md#aggregate-fields), and for more recipes see [Query aggregates](../how-to/query-aggregates.md).
+
+## 7) Fetch by primary key
 
 Every table with a primary key gets a singular lookup field using the table's singular name:
 
@@ -146,7 +188,7 @@ query test {
 }
 ```
 
-## 7) Use unique key lookups
+## 8) Use unique key lookups
 
 If a table has a unique index, you get a direct lookup field. For example:
 
@@ -160,7 +202,7 @@ If a table has a unique index, you get a direct lookup field. For example:
 }
 ```
 
-## 8) Composite primary key lookup (order items)
+## 9) Composite primary key lookup (order items)
 
 The tutorial dataset models `order_items` with a composite primary key: `(order_id, product_id)`.
 
@@ -224,6 +266,7 @@ query {
 
 ## Reference
 - [Schema filters](../reference/schema-filters.md)
+- [GraphQL schema mapping](../reference/graphql-schema.md)
 - [Endpoints](../reference/endpoints.md)
 
 ## Further reading

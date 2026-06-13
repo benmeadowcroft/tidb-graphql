@@ -56,7 +56,7 @@ flowchart LR
 - First-page forward requests are batched by `tryBatchOneToManyConnection`, `tryBatchManyToManyConnection`, and `tryBatchEdgeListConnection`.
 - Cursor pages (`after` or `before` present) and backward windows (`last`) intentionally fall back to per-parent seek queries for correctness and manageable SQL complexity.
 - Batched connection data plans fetch `first + 1` rows per parent to compute `hasNextPage`, then trim to `first`.
-- `totalCount` remains lazy and filter-aware. It is computed from per-parent count plans when clients request `totalCount`.
+- `totalCount` and `aggregate` remain lazy and filter-aware. Count-only aggregate requests can reuse count behavior, while requested column aggregates run aggregate SQL over the scoped connection dataset.
 
 ## Fallback and skip conditions
 
@@ -79,7 +79,7 @@ Fallback changes round-trip count, not response correctness.
 - Query-count intuition:
   - without batching: `users(first: 100)` + nested relationship can trigger ~100 child queries.
   - with batching: the same nested field usually triggers one query per chunk (often 1).
-  - connection fields may still run additional per-parent count queries if `totalCount` is requested.
+  - connection fields may still run additional per-parent count or aggregate queries if `totalCount` or `aggregate` is requested.
 - Batching reduces SQL round trips; it does not reduce returned data volume by itself.
 
 ## Observability
@@ -98,7 +98,7 @@ Metrics include `relation_type` labels (for example `one_to_many`, `many_to_one`
 ## Known limits and future work
 
 - Connection batching is intentionally forward first-page focused; cursor/backward pages still execute per-parent seek plans.
-- Connection `totalCount` remains lazy per parent.
+- Connection `totalCount` and `aggregate` remain lazy per parent.
 - There is still duplication across connection batch helpers. A future improvement is a shared connection batch engine with relationship-specific planner hooks.
 
 ---
@@ -110,6 +110,7 @@ Metrics include `relation_type` labels (for example `one_to_many`, `many_to_one`
 
 ## Reference
 - [Configuration reference](../reference/configuration.md)
+- [GraphQL schema mapping](../reference/graphql-schema.md#aggregate-fields)
 
 ## Back
 - [Explanation home](README.md)

@@ -22,6 +22,7 @@ If you already know what you want to do, and just need the steps.
 - [Configure OIDC/JWKS auth](how-to/oidc-jwks-auth.md)
 - [DB user for roles](how-to/db-user-for-roles.md)
 - [Refresh schema safely](how-to/schema-refresh.md)
+- [Query aggregates](how-to/query-aggregates.md)
 - [Authenticate to TiDB](how-to/database-auth.md)
 - [Add observability](how-to/observability.md)
 - [Configure CORS for browser clients](how-to/cors.md)

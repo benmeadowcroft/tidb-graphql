@@ -5,6 +5,7 @@ Task-focused steps for common operations.
 - [Configure OIDC/JWKS auth](oidc-jwks-auth.md)
 - [DB user for roles](db-user-for-roles.md)
 - [Refresh schema safely](schema-refresh.md)
+- [Query aggregates](query-aggregates.md)
 - [Authenticate to TiDB](database-auth.md)
 - [Add observability](observability.md)
 - [Configure CORS for browser clients](cors.md)

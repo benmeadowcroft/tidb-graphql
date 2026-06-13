@@ -92,6 +92,79 @@ Connections support forward (`first`/`after`) and backward (`last`/`before`) pag
 For relationship connections, only forward first-page requests (no `after`, `before`, or `last`) are batched across parents to avoid N+1 lookups; cursor/backward pages run per-parent seek queries.
 Cursor compatibility note: cursors encode the active `orderBy` columns and per-column directions. Changing `orderBy` invalidates existing cursors.
 
+#### Aggregate fields
+
+Aggregates are exposed on connection types through `Connection.aggregate`; standalone root or relationship aggregate fields are not generated.
+
+The generated aggregate shape depends on the table's columns:
+
+```graphql
+aggregate {
+  count
+  countDistinct {
+    status
+  }
+  avg {
+    total
+  }
+  sum {
+    total
+  }
+  min {
+    createdAt
+  }
+  max {
+    createdAt
+  }
+}
+```
+
+- `count: Int!` is always available.
+- `avg` and `sum` are generated when the table has numeric columns (`Int`, `BigInt`, `Float`, or `Decimal`), and each selected field returns nullable `Float`.
+- `countDistinct`, `min`, and `max` are generated for comparable columns. `JSON` and `Vector` columns are excluded.
+- `countDistinct` fields return non-null `Int`.
+- `min` and `max` fields preserve the column's GraphQL type.
+
+Aggregate results use the same filtered dataset as the connection. `where` scopes the aggregate, while pagination and cursor arguments (`first`, `after`, `last`, `before`) do not limit the aggregate result.
+
+Root connection example:
+
+```graphql
+{
+  orders(where: { status: { eq: PAID } }, first: 10) {
+    nodes {
+      id
+      total
+    }
+    aggregate {
+      count
+      sum { total }
+      avg { total }
+      min { createdAt }
+      max { createdAt }
+    }
+  }
+}
+```
+
+Relationship connection example:
+
+```graphql
+{
+  user_by_email(email: "ava.smith@example.com") {
+    fullName
+    orders {
+      aggregate {
+        count
+        sum { total }
+      }
+    }
+  }
+}
+```
+
+For task-oriented examples, see [Query aggregates](../how-to/query-aggregates.md).
+
 ## Type mapping
 
 SQL types are mapped to GraphQL scalars:

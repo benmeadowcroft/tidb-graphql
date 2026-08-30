@@ -2,7 +2,7 @@ module tidb-graphql
 
 go 1.26.0
 
-toolchain go1.26.4
+toolchain go1.26.6
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -34,7 +34,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/term v0.43.0
-	google.golang.org/grpc v1.81.1
+	google.golang.org/grpc v1.83.1
 )
 
 require (

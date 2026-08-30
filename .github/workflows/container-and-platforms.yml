@@ -83,6 +83,7 @@ jobs:
 
   build-and-push:
     if: >-
+      always() &&
       github.event_name == 'push' &&
       needs.changes.result == 'success' &&
       needs.test.result == 'success' &&

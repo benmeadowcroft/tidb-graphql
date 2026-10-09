@@ -75,6 +75,16 @@ vet:
 tidy:
     go mod tidy
 
+# Scan for known vulnerabilities (modules + Go stdlib)
+vulncheck:
+    go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+# Upgrade all dependencies, then test and vuln-scan the result
+deps-update:
+    go get -u -t ./...
+    go mod tidy
+    @{{ just_executable() }} test-unit vulncheck
+
 # Run golangci-lint
 lint:
     @command -v golangci-lint >/dev/null 2>&1 || { echo "golangci-lint is not installed. Install from https://golangci-lint.run/usage/install/"; exit 1; }

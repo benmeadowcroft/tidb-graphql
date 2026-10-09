@@ -8,8 +8,8 @@ require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/XSAM/otelsql v0.44.0
-	github.com/coreos/go-oidc/v3 v3.15.0
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/graphql-go/graphql v0.8.1
@@ -34,7 +34,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/term v0.46.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 )
 
 require (
@@ -77,6 +77,6 @@ require (
 require (
 	// Indirect dependencies
 	// edwards25519 is required by mysql driver for caching_sha2_password authentication
-	filippo.io/edwards25519 v1.1.1 // indirect
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0
 )

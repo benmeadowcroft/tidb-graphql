@@ -2,6 +2,13 @@ name: govulncheck
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - go.mod
+      - go.sum
+      - "**.go"
+      - .github/workflows/vulncheck.yml
   schedule:
     - cron: "33 3 * * MON,THU" # Monday & Thursday at 03:33 UTC
 

@@ -45,3 +45,25 @@ is no manual version bumping.
 
 Do not hand-edit `VERSION` or create `vX.Y.Z` tags yourself — it will conflict
 with what release-please tracks in `.release-please-manifest.json`.
+
+## Dependency updates
+
+[Dependabot](.github/dependabot.yml) opens weekly grouped PRs for Go modules
+(`fix(deps)`, so they ship in the next patch release) and GitHub Actions
+(`ci(deps)`), plus monthly PRs for container base images (`build(deps)`).
+OpenTelemetry modules are grouped into a single PR because they must be upgraded
+together. Minor and patch updates are queued for auto-merge by
+[dependabot-automerge.yml](.github/workflows/dependabot-automerge.yml) once
+required checks pass; major updates need a manual review.
+
+[govulncheck](.github/workflows/vulncheck.yml) runs on PRs that touch Go code and
+on a twice-weekly schedule. Dependabot does not bump the `toolchain` line in
+`go.mod`, so Go standard-library vulnerabilities flagged by the scheduled run
+must be fixed by hand:
+
+```sh
+go get toolchain@go1.26.N   # latest patch release
+just vulncheck
+```
+
+To update everything locally and verify the result, run `just deps-update`.

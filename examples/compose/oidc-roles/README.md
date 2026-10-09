@@ -37,16 +37,16 @@ docker compose -f examples/compose/oidc-roles/docker-compose.yml up
 In a separate shell from the project root:
 
 ```bash
-make token-viewer SCENARIO=oidc-roles
+just token-viewer oidc-roles
 ```
 
 To mint an admin-role token:
 
 ```bash
-make token-admin SCENARIO=oidc-roles
+just token-admin oidc-roles
 ```
 
-`make token-*` calls JWKS `POST /dev/token` with `X-Admin-Token`.
+`just token-*` calls JWKS `POST /dev/token` with `X-Admin-Token`.
 It reads `DEV_ADMIN_TOKEN` from `examples/compose/oidc-roles/.env`, and falls back to `dev-admin-token`.
 
 ## Call GraphQL with token

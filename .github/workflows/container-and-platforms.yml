@@ -45,8 +45,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+
       - name: Run unit tests
-        run: make test-unit
+        run: just test-unit
 
   compose-compat:
     needs: test

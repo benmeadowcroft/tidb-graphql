@@ -7,7 +7,7 @@ TiDB GraphQL uses OIDC discovery + JWKS (JSON Web Key Set). For local developmen
 If you are using `examples/compose/oidc-roles` or `examples/compose/otel`, use:
 
 ```bash
-make token-viewer SCENARIO=oidc-roles
+just token-viewer oidc-roles
 ```
 
 This uses the scenario JWKS `POST /dev/token` endpoint and prints a ready-to-use JWT.

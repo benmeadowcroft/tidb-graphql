@@ -133,12 +133,12 @@ For deeper setup details, use:
 
 ## Contributing and local development
 
-Common development commands:
+Development tasks use [just](https://just.systems) — run `just` to list all recipes.
 
 Notes:
-- `make build` outputs `bin/tidb-graphql`.
-- `make test-unit` runs fast unit tests in `./internal/...`.
-- `make test-integration` requires TiDB credentials via environment variables or `.env.test` (see `.env.test.example`).
+- `just build` outputs `bin/tidb-graphql`.
+- `just test-unit` runs fast unit tests in `./internal/...`.
+- `just test-integration` requires TiDB credentials via environment variables or `.env.test` (see `.env.test.example`).
 
 ## License
 

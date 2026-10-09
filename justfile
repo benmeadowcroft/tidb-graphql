@@ -10,6 +10,9 @@ set dotenv-filename := ".env.test"
 # Export variables below (and those from .env.test) to recipe shells.
 set export
 
+# Only evaluate variables (e.g. container engine probing) when a recipe uses them.
+set lazy
+
 # Keep Go caches in-repo for sandboxed environments.
 GOCACHE := justfile_directory() / ".cache/go-build"
 GOMODCACHE := justfile_directory() / ".cache/go-mod"
@@ -18,8 +21,18 @@ GOMODCACHE := justfile_directory() / ".cache/go-mod"
 VERSION := env("VERSION", `cat VERSION 2>/dev/null || echo dev`)
 COMMIT := env("COMMIT", `git rev-parse --short HEAD 2>/dev/null || echo none`)
 
-# Container engine (podman preferred, docker fallback; override with CONTAINER_TOOL).
-CONTAINER_TOOL := env("CONTAINER_TOOL", `command -v podman 2>/dev/null || command -v docker 2>/dev/null || true`)
+# Container engine: override with CONTAINER_TOOL=podman|docker|nerdctl. Otherwise
+# pick the first of podman, docker, nerdctl whose engine is reachable (Rancher
+# Desktop's containerd mode ships a docker CLI with no daemon behind it), falling
+# back to the first one installed so its own error message is shown.
+CONTAINER_TOOL := env("CONTAINER_TOOL", ```
+    for t in podman docker nerdctl; do
+        if command -v "$t" >/dev/null 2>&1 && "$t" info >/dev/null 2>&1; then echo "$t"; exit 0; fi
+    done
+    for t in podman docker nerdctl; do
+        if command -v "$t" >/dev/null 2>&1; then echo "$t"; exit 0; fi
+    done
+```)
 compose_dir := "examples/compose"
 
 # Scenario-backed JWT minting defaults.
@@ -28,7 +41,6 @@ TOKEN_ENDPOINT := env("TOKEN_ENDPOINT", "https://localhost:9000/dev/token")
 TOKEN_CURL_TLS_FLAGS := env("TOKEN_CURL_TLS_FLAGS", "-k")
 DEFAULT_DEV_ADMIN_TOKEN := env("DEFAULT_DEV_ADMIN_TOKEN", "dev-admin-token")
 
-# List available recipes
 # List available recipes
 default:
     @{{ just_executable() }} --list
@@ -75,7 +87,13 @@ check:
     status=0
     if command -v go >/dev/null 2>&1; then echo "ok    $(go version)"; else echo "MISSING go (required): https://go.dev/dl/"; status=1; fi
     if command -v golangci-lint >/dev/null 2>&1; then echo "ok    golangci-lint $(golangci-lint version --short 2>/dev/null || true)"; else echo "warn  golangci-lint not found (needed for 'just lint')"; fi
-    if [ -n "{{ CONTAINER_TOOL }}" ]; then echo "ok    container engine: {{ CONTAINER_TOOL }}"; else echo "warn  no podman/docker found (needed for container/compose recipes)"; fi
+    if [ -z "{{ CONTAINER_TOOL }}" ]; then
+        echo "warn  no podman/docker/nerdctl found (needed for container/compose recipes)"
+    elif {{ CONTAINER_TOOL }} info >/dev/null 2>&1; then
+        echo "ok    container engine: {{ CONTAINER_TOOL }} ($({{ CONTAINER_TOOL }} compose version 2>/dev/null | head -n1 || echo 'compose unavailable'))"
+    else
+        echo "warn  container engine {{ CONTAINER_TOOL }} found but not reachable (is the daemon/VM running?)"
+    fi
     if command -v curl >/dev/null 2>&1; then echo "ok    curl"; else echo "warn  curl not found (needed for token recipes)"; fi
     exit $status
 
@@ -160,9 +178,9 @@ token-admin scenario=SCENARIO:
 
 [private]
 require-container:
-    @[ -n "{{ CONTAINER_TOOL }}" ] || { echo "Error: No container engine found. Install podman or docker."; exit 1; }
+    @[ -n "{{ CONTAINER_TOOL }}" ] || { echo "Error: No container engine found. Install podman, docker, or nerdctl (e.g. Rancher Desktop)."; exit 1; }
 
-# Build container image tidb-graphql:local (podman/docker)
+# Build container image tidb-graphql:local (podman/docker/nerdctl)
 container-build: require-container
     {{ CONTAINER_TOOL }} build \
         --build-arg VERSION={{ VERSION }} \

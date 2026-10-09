@@ -13,6 +13,6 @@ Use these compose scenarios based on your goal.
 
 Notes:
 - Root `docker-compose.yml` includes `quickstart` so `docker compose up` still works.
-- Podman users can replace `docker compose` with `podman compose`.
+- Podman users can replace `docker compose` with `podman compose`; Rancher Desktop (containerd) users can use `nerdctl compose`. `just compose-up [scenario]` picks whichever engine is available.
 - Each scenario keeps its primary app settings in `config/tidb-graphql/tidb-graphql.example.yaml`.
 - Use scenario `.env` files for runtime overrides such as image tags and DSN/secrets.

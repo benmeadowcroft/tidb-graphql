@@ -23,15 +23,17 @@ docker build -t tidb-graphql:dev -f Containerfile .
 TIGQL_IMAGE=tidb-graphql:dev docker compose up
 ```
 
-## 3) Podman vs Docker Compose behavior differences
+## 3) Podman / nerdctl vs Docker Compose behavior differences
 
-Validate compose files with the detected engine:
+The `just` container recipes auto-detect the first reachable engine out of `podman`, `docker`, and `nerdctl`; set `CONTAINER_TOOL` to pick one explicitly. Validate compose files with the detected engine:
 
 ```bash
 just compose-validate
 ```
 
 If behavior differs, prefer scenario-specific compose files under `examples/compose/*`.
+
+`nerdctl compose` ignores `depends_on` health conditions, so `tidb-graphql` may start before TiDB is ready; it retries the database connection, and the schema self-heals on the next refresh.
 
 ## 4) `quickstart-db-zero` starts with partial schema
 

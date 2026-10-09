@@ -73,7 +73,7 @@ To build the container image locally without Docker Compose:
 just container-build
 ```
 
-This creates a `tidb-graphql:local` image. The build auto-detects `podman` or `docker`. To specify one explicitly:
+This creates a `tidb-graphql:local` image. The build auto-detects the first reachable engine out of `podman`, `docker`, and `nerdctl` (e.g. Rancher Desktop with containerd). To specify one explicitly:
 
 ```bash
 CONTAINER_TOOL=docker just container-build

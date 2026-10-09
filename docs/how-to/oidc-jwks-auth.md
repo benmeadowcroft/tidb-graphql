@@ -23,7 +23,7 @@ See [Secure local dev with OIDC/JWKS](../tutorials/local-oidc.md) for more detai
 For the compose-based OIDC scenarios, you can mint via the built-in dev token endpoint:
 
 ```bash
-make token-viewer SCENARIO=oidc-roles
+just token-viewer oidc-roles
 ```
 
 ## 2) Set the OIDC config

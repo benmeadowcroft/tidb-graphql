@@ -44,16 +44,16 @@ docker compose -f examples/compose/otel/docker-compose.yml up
 In a separate shell from the project root:
 
 ```bash
-make token-viewer SCENARIO=otel
+just token-viewer otel
 ```
 
 To mint an admin-role token:
 
 ```bash
-make token-admin SCENARIO=otel
+just token-admin otel
 ```
 
-`make token-*` calls JWKS `POST /dev/token` with `X-Admin-Token`.
+`just token-*` calls JWKS `POST /dev/token` with `X-Admin-Token`.
 It reads `DEV_ADMIN_TOKEN` from `examples/compose/otel/.env`, and falls back to `dev-admin-token`.
 
 ## Call GraphQL with token

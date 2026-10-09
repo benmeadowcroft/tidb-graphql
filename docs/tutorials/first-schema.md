@@ -16,7 +16,7 @@ docker compose up
 
 This starts a local TiDB instance with sample data and the TiDB GraphQL server with GraphiQL enabled. Wait for the log output to show that the server has started.
 
-> **Podman users:** replace `docker compose` with `podman compose`, or use `make compose-up`.
+> **Podman users:** replace `docker compose` with `podman compose`, or use `just compose-up`.
 
 ## 2) Open GraphiQL
 

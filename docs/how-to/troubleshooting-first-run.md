@@ -28,7 +28,7 @@ TIGQL_IMAGE=tidb-graphql:dev docker compose up
 Validate compose files with the detected engine:
 
 ```bash
-make compose-validate
+just compose-validate
 ```
 
 If behavior differs, prefer scenario-specific compose files under `examples/compose/*`.

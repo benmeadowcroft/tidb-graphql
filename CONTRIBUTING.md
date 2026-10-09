@@ -1,5 +1,12 @@
 # Contributing
 
+## Development tasks
+
+Development tasks are defined in the [`justfile`](justfile) and run with
+[just](https://just.systems) (e.g. `brew install just`). Run `just` to list all
+recipes; common ones are `just build`, `just test-unit`, `just lint`, and
+`just compose-up [scenario]`. `just check` reports which optional tools are installed.
+
 ## Commit messages and PR titles
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).

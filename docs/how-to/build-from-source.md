@@ -5,14 +5,14 @@ Build and run tidb-graphql as a standalone binary, without Docker.
 ## Prerequisites
 
 - Go 1.26 or later
-- `make`
+- [`just`](https://just.systems) (e.g. `brew install just`)
 - A running TiDB instance (local or [TiDB Cloud](https://docs.pingcap.com/tidbcloud/dev-guide-build-cluster-in-cloud/?plan=starter))
 - `mysql` client (optional, for loading sample data)
 
 ## 1) Build the binary
 
 ```bash
-make build
+just build
 ```
 
 This creates the server binary at `./bin/tidb-graphql`.
@@ -70,13 +70,13 @@ Visit [http://localhost:8080/graphql](http://localhost:8080/graphql) in your bro
 To build the container image locally without Docker Compose:
 
 ```bash
-make container-build
+just container-build
 ```
 
 This creates a `tidb-graphql:local` image. The build auto-detects `podman` or `docker`. To specify one explicitly:
 
 ```bash
-CONTAINER_TOOL=docker make container-build
+CONTAINER_TOOL=docker just container-build
 ```
 
 ---

@@ -13,7 +13,7 @@ cp .env.test.example .env.test
 ## 2) Run the tests
 
 ```bash
-make test-integration
+just test-integration
 ```
 
 ## 3) Troubleshoot quickly

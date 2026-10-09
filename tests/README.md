@@ -16,7 +16,7 @@ tests/
 ### Run Unit Tests (Fast)
 
 ```bash
-make test-unit
+just test-unit
 ```
 
 Unit tests are located in `internal/*/` directories alongside the source code.
@@ -35,13 +35,13 @@ Integration tests require TiDB Cloud Serverless credentials.
 2. **Run tests:**
 
    ```bash
-   make test-integration
+   just test-integration
    ```
 
 ### Run All Tests
 
 ```bash
-make test
+just test
 ```
 
 ## Integration Test Helper

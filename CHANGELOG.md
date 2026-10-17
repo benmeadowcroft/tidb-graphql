@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.4](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.3...v0.12.4) (2026-10-17)
+
+
+### Bug Fixes
+
+* **deps:** bump the go-minor-patch group with 2 updates ([#33](https://github.com/benmeadowcroft/tidb-graphql/issues/33)) ([e1d2279](https://github.com/benmeadowcroft/tidb-graphql/commit/e1d227965d9ff4fe0a05b2cd13a25c086e53f86a))
+
 ## [0.12.3](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.2...v0.12.3) (2026-10-09)
 
 

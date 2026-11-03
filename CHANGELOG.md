@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.5](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.4...v0.12.5) (2026-11-03)
+
+
+### Bug Fixes
+
+* **deps:** bump Go toolchain to go1.26.10 to resolve GO-2026-6809 ([#37](https://github.com/benmeadowcroft/tidb-graphql/issues/37)) ([9a29935](https://github.com/benmeadowcroft/tidb-graphql/commit/9a29935f4d4f3ab6bd5241fa61921abec63b3441))
+
 ## [0.12.4](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.3...v0.12.4) (2026-10-17)
 
 

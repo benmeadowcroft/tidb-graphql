@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.6](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.5...v0.12.6) (2026-11-03)
+
+
+### Bug Fixes
+
+* **deps:** bump google.golang.org/grpc ([#35](https://github.com/benmeadowcroft/tidb-graphql/issues/35)) ([55d4344](https://github.com/benmeadowcroft/tidb-graphql/commit/55d434418eeb31d58ade43fdaaaf93762083d20c))
+
 ## [0.12.5](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.4...v0.12.5) (2026-11-03)
 
 

@@ -14,11 +14,17 @@ updates:
     groups:
       # OpenTelemetry modules must move together to stay compatible.
       opentelemetry:
+        applies-to: version-updates
         patterns:
           - "go.opentelemetry.io/*"
           - "github.com/XSAM/otelsql"
       go-minor-patch:
+        applies-to: version-updates
         update-types: [minor, patch]
+      # Security fixes arrive as one PR, separate from routine version updates.
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /

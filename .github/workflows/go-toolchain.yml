@@ -1,0 +1,52 @@
+name: Go toolchain update
+
+# Opens a PR when a new Go patch release is available for the toolchain pinned in
+# go.mod, so Go standard-library fixes don't depend on Dependabot proposing them.
+# If the toolchain is already current (e.g. Dependabot bumped it), this does nothing.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * MON" # Monday at 04:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Bump toolchain to the latest patch release
+        id: bump
+        run: |
+          go get toolchain@patch
+          echo "version=$(sed -n 's/^toolchain //p' go.mod)" >> "$GITHUB_OUTPUT"
+
+      # PRs opened with the default GITHUB_TOKEN don't trigger CI, so required
+      # checks would never run; use the GitHub App token instead.
+      - id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ secrets.DEPS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.DEPS_BOT_PRIVATE_KEY }}
+
+      - uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1  # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: deps/go-toolchain
+          delete-branch: true
+          add-paths: go.mod
+          commit-message: "fix(deps): bump Go toolchain to ${{ steps.bump.outputs.version }}"
+          title: "fix(deps): bump Go toolchain to ${{ steps.bump.outputs.version }}"
+          body: |
+            Bumps the `toolchain` line in `go.mod` to the latest Go patch release, picking up Go standard-library fixes.
+
+            Opened automatically by the `go-toolchain.yml` workflow.
+          labels: dependencies

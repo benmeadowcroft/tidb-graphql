@@ -66,13 +66,21 @@ release-please, the image build). The app's client ID and private key are stored
 as `DEPS_BOT_CLIENT_ID` and `DEPS_BOT_PRIVATE_KEY` in both the Actions secrets and
 the Dependabot secrets, since Dependabot-triggered workflows can only read the latter.
 
-[govulncheck](.github/workflows/vulncheck.yml) runs on PRs that touch Go code and
-on a twice-weekly schedule. Dependabot does not bump the `toolchain` line in
-`go.mod`, so Go standard-library vulnerabilities flagged by the scheduled run
-must be fixed by hand:
+Vulnerability checks are split by purpose:
+
+- **Blocking:** [dependency review](.github/workflows/dependency-review.yml) is a
+  required check on PRs. It fails only if the PR itself introduces a dependency
+  with a known vulnerability of moderate severity or higher.
+- **Reporting:** [govulncheck](.github/workflows/vulncheck.yml) runs on PRs, on
+  pushes to `main` and twice a week, and uploads its results to
+  **Security → Code scanning**. Newly published advisories show up there as
+  alerts rather than failing unrelated PRs, and alerts close once fixed.
+
+Go standard-library vulnerabilities are fixed by bumping the `toolchain` line in
+`go.mod`:
 
 ```sh
-go get toolchain@go1.26.N   # latest patch release
+go get toolchain@patch   # latest Go patch release
 just vulncheck
 ```
 

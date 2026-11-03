@@ -9,17 +9,25 @@ jobs:
   automerge:
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
 
-      # Queue auto-merge for minor/patch updates; GitHub merges once required checks pass.
+      # Merges made with the default GITHUB_TOKEN don't trigger other workflows,
+      # so use the GitHub App token so release-please and the image build run.
+      # Must be stored as Dependabot secrets, not just Actions secrets.
+      - id: app-token
+        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ secrets.DEPS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.DEPS_BOT_PRIVATE_KEY }}
+
+      # Queue auto-merge for minor/patch and security updates; GitHub merges
+      # once required checks pass. Major version updates need a manual review.
       - name: Enable auto-merge
         if: steps.metadata.outputs.update-type != 'version-update:semver-major'
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}

@@ -54,7 +54,17 @@ with what release-please tracks in `.release-please-manifest.json`.
 OpenTelemetry modules are grouped into a single PR because they must be upgraded
 together. Minor and patch updates are queued for auto-merge by
 [dependabot-automerge.yml](.github/workflows/dependabot-automerge.yml) once
-required checks pass; major updates need a manual review.
+required checks pass; major updates need a manual review. Security updates are
+grouped into their own PR so they aren't held up by routine updates.
+
+[go-toolchain.yml](.github/workflows/go-toolchain.yml) checks weekly for a new Go
+patch release and opens a `fix(deps)` PR bumping the `toolchain` line in `go.mod`.
+
+Auto-merge and the toolchain PRs use a token from a GitHub App, because merges
+and PRs made with the default `GITHUB_TOKEN` don't trigger other workflows (CI,
+release-please, the image build). The app's client ID and private key are stored
+as `DEPS_BOT_CLIENT_ID` and `DEPS_BOT_PRIVATE_KEY` in both the Actions secrets and
+the Dependabot secrets, since Dependabot-triggered workflows can only read the latter.
 
 [govulncheck](.github/workflows/vulncheck.yml) runs on PRs that touch Go code and
 on a twice-weekly schedule. Dependabot does not bump the `toolchain` line in

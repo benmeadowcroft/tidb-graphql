@@ -66,4 +66,10 @@ go get toolchain@go1.26.N   # latest patch release
 just vulncheck
 ```
 
+[image-scan.yml](.github/workflows/image-scan.yml) scans the published
+`ghcr.io/benmeadowcroft/tidb-graphql:main` image with Trivy after each build on
+`main` and twice a week, reporting to code scanning. It catches vulnerabilities in
+what actually ships, including the Go version compiled into the binary and the
+distroless base image.
+
 To update everything locally and verify the result, run `just deps-update`.

@@ -1,0 +1,39 @@
+name: Image scan
+
+# Scans the published container image with Trivy and reports to code scanning
+# (Security -> Code scanning). Trivy reads the Go version and modules embedded in
+# the binary, so this catches vulnerabilities in what actually ships, including
+# a stale Go toolchain and the distroless base image.
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Container and Platforms"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "47 4 * * MON,THU" # Monday & Thursday at 04:47 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    # On workflow_run, only scan after a successful build pushed to main.
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository }}:main
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-image.sarif
+
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image

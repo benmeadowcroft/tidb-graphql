@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.7](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.6...v0.12.7) (2026-11-06)
+
+
+### Bug Fixes
+
+* **deps:** bump github.com/spf13/pflag ([#44](https://github.com/benmeadowcroft/tidb-graphql/issues/44)) ([74a0c65](https://github.com/benmeadowcroft/tidb-graphql/commit/74a0c65c6674271294d077cee2d9b5b6cabe8ecb))
+
 ## [0.12.6](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.5...v0.12.6) (2026-11-03)
 
 

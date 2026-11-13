@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.7](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.6...v0.12.7) (2026-11-13)
+
+
+### Bug Fixes
+
+* **deps:** bump github.com/spf13/pflag ([#44](https://github.com/benmeadowcroft/tidb-graphql/issues/44)) ([74a0c65](https://github.com/benmeadowcroft/tidb-graphql/commit/74a0c65c6674271294d077cee2d9b5b6cabe8ecb))
+* **deps:** bump the go-minor-patch group with 2 updates ([#47](https://github.com/benmeadowcroft/tidb-graphql/issues/47)) ([89d0585](https://github.com/benmeadowcroft/tidb-graphql/commit/89d0585716e26b37ce7a954d93ae24559b296665))
+
 ## [0.12.6](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.5...v0.12.6) (2026-11-03)
 
 

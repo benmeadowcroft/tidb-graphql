@@ -35,7 +35,19 @@ is no manual version bumping.
    [release-please workflow](.github/workflows/release-please.yml) keeps an
    up-to-date "release PR" open. That PR bumps the `VERSION` file and updates
    `CHANGELOG.md` to reflect everything merged since the last release.
-2. When you're ready to cut a release, review and merge the release PR.
+2. [auto-release.yml](.github/workflows/auto-release.yml) merges the release PR
+   when it is a **patch** release:
+   - weekly, on Tuesday, the day after Dependabot's Monday run, so each week's
+     dependency updates ship together;
+   - straight away, once release-please has refreshed the PR, if a PR labelled
+     `security` has merged since the last release. Dependabot security updates are
+     labelled automatically; add the label yourself to other security fixes
+     (e.g. a Go toolchain bump for a stdlib vulnerability) before merging them;
+   - on demand, by running the workflow from the Actions tab.
+
+   A release PR that bumps the minor or major version (a `feat:` or breaking
+   change is pending) is never merged automatically: review and merge it yourself
+   when you're ready.
 3. Merging it makes release-please create a matching `vX.Y.Z` git tag and GitHub
    Release.
 4. That tag push triggers

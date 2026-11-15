@@ -17,11 +17,19 @@ jobs:
       # so use the GitHub App token so release-please and the image build run.
       # Must be stored as Dependabot secrets, not just Actions secrets.
       - id: app-token
-        if: steps.metadata.outputs.update-type != 'version-update:semver-major'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
         with:
           client-id: ${{ secrets.DEPS_BOT_CLIENT_ID }}
           private-key: ${{ secrets.DEPS_BOT_PRIVATE_KEY }}
+
+      # Label security updates so auto-release.yml ships them straight away
+      # instead of waiting for the weekly release.
+      - name: Label security updates
+        if: steps.metadata.outputs.dependency-group == 'security'
+        run: gh pr edit --add-label security "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       # Queue auto-merge for minor/patch and security updates; GitHub merges
       # once required checks pass. Major version updates need a manual review.

@@ -1,0 +1,118 @@
+name: Auto release
+
+# Merges the open release-please PR so patch releases ship without manual steps:
+#
+# - Weekly, on Tuesday, the day after Dependabot and the Go toolchain workflow run
+#   on Monday, so that week's dependency updates go out in a single release.
+# - Straight away, when a PR labelled `security` has merged to `main` since the
+#   last release. This runs after release-please has refreshed the release PR.
+# - On demand, via "Run workflow".
+#
+# Only patch releases are merged automatically. If the release PR would bump the
+# minor or major version (a `feat:` or breaking change is pending), it is left for
+# a person to review and merge.
+#
+# If nothing releasable has merged, release-please has no PR open and this does nothing.
+
+on:
+  schedule:
+    - cron: "43 13 * * TUE" # Tuesday at 13:43 UTC
+  workflow_dispatch:
+  workflow_run:
+    workflows: [release-please]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find the release PR and decide whether to merge it
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          pr=$(gh pr list --repo "$REPO" --state open --label "autorelease: pending" \
+            --head release-please--branches--main --json number,title --jq '.[0] // empty')
+          if [[ -z "$pr" ]]; then
+            echo "No release PR is open; nothing to release."
+            exit 0
+          fi
+          number=$(jq -r .number <<<"$pr")
+          title=$(jq -r .title <<<"$pr")
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+          current=$(gh api "repos/$REPO/contents/.release-please-manifest.json?ref=main" \
+            --jq .content | base64 -d | jq -r '."."')
+          next=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"$title" | tail -1 || true)
+          if [[ -z "$next" ]]; then
+            echo "::error::Could not read the version from release PR #$number title: $title"
+            exit 1
+          fi
+          echo "Release PR #$number: $current -> $next"
+
+          if [[ "${current%.*}" != "${next%.*}" ]]; then
+            echo "::notice::Release PR #$number bumps $current to $next, which is not a patch release; leaving it for manual review."
+            echo "action=hold" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT" == "workflow_run" ]]; then
+            # Merge early only if a PR labelled `security` has landed since the last release.
+            security=""
+            for sha in $(gh api "repos/$REPO/compare/v$current...main" --jq '.commits[].sha'); do
+              if gh api "repos/$REPO/commits/$sha/pulls" --jq '.[].labels[].name' | grep -qx security; then
+                security="$sha"
+                break
+              fi
+            done
+            if [[ -z "$security" ]]; then
+              echo "No security fix pending; leaving $next for the weekly release."
+              exit 0
+            fi
+            echo "Security fix $security is pending; releasing $next now."
+          fi
+
+          echo "action=merge" >> "$GITHUB_OUTPUT"
+
+      # Merges made with the default GITHUB_TOKEN don't trigger other workflows, so
+      # use the GitHub App token so release-please tags the release and the image builds.
+      - id: app-token
+        if: steps.check.outputs.action != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ secrets.DEPS_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.DEPS_BOT_PRIVATE_KEY }}
+
+      # Queues auto-merge, so GitHub merges once required checks pass on the
+      # release PR (or straight away if they already have).
+      - name: Merge the release PR
+        if: steps.check.outputs.action == 'merge'
+        run: gh pr merge --repo "$REPO" --auto --squash "$NUMBER"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.check.outputs.number }}
+
+      # A release PR that was queued as a patch release can grow into a minor one
+      # if a `feat:` lands before it merges; take it back out of the queue.
+      - name: Cancel any queued auto-merge
+        if: steps.check.outputs.action == 'hold'
+        run: gh pr merge --repo "$REPO" --disable-auto "$NUMBER" || true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ steps.check.outputs.number }}

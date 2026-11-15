@@ -4,12 +4,7 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "VERSION"
-        }
-      ],
+      "version-file": "VERSION",
       "changelog-path": "CHANGELOG.md"
     }
   }

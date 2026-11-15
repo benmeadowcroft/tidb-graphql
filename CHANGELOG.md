@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.8](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.7...v0.12.8) (2026-11-15)
+
+
+### Bug Fixes
+
+* **release:** keep VERSION in sync with each release ([#50](https://github.com/benmeadowcroft/tidb-graphql/issues/50)) ([6360b00](https://github.com/benmeadowcroft/tidb-graphql/commit/6360b0034c24dd283cad9ba0b7722bf6d622bbb6))
+
 ## [0.12.7](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.6...v0.12.7) (2026-11-15)
 
 

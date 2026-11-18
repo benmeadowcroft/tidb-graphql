@@ -49,9 +49,10 @@ TIDB_HOST=127.0.0.1 TIDB_USER=root TIDB_PASSWORD=<password> TIDB_TLS_MODE=false 
 
 ### In CI
 
-[`integration.yml`](../.github/workflows/integration.yml) runs the suite this way on every PR
-and push to `main`, against a `pingcap/tidb` service container. The `@asOf` tests skip there
-(see below).
+The `integration` job in [`container-and-platforms.yml`](../.github/workflows/container-and-platforms.yml)
+runs the suite this way on every PR, push to `main` and release tag, against a `pingcap/tidb`
+service container. The container image is only published if it passes. The `@asOf` tests skip
+there (see below).
 
 ### Run All Tests
 

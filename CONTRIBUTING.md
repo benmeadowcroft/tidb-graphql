@@ -10,7 +10,8 @@ recipes; common ones are `just build`, `just test-unit`, `just lint`, and
 On every PR, CI checks formatting (`gofmt`), that `go.mod`/`go.sum` are tidy, builds
 and vets everything (including the integration tests), runs `golangci-lint`, and runs
 the unit tests with the race detector. To catch these locally before pushing, run
-`just fmt tidy vet lint test-race`.
+`just fmt tidy vet lint test-race`. It also runs the integration tests against a TiDB
+container; see [tests/README.md](tests/README.md) to run them locally.
 
 ## Commit messages and PR titles
 

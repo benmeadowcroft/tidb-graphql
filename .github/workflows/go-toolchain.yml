@@ -3,6 +3,7 @@ name: Go toolchain update
 # Opens a PR when a new Go patch release is available for the toolchain pinned in
 # go.mod, so Go standard-library fixes don't depend on Dependabot proposing them.
 # If the toolchain is already current (e.g. Dependabot bumped it), this does nothing.
+# The PR is queued to auto-merge so it ships in the following weekly release.
 on:
   workflow_dispatch:
   schedule:
@@ -37,7 +38,8 @@ jobs:
           client-id: ${{ secrets.DEPS_BOT_CLIENT_ID }}
           private-key: ${{ secrets.DEPS_BOT_PRIVATE_KEY }}
 
-      - uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1  # v8.1.3
+      - id: cpr
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1  # v8.1.3
         with:
           token: ${{ steps.app-token.outputs.token }}
           branch: deps/go-toolchain
@@ -50,3 +52,14 @@ jobs:
 
             Opened automatically by the `go-toolchain.yml` workflow.
           labels: dependencies
+
+      # Queue auto-merge so the bump lands before the weekly release on Tuesday
+      # (auto-release.yml). dependabot-automerge.yml only handles PRs opened by
+      # Dependabot, so it doesn't cover this one. GitHub merges once required
+      # checks pass.
+      - name: Enable auto-merge
+        if: steps.cpr.outputs.pull-request-number != ''
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ steps.cpr.outputs.pull-request-url }}

@@ -55,7 +55,7 @@ func newTokenBucket(rps float64, burst int) *tokenBucket {
 	now := time.Now()
 	return &tokenBucket{
 		rate:   rps,
-		burst: float64(burst),
+		burst:  float64(burst),
 		tokens: float64(burst),
 		last:   now,
 	}

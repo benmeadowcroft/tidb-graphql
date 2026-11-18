@@ -83,7 +83,7 @@ func assignScanValue(dest any, value any) error {
 		return nil
 	default:
 		rv := reflect.ValueOf(dest)
-		if rv.Kind() != reflect.Ptr {
+		if rv.Kind() != reflect.Pointer {
 			return fmt.Errorf("scan dest must be pointer, got %T", dest)
 		}
 		if value == nil {

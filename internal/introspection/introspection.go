@@ -464,12 +464,11 @@ func getCreateTableSQL(ctx context.Context, db Queryer, databaseName, tableName 
 	}()
 
 	var createSQL string
-	for rows.Next() {
+	if rows.Next() {
 		var name string
 		if err := rows.Scan(&name, &createSQL); err != nil {
 			return "", err
 		}
-		break
 	}
 	if err := rows.Err(); err != nil {
 		return "", err

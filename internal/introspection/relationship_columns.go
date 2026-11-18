@@ -20,13 +20,6 @@ func (r Relationship) EffectiveJunctionRemoteFKColumns() []string {
 	return append([]string(nil), r.JunctionRemoteFKColumns...)
 }
 
-func firstColumnOrEmpty(cols []string) string {
-	if len(cols) == 0 {
-		return ""
-	}
-	return cols[0]
-}
-
 // EffectiveColumnNames returns ordered FK column names for a junction FK mapping.
 func (j JunctionFKInfo) EffectiveColumnNames() []string {
 	return append([]string(nil), j.ColumnNames...)

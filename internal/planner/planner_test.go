@@ -310,34 +310,6 @@ func assertSQLMatches(t *testing.T, got string, candidates ...string) {
 	assert.Fail(t, "SQL did not match any expected form", "got: %q candidates: %v", gotNorm, candidates)
 }
 
-// Accept either bound args or literal LIMIT/OFFSET in SQL.
-func assertLimitOffsetArgs(t *testing.T, sql string, args []interface{}, limit, offset int) {
-	t.Helper()
-
-	if len(args) == 0 {
-		normalized := normalizeSQL(sql)
-		assert.Contains(t, normalized, fmt.Sprintf("LIMIT %d OFFSET %d", limit, offset))
-		return
-	}
-
-	expected := []interface{}{limit, offset}
-	assertArgsEqual(t, args, expected)
-}
-
-// Accept either fully bound args or bound WHERE args with literal LIMIT/OFFSET.
-func assertWhereLimitOffsetArgs(t *testing.T, sql string, args []interface{}, whereArgs []interface{}, limit, offset int) {
-	t.Helper()
-
-	if len(args) == len(whereArgs) {
-		assertArgsEqual(t, args, whereArgs)
-		assertLimitOffsetArgs(t, sql, nil, limit, offset)
-		return
-	}
-
-	expected := append(append([]interface{}{}, whereArgs...), limit, offset)
-	assertArgsEqual(t, args, expected)
-}
-
 // Compare args by string form to avoid int vs int64 differences.
 func assertArgsEqual(t *testing.T, got []interface{}, expected []interface{}) {
 	t.Helper()

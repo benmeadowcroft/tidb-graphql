@@ -7,6 +7,11 @@ Development tasks are defined in the [`justfile`](justfile) and run with
 recipes; common ones are `just build`, `just test-unit`, `just lint`, and
 `just compose-up [scenario]`. `just check` reports which optional tools are installed.
 
+On every PR, CI checks formatting (`gofmt`), that `go.mod`/`go.sum` are tidy, builds
+and vets everything (including the integration tests), runs `golangci-lint`, and runs
+the unit tests with the race detector. To catch these locally before pushing, run
+`just fmt tidy vet lint test-race`.
+
 ## Commit messages and PR titles
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).

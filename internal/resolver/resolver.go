@@ -1994,13 +1994,6 @@ func scanRowsWithExtras(rows dbexec.Rows, columns []introspection.Column, extras
 	return results, rows.Err()
 }
 
-func ensureNonNullRows(rows []map[string]interface{}) []map[string]interface{} {
-	if rows == nil {
-		return []map[string]interface{}{}
-	}
-	return rows
-}
-
 func graphQLFieldNameForColumn(table introspection.Table, columnName string) string {
 	for _, col := range table.Columns {
 		if col.Name == columnName {

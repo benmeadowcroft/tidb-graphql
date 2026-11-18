@@ -45,10 +45,37 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # These checks run in the `test` job, not in jobs of their own, so the
+      # existing required check covers them and auto-merge waits for them.
 
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            echo "::error::These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
+
+      # Unit tests only cover ./internal/..., so also compile cmd/ and the
+      # integration tests (behind the `integration` build tag).
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet -tags=integration ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        with:
+          version: v2.15.0
+
+      # Same as `just test-unit`, plus the race detector.
       - name: Run unit tests
-        run: just test-unit
+        run: go test -short -race -v ./internal/...
 
   compose-compat:
     needs: test

@@ -27,22 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func assertNonNullListOfNonNullObject(t *testing.T, typ graphql.Type) {
-	t.Helper()
-
-	outerNonNull, ok := typ.(*graphql.NonNull)
-	require.True(t, ok, "expected outer NonNull, got %T", typ)
-
-	list, ok := outerNonNull.OfType.(*graphql.List)
-	require.True(t, ok, "expected List, got %T", outerNonNull.OfType)
-
-	innerNonNull, ok := list.OfType.(*graphql.NonNull)
-	require.True(t, ok, "expected inner NonNull, got %T", list.OfType)
-
-	_, ok = innerNonNull.OfType.(*graphql.Object)
-	require.True(t, ok, "expected Object, got %T", innerNonNull.OfType)
-}
-
 func hasArg(field *graphql.FieldDefinition, name string) bool {
 	for _, arg := range field.Args {
 		if arg != nil && arg.Name() == name {

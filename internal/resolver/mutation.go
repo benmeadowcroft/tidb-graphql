@@ -2250,18 +2250,6 @@ func isRequiredInsertColumn(col introspection.Column) bool {
 	return true
 }
 
-func missingRequiredInsertColumns(table introspection.Table, allowed map[string]bool) bool {
-	for _, col := range table.Columns {
-		if !isRequiredInsertColumn(col) {
-			continue
-		}
-		if !allowed[col.Name] {
-			return true
-		}
-	}
-	return false
-}
-
 func columnNameSet(columns []introspection.Column) map[string]bool {
 	set := make(map[string]bool, len(columns))
 	for _, col := range columns {

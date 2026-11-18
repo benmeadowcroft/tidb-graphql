@@ -8,9 +8,9 @@ import (
 // CollisionResolver tracks registered names and resolves collisions
 // by applying numeric suffixes when duplicates are detected.
 type CollisionResolver struct {
-	seenTypes   map[string]string              // GraphQL type name → source table
-	seenFields  map[string]map[string]string   // type name → field name → source
-	seenQueries map[string]string              // query field name → source table
+	seenTypes   map[string]string            // GraphQL type name → source table
+	seenFields  map[string]map[string]string // type name → field name → source
+	seenQueries map[string]string            // query field name → source table
 	logger      *slog.Logger
 }
 

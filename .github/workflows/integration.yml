@@ -60,5 +60,29 @@ jobs:
           echo "::error::TiDB did not become ready in time"
           exit 1
 
+      # `shell: bash` adds pipefail, so a test failure isn't hidden by tee.
       - name: Run integration tests
-        run: go test -v -count=1 -tags=integration ./tests/integration/...
+        shell: bash
+        run: go test -v -count=1 -tags=integration ./tests/integration/... 2>&1 | tee integration.log
+
+      # `go test` also passes when every test skips (e.g. if the connection
+      # settings above were wrong), so check the tests really ran. Only the
+      # @asOf tests are expected to skip against a standalone TiDB.
+      - name: Check tests ran
+        run: |
+          passed=$(grep -c '^--- PASS' integration.log || true)
+          skipped=$(grep -c '^--- SKIP' integration.log || true)
+          unexpected=$(grep '^--- SKIP' integration.log | grep -v '^--- SKIP: TestAsOf' || true)
+          {
+            echo "### Integration tests"
+            echo "Passed: $passed, skipped: $skipped (the @asOf tests need TiKV/PD)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$passed" -eq 0 ]]; then
+            echo "::error::No integration tests passed; check the TiDB connection settings."
+            exit 1
+          fi
+          if [[ -n "$unexpected" ]]; then
+            echo "::error::Unexpected skipped tests:"
+            echo "$unexpected"
+            exit 1
+          fi

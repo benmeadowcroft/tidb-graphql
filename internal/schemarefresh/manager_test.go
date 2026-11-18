@@ -24,6 +24,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+// testRoleKey is the context key the tests use to carry a role.
+type testRoleKey struct{}
+
 type structuralFingerprintFixture struct {
 	tables      [][]string
 	columns     [][]string
@@ -595,7 +598,7 @@ func TestHandlerForContext_RoleAwareSelection(t *testing.T) {
 	manager := &Manager{
 		roleSchemas: []string{"viewer"},
 		roleFromCtx: func(ctx context.Context) (string, bool) {
-			role, ok := ctx.Value("role").(string)
+			role, ok := ctx.Value(testRoleKey{}).(string)
 			return role, ok
 		},
 	}
@@ -623,12 +626,12 @@ func TestHandlerForContext_RoleAwareSelection(t *testing.T) {
 	}{
 		{
 			name:       "known role uses role handler",
-			ctx:        context.WithValue(context.Background(), "role", "viewer"),
+			ctx:        context.WithValue(context.Background(), testRoleKey{}, "viewer"),
 			wantStatus: http.StatusOK,
 		},
 		{
 			name:       "unknown role forbidden",
-			ctx:        context.WithValue(context.Background(), "role", "admin"),
+			ctx:        context.WithValue(context.Background(), testRoleKey{}, "admin"),
 			wantStatus: http.StatusForbidden,
 		},
 		{
@@ -679,7 +682,7 @@ func TestSnapshotForContext_RoleAwareSelection(t *testing.T) {
 	manager := &Manager{
 		roleSchemas: []string{"viewer"},
 		roleFromCtx: func(ctx context.Context) (string, bool) {
-			role, ok := ctx.Value("role").(string)
+			role, ok := ctx.Value(testRoleKey{}).(string)
 			return role, ok
 		},
 	}
@@ -703,7 +706,7 @@ func TestSnapshotForContext_RoleAwareSelection(t *testing.T) {
 	}{
 		{
 			name:            "known role returns role snapshot",
-			ctx:             context.WithValue(context.Background(), "role", "viewer"),
+			ctx:             context.WithValue(context.Background(), testRoleKey{}, "viewer"),
 			wantOK:          true,
 			wantRole:        "viewer",
 			wantFingerprint: "fp-state",
@@ -719,7 +722,7 @@ func TestSnapshotForContext_RoleAwareSelection(t *testing.T) {
 		},
 		{
 			name:            "unknown role fails closed",
-			ctx:             context.WithValue(context.Background(), "role", "admin"),
+			ctx:             context.WithValue(context.Background(), testRoleKey{}, "admin"),
 			wantOK:          false,
 			wantRole:        "admin",
 			wantFingerprint: "fp-state",
@@ -727,7 +730,7 @@ func TestSnapshotForContext_RoleAwareSelection(t *testing.T) {
 		},
 		{
 			name:            "nil role extractor fails closed",
-			ctx:             context.WithValue(context.Background(), "role", "viewer"),
+			ctx:             context.WithValue(context.Background(), testRoleKey{}, "viewer"),
 			useNilRoleFunc:  true,
 			wantOK:          false,
 			wantRole:        "",

@@ -74,20 +74,6 @@ func (s *batchState) setChildRows(relKey string, rows map[string][]map[string]in
 	s.childRows[relKey] = rows
 }
 
-func (s *batchState) getAggregateRows(relKey string) map[string]map[string]interface{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.aggregateRows[relKey]
-}
-
-func (s *batchState) setAggregateRows(relKey string, rows map[string]map[string]interface{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.aggregateRows[relKey] = rows
-}
-
 func (s *batchState) getConnectionRows(relKey string) map[string]map[string]interface{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()

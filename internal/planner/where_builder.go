@@ -286,7 +286,7 @@ func buildRelationshipFilterCondition(
 		return sq.And(conditions), nil
 	}
 
-	if !(rel.IsOneToMany || rel.IsManyToMany || rel.IsEdgeList) {
+	if !rel.IsOneToMany && !rel.IsManyToMany && !rel.IsEdgeList {
 		return nil, fmt.Errorf("unsupported relationship filter on %s", fieldName)
 	}
 	for op := range filterMap {

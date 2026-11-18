@@ -99,14 +99,6 @@ func snapshotIdentityFromContext(ctx context.Context) string {
 	return snapshot.Identity()
 }
 
-func snapshotIdentityFromSource(source any) string {
-	snapshot, ok := snapshotReadFromSource(source)
-	if !ok {
-		return ""
-	}
-	return snapshot.Identity()
-}
-
 func snapshotKeyPart(ctx context.Context) string {
 	identity := snapshotIdentityFromContext(ctx)
 	if identity == "" {

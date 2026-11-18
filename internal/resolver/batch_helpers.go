@@ -203,17 +203,6 @@ func columnsKey(columns []introspection.Column) string {
 	return strings.Join(names, ",")
 }
 
-func orderByKey(orderBy *planner.OrderBy) string {
-	if orderBy == nil {
-		return ""
-	}
-	return strings.Join(orderBy.Columns, ",") + ":" + strings.Join(orderBy.Directions, ",")
-}
-
-func firstGroupedRecord(grouped map[string][]map[string]interface{}, key interface{}) map[string]interface{} {
-	return firstGroupedRecordByTuple(grouped, []interface{}{key})
-}
-
 func firstGroupedRecordByTuple(grouped map[string][]map[string]interface{}, values []interface{}) map[string]interface{} {
 	if grouped == nil {
 		return nil

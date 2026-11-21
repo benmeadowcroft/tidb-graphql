@@ -38,6 +38,22 @@ Integration tests require TiDB Cloud Serverless credentials.
    just test-integration
    ```
 
+### Against a local TiDB container
+
+The tests also run against a standalone TiDB, e.g. `docker run -d -p 4000:4000 pingcap/tidb:v8.5.5`.
+Give `root` a password first (the helpers skip when `TIDB_PASSWORD` is empty), then:
+
+```bash
+TIDB_HOST=127.0.0.1 TIDB_USER=root TIDB_PASSWORD=<password> TIDB_TLS_MODE=false just test-integration
+```
+
+### In CI
+
+The `integration` job in [`container-and-platforms.yml`](../.github/workflows/container-and-platforms.yml)
+runs the suite this way on every PR, push to `main` and release tag, against a `pingcap/tidb`
+service container. The container image is only published if it passes. The `@asOf` tests skip
+there (see below).
+
 ### Run All Tests
 
 ```bash
@@ -61,7 +77,9 @@ The `@asOf` integration tests in [`tests/integration/asof_test.go`](./integratio
 
 Lightweight or single-process TiDB environments can lack the `tikv_gc_safe_point` metadata required for `@@tidb_snapshot`. In those environments, the `@asOf` tests intentionally skip with a clear message instead of failing the full integration suite.
 
-For full `@asOf` coverage, use a complete TiDB topology such as the Kubernetes example or another deployment that includes TiDB, PD, and TiKV.
+TiDB Cloud Starter and TiDB Cloud Zero support snapshot reads but deny `SELECT` on `mysql.tidb`. The probe treats that denial as "unknown" and goes on to try `@@tidb_snapshot` directly, so the `@asOf` tests can run there.
+
+For full `@asOf` coverage, use TiDB Cloud or a complete TiDB topology such as the Kubernetes example or another deployment that includes TiDB, PD, and TiKV.
 
 To run only the snapshot integration coverage:
 

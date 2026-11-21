@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"tidb-graphql/internal/serverapp"
 	"tidb-graphql/internal/testutil/tidbcloud"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/graphql-go/graphql"
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +54,9 @@ func requireSnapshotReadSupport(t *testing.T, db *sql.DB) {
 	switch {
 	case err == sql.ErrNoRows:
 		t.Skip(skipReason)
+	case isAccessDeniedError(err):
+		// TiDB Cloud Starter/Zero deny reads of mysql.tidb but do support snapshot
+		// reads, so fall through to the tidb_snapshot probe below.
 	case err != nil:
 		if isSnapshotUnsupportedError(err) {
 			t.Skip(skipReason)
@@ -77,6 +82,13 @@ func requireSnapshotReadSupport(t *testing.T, db *sql.DB) {
 
 	_, err = db.Exec(`SET @@tidb_snapshot = ''`)
 	require.NoError(t, err, "failed to clear tidb_snapshot after snapshot probe")
+}
+
+// isAccessDeniedError reports whether err is MySQL error 1142 (SELECT command
+// denied), which TiDB Cloud returns for reads of restricted system tables.
+func isAccessDeniedError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1142
 }
 
 func isSnapshotUnsupportedError(err error) bool {

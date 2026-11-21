@@ -7,10 +7,17 @@ Development tasks are defined in the [`justfile`](justfile) and run with
 recipes; common ones are `just build`, `just test-unit`, `just lint`, and
 `just compose-up [scenario]`. `just check` reports which optional tools are installed.
 
-On every PR, CI checks formatting (`gofmt`), that `go.mod`/`go.sum` are tidy, builds
-and vets everything (including the integration tests), runs `golangci-lint`, and runs
-the unit tests with the race detector. To catch these locally before pushing, run
-`just fmt tidy vet lint test-race`.
+CI runs these checks on every PR:
+
+- formatting (`gofmt`)
+- `go.mod` and `go.sum` are tidy
+- everything builds and passes `go vet`
+- `golangci-lint`
+- unit tests, with the race detector
+- integration tests, against a TiDB container
+
+To run them locally before you push, use `just fmt tidy vet lint test-race`.
+For the integration tests, see [tests/README.md](tests/README.md).
 
 ## Commit messages and PR titles
 

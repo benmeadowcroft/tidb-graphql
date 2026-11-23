@@ -9,7 +9,7 @@ require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/XSAM/otelsql v0.44.0
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-sql-driver/mysql v1.10.1
+	github.com/go-sql-driver/mysql v1.10.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/graphql-go/graphql v0.8.1

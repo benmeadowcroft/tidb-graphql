@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.12.9](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.8...v0.12.9) (2026-11-23)
+
+
+### Bug Fixes
+
+* **deps:** bump github.com/go-sql-driver/mysql ([#57](https://github.com/benmeadowcroft/tidb-graphql/issues/57)) ([8bc3026](https://github.com/benmeadowcroft/tidb-graphql/commit/8bc30261922d1a244c5005ece69e0c9ad3349bad))
+* **deps:** bump Go toolchain to go1.26.11 ([#52](https://github.com/benmeadowcroft/tidb-graphql/issues/52)) ([5d098da](https://github.com/benmeadowcroft/tidb-graphql/commit/5d098da4038e9ff838fa0ba99cb9dd9d53f8b63a))
+
 ## [0.12.8](https://github.com/benmeadowcroft/tidb-graphql/compare/v0.12.7...v0.12.8) (2026-11-15)
 
 
